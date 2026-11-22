@@ -40,6 +40,7 @@ pub(crate) use assemble::*;
 pub use attribution::*;
 pub use body::*;
 pub use cache::*;
+pub use full::inspect_allocations;
 pub use global_init::*;
 pub use overlay::*;
 pub use roots::*;

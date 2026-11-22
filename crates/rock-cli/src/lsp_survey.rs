@@ -131,6 +131,8 @@ struct CandResult {
     inlay_mean: f64,
     hover_mean: f64,
     compl_mean: f64,
+    snapshot_median: f64,
+    allocation_median: f64,
     samples: Vec<f64>,
 }
 
@@ -315,7 +317,13 @@ pub(crate) fn make_edit(orig: &str, f: &FnStat, kind: EditKind) -> Result<Option
     })
 }
 
-pub(crate) fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool) -> Result<()> {
+pub(crate) fn lsp_survey(
+    path: &str,
+    iters: usize,
+    warmup: usize,
+    json_out: bool,
+    allocation_hints: bool,
+) -> Result<()> {
     let dir = Path::new(path);
     if !dir.is_dir() {
         anyhow::bail!("lsp-survey expects a project directory, got `{path}`");
@@ -347,7 +355,18 @@ pub(crate) fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or(warm_file);
     let mut bone = BoneWorkspace::new();
-    bone.load_project(&warm_canon);
+    let t = Instant::now();
+    bone.update(&warm_canon, read_survey_source(&warm_canon)?);
+    let cold_ms = ms(t);
+    let t = Instant::now();
+    let snapshot = bone.allocation_snapshot(&warm_canon, [warm_canon.as_str()], allocation_hints);
+    let cold_snapshot_ms = ms(t);
+    let t = Instant::now();
+    let cold_allocations = snapshot
+        .map(|snapshot| snapshot.diagnostics())
+        .unwrap_or_default();
+    let cold_allocation_ms = ms(t);
+    let cold_allocation_diagnostics: usize = cold_allocations.values().map(Vec::len).sum();
 
     // Generate candidates: top targets by each metric x edit kind, deduped.
     let mut seen = std::collections::HashSet::new();
@@ -416,6 +435,8 @@ pub(crate) fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool
         let (mut upd, mut sem, mut inl, mut hov, mut cmp) =
             (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let mut samples = Vec::with_capacity(iters);
+        let mut snapshot_samples = Vec::with_capacity(iters);
+        let mut allocation_samples = Vec::with_capacity(iters);
         let mut last_diags = 0usize;
         for i in 0..(warmup + iters) {
             let text = if i % 2 == 0 { &edited } else { &orig };
@@ -423,7 +444,16 @@ pub(crate) fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool
             let t = Instant::now();
             let d = bone.update(&canon, owned);
             let u_ms = ms(t);
-            let dc: usize = d.iter().map(|(_, v)| v.len()).sum();
+            let t = Instant::now();
+            let snapshot = bone.allocation_snapshot(&canon, [canon.as_str()], allocation_hints);
+            let snapshot_ms = ms(t);
+            let t = Instant::now();
+            let allocations = snapshot
+                .map(|snapshot| snapshot.diagnostics())
+                .unwrap_or_default();
+            let allocation_ms = ms(t);
+            let dc: usize = d.iter().map(|(_, v)| v.len()).sum::<usize>()
+                + allocations.values().map(Vec::len).sum::<usize>();
 
             let t = Instant::now();
             let _ = bone.semantic_tokens(&canon);
@@ -448,6 +478,8 @@ pub(crate) fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool
                 hov.push(h_ms);
                 cmp.push(c_ms);
                 samples.push(u_ms + s_ms + i_ms);
+                snapshot_samples.push(snapshot_ms);
+                allocation_samples.push(allocation_ms);
                 last_diags = dc;
             }
         }
@@ -461,6 +493,10 @@ pub(crate) fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool
             }
         };
         let max = samples.iter().cloned().fold(0.0_f64, f64::max);
+        snapshot_samples.sort_by(f64::total_cmp);
+        allocation_samples.sort_by(f64::total_cmp);
+        let snapshot_median = snapshot_samples[snapshot_samples.len() / 2];
+        let allocation_median = allocation_samples[allocation_samples.len() / 2];
         results.push(CandResult {
             file: f.file.clone(),
             name: f.name.clone(),
@@ -476,6 +512,8 @@ pub(crate) fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool
             inlay_mean: mean(&inl),
             hover_mean: mean(&hov),
             compl_mean: mean(&cmp),
+            snapshot_median,
+            allocation_median,
             samples,
         });
     }
@@ -512,13 +550,16 @@ pub(crate) fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool
                     "update_mean_ms": r.update_mean, "semtok_mean_ms": r.semtok_mean,
                     "inlay_mean_ms": r.inlay_mean, "hover_mean_ms": r.hover_mean,
                     "compl_mean_ms": r.compl_mean, "samples_ms": r.samples,
+                    "allocation_median_ms": r.allocation_median, "snapshot_median_ms": r.snapshot_median,
                 })
             })
             .collect();
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
-                "project": path,
+                "project": path, "cold_ms": cold_ms, "cold_snapshot_ms": cold_snapshot_ms,
+                "cold_allocation_ms": cold_allocation_ms,
+                "allocation_hints": allocation_hints, "cold_allocation_diagnostics": cold_allocation_diagnostics,
                 "modules": mods_json,
                 "functions": fns_json,
                 "candidates": res_json,
@@ -535,6 +576,9 @@ pub(crate) fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool
         fns.len()
     );
 
+    eprintln!(
+        "  cold update {cold_ms:.2} ms, snapshot {cold_snapshot_ms:.2} ms, allocation diagnostics {cold_allocation_ms:.2} ms ({cold_allocation_diagnostics})"
+    );
     eprintln!("  biggest modules (by body bytes):");
     for m in mods.iter().take(8) {
         eprintln!(

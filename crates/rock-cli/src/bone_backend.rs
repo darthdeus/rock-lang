@@ -403,6 +403,73 @@ fn bone_check_project(path: &str, iters: usize) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn check_allocation_sites(path: &str, filter: Option<&str>) -> Result<()> {
+    use skull::allocation_report;
+    use skull::mir_emit::{FullEmit, inspect_allocations};
+    use std::io::Write as _;
+
+    let anchor = Path::new(path);
+    let sources = if anchor.is_dir() {
+        rock_host::compilation_units::load_sources(anchor)?
+    } else {
+        crate::common::single_source(path, &fs_err::read_to_string(anchor)?)
+    };
+    let (mut ws, entry) = workspace_frontend_timed(&sources)
+        .0
+        .map_err(|errors| anyhow::anyhow!("{}", render_errs(&sources, &errors)))?;
+    let errors = body_errors(&ws);
+    anyhow::ensure!(errors.is_empty(), "{}", render_errs(&sources, &errors));
+    crate::comptime::stamp_workspace(&mut ws, anchor)?;
+
+    let _scope = allocation_report::scope(true);
+    let (emit, _) = FullEmit::one_shot()
+        .project_root(anchor.is_dir().then_some(path))
+        .run(&ws, entry_module_id(&ws, entry))
+        .map_err(|error| anyhow::anyhow!("{}", render_errs(&sources, &[error])))?;
+    let report = emit.allocation_report;
+    let files: Vec<_> = ws
+        .source_modules()
+        .filter_map(|module| {
+            let file = module.file.as_str();
+            (!file.starts_with('<')).then_some(file)
+        })
+        .collect();
+    let (unpublished, _) = inspect_allocations(&ws, &files, true, Some(&report));
+    let mut rows = Vec::new();
+    for body in report.bodies.values().chain(&unpublished) {
+        let name = skull_mir::mangle::declared_name(&body.diagnostic_name);
+        for site in &body.direct_sites {
+            let (Some(span), Some(reason)) = (body.source_span(site), site.reason()) else {
+                continue;
+            };
+            let file = span.file.as_str();
+            if filter.is_none_or(|filter| {
+                filter == name
+                    || filter == body.diagnostic_name
+                    || filter == body.emitted_name
+                    || Path::new(file).ends_with(filter)
+            }) {
+                rows.push((
+                    file,
+                    span.line_range().0 + 1,
+                    span.offset_range().0,
+                    name,
+                    reason,
+                    site.id,
+                ));
+            }
+        }
+    }
+    rows.sort_unstable();
+    rows.dedup();
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    for (file, line, _, name, reason, id) in rows {
+        writeln!(out, "{file}:{line}\t{name}\t{reason}\t{id:016x}")?;
+    }
+    out.flush()?;
+    Ok(())
+}
+
 fn check_noalloc(
     mut ws: bone_semantic::inference::Workspace,
     file: ustr::Ustr,

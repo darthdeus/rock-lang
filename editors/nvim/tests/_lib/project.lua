@@ -28,10 +28,10 @@ function M.create(name, sources, manifest)
   return root
 end
 
-function M.setup(binary)
+function M.setup(binary, opts)
   vim.filetype.add({ extension = { rock = 'rock' } })
   local plugin = require('rock.client')
-  vim.lsp.config('rock', plugin.make_config({ binary = binary }))
+  vim.lsp.config('rock', plugin.make_config(vim.tbl_extend('force', { binary = binary }, opts or {})))
   plugin.setup_autocmds()
   vim.lsp.enable('rock')
 end

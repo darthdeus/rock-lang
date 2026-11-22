@@ -206,6 +206,8 @@ dependencies = [
  "rock-host",
  "rock-stdlib",
  "rock-tokenizer",
+ "serde_json",
+ "skull",
  "skull-parser",
  "tempfile",
  "ustr",

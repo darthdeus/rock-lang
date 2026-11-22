@@ -15,6 +15,9 @@ pub(crate) struct SemanticTokenCache {
 
 pub struct LspWorkspace {
     pub bone: bone_query::BoneWorkspace,
+    pub(crate) allocation_hints: bool,
+    pub(crate) open_files: HashMap<String, Vec<lsp_types::Diagnostic>>,
+    pub(crate) allocations: crate::allocations::AllocationWork,
 
     semantic_token_cache: HashMap<String, SemanticTokenCache>,
 
@@ -29,6 +32,9 @@ impl LspWorkspace {
     pub fn new() -> Self {
         Self {
             bone: bone_query::BoneWorkspace::new(),
+            allocation_hints: false,
+            open_files: HashMap::new(),
+            allocations: Default::default(),
             semantic_token_cache: HashMap::new(),
             document_versions: HashMap::new(),
             published_diagnostics: HashMap::new(),

@@ -191,8 +191,18 @@ fn run_direct(args: &Args) -> Result<()> {
             let project = args.get_project_dir_or_current()?;
             crate::package::check_project_assets(std::path::Path::new(&project))
         }
+        Check if args.alloc_sites => {
+            anyhow::ensure!(
+                args.files.len() <= 2,
+                "check --alloc-sites takes a project or file and an optional path or function filter"
+            );
+            crate::bone_backend::check_allocation_sites(
+                args.files.first().map_or(".", String::as_str),
+                args.files.get(1).map(String::as_str),
+            )
+        }
         Check => {
-            let file = args.get_required_file("compile")?;
+            let file = args.get_required_file("check")?;
             rock_cli::bone_backend::bone_check_single(file, args.iters)
         }
         Fmt => {
@@ -210,6 +220,7 @@ fn run_direct(args: &Args) -> Result<()> {
             args.iters,
             args.warmup,
             args.json(),
+            args.allocation_hints,
         ),
         BackendStats => rock_cli::backend_stats::do_backend_stats(
             &args.get_path_or_current()?,
@@ -256,6 +267,10 @@ pub struct Args {
     pub app_args: Vec<String>,
     #[arg(skip)]
     pub check: bool,
+    #[arg(skip)]
+    pub alloc_sites: bool,
+    #[arg(skip)]
+    pub allocation_hints: bool,
     /// Override a declared [build.vars] entry for this invocation (repeatable)
     #[arg(long = "var", value_name = "NAME=VALUE")]
     pub build_var_overrides: Vec<String>,
@@ -272,9 +287,6 @@ pub struct Args {
     /// Output path; package requires an explicit output directory.
     #[arg(long)]
     pub output: Option<String>,
-    /// For `rock sim`: opt into a sim-wide gross Lua allocation census and write a complete JSON artifact to PATH (discovery evidence only).
-    #[arg(long, value_name = "PATH")]
-    pub allocation_census: Option<String>,
     /// For `rock sim`: instrument compiler-known allocation sites in isolated sims and write frame-aware joined reports to DIR.
     #[arg(long, value_name = "DIR")]
     pub allocation_sites: Option<String>,
@@ -383,6 +395,20 @@ impl Args {
                             .action(clap::ArgAction::SetTrue)
                             .help("Check if files are already formatted (exit 1 if not)."),
                     )
+                } else if command.get_name() == "check" {
+                    command.arg(
+                        clap::Arg::new("alloc_sites")
+                            .long("alloc-sites")
+                            .action(clap::ArgAction::SetTrue)
+                            .help("List Lua allocation sites for [project-or-file] [path-or-function-filter]"),
+                    )
+                } else if command.get_name() == "lsp-survey" {
+                    command.arg(
+                        clap::Arg::new("allocation_hints")
+                            .long("allocation-hints")
+                            .action(clap::ArgAction::SetTrue)
+                            .help("Measure Lua allocation diagnostics for the edited file"),
+                    )
                 } else if command.get_name() == "compile" {
                     command.alias("build")
                 } else {
@@ -403,6 +429,9 @@ impl Args {
         args.app_args = many("app_args");
         args.build_var_overrides.extend(many("var"));
         args.check = args.command == Command::Fmt && sub.get_flag("check");
+        args.alloc_sites = args.command == Command::Check && sub.get_flag("alloc_sites");
+        args.allocation_hints =
+            args.command == Command::LspSurvey && sub.get_flag("allocation_hints");
         args
     }
 

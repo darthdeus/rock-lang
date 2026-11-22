@@ -139,6 +139,22 @@ pub struct AllocationSite {
     pub aggregate_fields: u32,
     pub lua_body_line: u32,
     pub local_loop_depth: u32,
+    reason: Option<String>,
+}
+
+impl AllocationSite {
+    pub(crate) fn with_reason(mut self, reason: String) -> Self {
+        self.reason = Some(reason);
+        self
+    }
+
+    pub fn reason(&self) -> Option<&str> {
+        use crate::mir_emit::noalloc::allocation_description;
+        self.reason.as_deref().or_else(|| match self.kind {
+            AllocationKind::Emitted(kind) => Some(allocation_description(kind)),
+            AllocationKind::OpaqueCall => None,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,8 +167,17 @@ pub struct AllocationCallEdge {
 pub struct AllocationBody {
     pub emitted_name: String,
     pub diagnostic_name: String,
+    pub(crate) declaration_span: Option<Span>,
     pub direct_sites: Vec<AllocationSite>,
     pub call_edges: Vec<AllocationCallEdge>,
+}
+
+impl AllocationBody {
+    pub fn source_span(&self, site: &AllocationSite) -> Option<Span> {
+        site.span
+            .filter(|span| span.file.as_str() != "<unknown>")
+            .or(self.declaration_span)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -444,10 +469,11 @@ pub(crate) fn collect_emitted_body(
                 detail: None,
                 result_use,
                 result_uses,
-                aggregate_type,
                 aggregate_fields,
                 lua_body_line: site.lua_body_line,
                 local_loop_depth: inst_loop_depths.get(&site.mir_inst).copied().unwrap_or(0),
+                reason: source_reason(&func.insts[iid], site.kind, aggregate_type.as_deref()),
+                aggregate_type,
             }
         })
         .collect::<Vec<_>>();
@@ -459,31 +485,62 @@ pub(crate) fn collect_emitted_body(
                 continue;
             }
             match &func.insts[iid] {
-                Inst::Call { func: target, .. } | Inst::CallMulti { func: target, .. } => {
-                    let callee = &ws.module(target.module).functions[target.func];
+                Inst::Call { func: target, args }
+                | Inst::CallMulti {
+                    func: target, args, ..
+                } => {
+                    let module = ws.module(target.module);
+                    let callee = &module.functions[target.func];
                     let target_name = call_target(ws, interner, func, iid, *target);
                     if callee.is_extern || callee.inline_body.is_some() || callee.is_coroutine {
-                        direct_sites.push(site(
+                        let mut finding = site(
                             emitted_name,
                             iid,
                             AllocationKind::OpaqueCall,
                             func.inst_spans.get(iid).copied(),
                             Some(target_name),
                             loop_depth,
-                        ));
+                        );
+                        let name = skull_mir::mangle::declared_name(callee.name.as_str());
+                        if callee.is_coroutine {
+                            finding.reason = Some(format!("starts coroutine `{name}`"));
+                        } else if name == "push"
+                            && module.file.as_str() == "<stdlib>/unified.rock"
+                            && skull_mir::intrinsics::is_intrinsic(callee)
+                        {
+                            finding.reason = Some("push may grow the Vec table".to_string());
+                        } else if !crate::mir_emit::noalloc::marked(callee)
+                            && !crate::mir_emit::noalloc::scalar_intrinsic(
+                                ws,
+                                module.file.as_str(),
+                                callee,
+                                func,
+                                iid,
+                                args,
+                            )
+                        {
+                            finding.reason = Some(format!("calls unverified `{name}`"));
+                        }
+                        direct_sites.push(finding);
                     } else {
                         let depth = call_edges.entry(target_name).or_default();
                         *depth = (*depth).max(loop_depth);
                     }
                 }
-                Inst::CallValue { .. } | Inst::CallValueMulti { .. } => direct_sites.push(site(
-                    emitted_name,
-                    iid,
-                    AllocationKind::OpaqueCall,
-                    func.inst_spans.get(iid).copied(),
-                    Some("indirect function value".to_string()),
-                    loop_depth,
-                )),
+                Inst::CallValue { .. } | Inst::CallValueMulti { .. } => {
+                    let mut finding = site(
+                        emitted_name,
+                        iid,
+                        AllocationKind::OpaqueCall,
+                        func.inst_spans.get(iid).copied(),
+                        Some("indirect function value".to_string()),
+                        loop_depth,
+                    );
+                    if !crate::mir_emit::noalloc::checked_integer_guard(func, iid) {
+                        finding.reason = Some("calls an unverified function value".to_string());
+                    }
+                    direct_sites.push(finding);
+                }
                 _ => {}
             }
         }
@@ -491,6 +548,10 @@ pub(crate) fn collect_emitted_body(
     Some(AllocationBody {
         emitted_name: emitted_name.to_string(),
         diagnostic_name: diagnostic_name.to_string(),
+        declaration_span: func
+            .site_owners
+            .first()
+            .map(|owner| ws.module(owner.func.module).functions[owner.func.func].name_span),
         direct_sites,
         call_edges: call_edges
             .into_iter()
@@ -500,6 +561,45 @@ pub(crate) fn collect_emitted_body(
             })
             .collect(),
     })
+}
+
+fn source_reason(
+    inst: &Inst,
+    kind: skull_codegen_lua::EmittedAllocationKind,
+    aggregate: Option<&str>,
+) -> Option<String> {
+    use skull_codegen_lua::EmittedAllocationKind as Kind;
+    match inst {
+        Inst::MaterializeValueStruct { name, .. } => {
+            return Some(format!("materializes `{name}` at a boxing boundary"));
+        }
+        Inst::MakeValueStruct {
+            name,
+            form: skull_mir::mir::ValueCtorForm::Leaves,
+            ..
+        } => {
+            return Some(format!("boxes `{name}` from scalar fields"));
+        }
+        Inst::MakeEnumDyn { ty, .. } => {
+            return Some(format!("boxes `{ty}` from a dynamic tag"));
+        }
+        Inst::ArrayPush { .. } => return Some("push may grow the Vec table".to_string()),
+        Inst::MakeEnv { fn_ref: None, .. } => {
+            return Some("boxes a shared mutable capture".to_string());
+        }
+        Inst::MakeEnv { .. } => return Some("allocates a closure environment".to_string()),
+        _ => {}
+    }
+    match (kind, aggregate) {
+        (
+            Kind::StructConstruction | Kind::ValueConstruction | Kind::EnumConstruction,
+            Some(name),
+        ) => Some(format!("constructs `{name}`")),
+        (Kind::VecColumnConstruction | Kind::VecColumnHeader, Some(name)) => {
+            Some(format!("constructs column storage for `{name}`"))
+        }
+        _ => None,
+    }
 }
 
 pub(crate) fn allocation_aggregate(inst: &Inst) -> (Option<String>, u32) {
@@ -738,6 +838,7 @@ fn site(
         aggregate_fields: 0,
         lua_body_line: 0,
         local_loop_depth,
+        reason: None,
     }
 }
 

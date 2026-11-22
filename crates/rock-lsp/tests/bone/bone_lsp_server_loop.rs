@@ -1,6 +1,7 @@
 //! The transport-free `LspServer` message loop, asserting the exact outgoing
 //! messages.
 
+use bone_core::prelude::Instant;
 use bone_query::FileUriExt;
 use lsp_server::{Message, Notification, Request, RequestId};
 use rock_lsp::LspServer;
@@ -74,6 +75,69 @@ fn diagnostics_for(out: &[Message], uri: &str) -> Vec<Value> {
         .filter(|p| p["uri"].as_str() == Some(uri))
         .flat_map(|p| p["diagnostics"].as_array().cloned().unwrap_or_default())
         .collect()
+}
+
+fn wait_for_allocation(server: &mut LspServer, uri: &str) -> Vec<Value> {
+    let deadline = Instant::now() + std::time::Duration::from_secs(8);
+    loop {
+        let mut out = Vec::new();
+        server.poll_allocations(&mut out).unwrap();
+        let diagnostics = diagnostics_for(&out, uri);
+        if !diagnostics.is_empty() {
+            return diagnostics;
+        }
+        assert!(Instant::now() < deadline, "no allocation diagnostics");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn allocation_diagnostics_use_unsaved_source_and_keep_contract_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let uri = uri_of(&dir.path().join("main.rock"));
+    let source = r#"fn values() -> [int] { [1, 2] }
+@inline fn singleton<T>(item: T) -> [T] { [item] }
+fn strings() -> [string] { singleton("x") }
+fn main() {}
+"#;
+    let (mut server, _) = LspServer::initialize(Request {
+        id: RequestId::from(1),
+        method: "initialize".to_string(),
+        params: json!({ "initializationOptions": { "allocationHints": true } }),
+    });
+
+    let out = roundtrip(&mut server, did_open(&uri, source));
+    assert!(diagnostics_for(&out, &uri).is_empty());
+    let diagnostics = wait_for_allocation(&mut server, &uri);
+    for line in [0, 1] {
+        assert!(
+            diagnostics.iter().any(|d| {
+                d["severity"] == 4
+                    && d["range"]["start"]["line"] == line
+                    && d["message"] == "constructs a Vec"
+                    && d["data"]["siteId"]
+                        .as_str()
+                        .is_some_and(|id| id.len() == 16)
+            }),
+            "{diagnostics:?}"
+        );
+    }
+
+    let checked = format!("@noalloc {source}");
+    let mut server = LspServer::new();
+    roundtrip(&mut server, did_open(&uri, source));
+    roundtrip(&mut server, did_change(&uri, &checked));
+    let diagnostics = wait_for_allocation(&mut server, &uri);
+    assert!(
+        diagnostics.iter().any(|d| {
+            d["severity"] == 1
+                && d["range"]["start"]["line"] == 0
+                && d["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("@noalloc") && m.contains("constructs a Vec"))
+        }),
+        "{diagnostics:?}"
+    );
 }
 
 /// Error and clearing diagnostics are published per file, without synthetic

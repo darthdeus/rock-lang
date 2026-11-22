@@ -83,6 +83,7 @@ pub(crate) fn emit_coroutine_with_artifact(
         interner,
         lua: String::new(),
         allocation_bodies: Vec::new(),
+        declaration_span: source_func.name_span,
     };
     out.emit(&step_name, plan.base(), &lowered.step, Some(&frame));
     let mut nested_deps = FxHashSet::default();
@@ -122,6 +123,7 @@ pub(crate) fn emit_coroutine_with_artifact(
             .push(allocation_report::AllocationBody {
                 emitted_name: plan.base().to_string(),
                 diagnostic_name: source_func.name.to_string(),
+                declaration_span: Some(source_func.name_span),
                 direct_sites: vec![site],
                 call_edges: Vec::new(),
             });
@@ -142,6 +144,7 @@ struct CoroutineLua<'a> {
     interner: &'a skull_mir::monoty::MonoInterner,
     lua: String,
     allocation_bodies: Vec<crate::allocation_report::AllocationBody>,
+    declaration_span: bone_semantic::prelude::Span,
 }
 
 impl CoroutineLua<'_> {
@@ -162,7 +165,8 @@ impl CoroutineLua<'_> {
             frame,
         );
         self.lua.push_str(&emission.lua);
-        if let Some(body) = emission.body {
+        if let Some(mut body) = emission.body {
+            body.declaration_span.get_or_insert(self.declaration_span);
             self.allocation_bodies.push(body);
         }
     }

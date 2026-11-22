@@ -1117,63 +1117,8 @@ fn summary_parses_allocation_census_and_preserves_frame_window() {
     assert_eq!(census.measured_frames, 4);
     assert_eq!(census.measured_allocation_calls, 32);
 
-    let (record, rank_values) = allocation_census_record("fixture", &summary);
-    assert_eq!(record["status"], "PASS");
-    assert_eq!(record["rendering_skipped"], true);
-    assert_eq!(record["measured_frames"], 4);
-    assert_eq!(record["gross_kb_per_frame"], 6.0);
-    assert_eq!(record["allocation_calls_per_frame"], 8.0);
-    assert_eq!(rank_values, Some((6.0, 8.0)));
-}
-
-#[test]
-fn census_missing_or_incomplete_result_is_not_a_zero_success() {
-    let missing = stopped();
-    let (record, rank_values) = allocation_census_record("missing", &missing);
-    assert_eq!(census_status(&missing), "no-verdict");
-    assert_eq!(record["status"], "no-verdict");
-    assert_eq!(record["measured_frames"], 0);
-    assert!(rank_values.is_none());
-
-    let incomplete = AllocationCensus {
-        build_sha: "abc123".into(),
-        rendering_enabled: false,
-        warmup_frames_requested: 2,
-        warmup_frames: 2,
-        frame_count: 2,
-        measured_frames: 0,
-        initialization_gross_kb: 0.0,
-        outside_frame_gross_kb: 0.0,
-        warmup_gross_kb: 1.0,
-        measured_gross_kb: 0.0,
-        total_gross_kb: 1.0,
-        measured_allocator_calls: 0,
-        measured_allocation_calls: 0,
-        measured_reallocation_calls: 0,
-        stop_sim_reached: false,
-        measurement_complete: false,
-    };
-    let incomplete = SimSummary {
-        saw_stop: true,
-        allocation_census: Some(incomplete),
-        ..SimSummary::default()
-    };
-    assert_eq!(census_status(&incomplete), "no-verdict");
-    assert!(
-        allocation_census_record("incomplete", &incomplete)
-            .1
-            .is_none()
-    );
-}
-
-#[test]
-fn census_rankings_use_the_requested_per_frame_metric() {
-    let rows = vec![
-        ("gross".to_string(), "PASS", 20.0, 1.0, 4),
-        ("calls".to_string(), "PASS", 10.0, 3.0, 4),
-    ];
-    assert_eq!(census_rankings(&rows, true)[0]["sim_name"], "gross");
-    assert_eq!(census_rankings(&rows, false)[0]["sim_name"], "calls");
+    assert_eq!(census.measured_gross_kb, 24.0);
+    assert!(summary.saw_stop && census.stop_sim_reached && census.measurement_complete);
 }
 
 #[test]

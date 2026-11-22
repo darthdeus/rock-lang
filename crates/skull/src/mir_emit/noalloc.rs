@@ -3,7 +3,7 @@ use bone_semantic::hir::{FnBackend, Function};
 use skull_codegen_lua::{EmittedAllocationKind as Kind, LuaEmission};
 use skull_mir::mir::{Block, Inst, Lit, MirFunc, Term, VALUE_INTEGER_CHECK};
 
-pub(crate) fn marked(f: &Function) -> bool {
+pub fn marked(f: &Function) -> bool {
     f.annotations.iter().any(|a| a.is_builtin("noalloc"))
 }
 
@@ -16,7 +16,7 @@ pub fn required(ws: &Workspace) -> bool {
     })
 }
 
-fn scalar_intrinsic(
+pub(crate) fn scalar_intrinsic(
     ws: &Workspace,
     file: &str,
     f: &Function,
@@ -91,6 +91,14 @@ return i"#;
     }
 }
 
+pub(crate) fn checked_integer_guard(mf: &MirFunc, call: Idx<Inst>) -> bool {
+    skull_mir::verify::checks_enabled()
+        && matches!(mf.insts[call], Inst::CallValue { callee, ref args }
+            if matches!(mf.insts[callee], Inst::Global(name) if name.as_str() == VALUE_INTEGER_CHECK)
+                && matches!(args.as_slice(), [_, unsigned]
+                    if matches!(mf.insts[*unsigned], Inst::Const(Lit::Bool(_)))))
+}
+
 pub(super) fn validate(
     ws: &Workspace,
     f: &Function,
@@ -163,14 +171,7 @@ pub(super) fn validate(
                     skull_mir::mangle::declared_name(callee.name.as_str())
                 )
             }
-            // The prelude guard returns its scalar input or raises.
-            Inst::CallValue { callee, ref args }
-                if skull_mir::verify::checks_enabled()
-                    && matches!(mf.insts[callee], Inst::Global(name) if name.as_str() == VALUE_INTEGER_CHECK)
-                    && matches!(args.as_slice(), [_, unsigned] if matches!(mf.insts[*unsigned], Inst::Const(Lit::Bool(_)))) =>
-            {
-                continue;
-            }
+            Inst::CallValue { .. } if checked_integer_guard(mf, id) => continue,
             Inst::CallValue { .. } | Inst::CallValueMulti { .. } => {
                 "calls an indirect function value".to_string()
             }
@@ -219,6 +220,16 @@ fn block_index(id: Idx<Block>) -> usize {
     u32::from(id.into_raw()) as usize
 }
 
+pub(super) fn reject_inline(f: &Function) -> CompilerError {
+    CompilerError::new_with_label(
+        f.name_span,
+        format!(
+            "`@noalloc` function `{}`: cannot verify a verbatim inline Lua body",
+            f.name
+        ),
+    )
+}
+
 pub(crate) fn reject_generated(
     f: &Function,
     site: &crate::allocation_report::AllocationSite,
@@ -236,7 +247,7 @@ pub(crate) fn reject_generated(
     )
 }
 
-fn allocation_description(kind: Kind) -> &'static str {
+pub(crate) fn allocation_description(kind: Kind) -> &'static str {
     match kind {
         Kind::StringConcat => "string concatenation",
         Kind::StringConversion => "string conversion",

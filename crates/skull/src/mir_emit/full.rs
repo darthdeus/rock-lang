@@ -608,6 +608,132 @@ fn check_noalloc_instance(
     .map(|_| ())
 }
 
+/// Check selected source bodies, including ones pruned from a runnable artifact.
+pub fn inspect_allocations(
+    ws: &Workspace,
+    files: &[&str],
+    hints: bool,
+    published: Option<&crate::allocation_report::AllocationReport>,
+) -> (
+    Vec<crate::allocation_report::AllocationBody>,
+    Vec<CompilerError>,
+) {
+    use bone_semantic::hir::FnBackend;
+    use skull_mir::lower::backend_variant_instance;
+
+    let mut roots = Vec::new();
+    let mut errors = Vec::new();
+    let mut bodies = Vec::new();
+    let mut selected = FxHashSet::default();
+    let mut has_generic = false;
+    for &file in files {
+        let Some(&mid) = ws.module_ids.get(&Ustr::from(file)) else {
+            continue;
+        };
+        let m = ws.module(mid);
+        for (func, f) in m.functions.iter() {
+            if !(hints || noalloc::marked(f))
+                || !matches!(f.backend, FnBackend::Any | FnBackend::Lua)
+                || f.annotations.iter().any(|a| a.is_builtin("gpu_only"))
+            {
+                continue;
+            }
+            if !is_generic(f)
+                && published.is_some_and(|report| report.bodies.contains_key(&mangle_fn(ws, f)))
+            {
+                continue;
+            }
+            let fref = FuncRef { module: m.id, func };
+            if f.is_extern {
+                if let Some(lib) = f.ffi_lib {
+                    match ffi_extern_wrapper(ws, fref, f, lib, hints.then_some(false)) {
+                        Ok((_, body)) => bodies.extend(body),
+                        Err(error) if error.message.starts_with("`@noalloc`") => errors.push(error),
+                        Err(_) => {}
+                    }
+                }
+                continue;
+            }
+            if f.inline_body.is_some() {
+                if noalloc::marked(f) {
+                    errors.push(noalloc::reject_inline(f));
+                }
+                continue;
+            }
+            selected.insert(fref);
+            if is_generic(f) {
+                has_generic = true;
+            } else {
+                roots.push(fref);
+            }
+        }
+    }
+    if selected.is_empty() {
+        return (bodies, errors);
+    }
+
+    if has_generic {
+        // Concrete arguments can come from callers in other files.
+        roots.extend(emission_roots(ws, None));
+    }
+    let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
+    let graph = crate::instance_graph::build_functions_in(ws, roots, interner.clone());
+    let concrete = crate::concrete_body::build(ws, &graph);
+    let (scx, cg) = early_contexts(ws, interner, ShapeOverrides::default());
+    let Ok(mut cg) = cg else {
+        return (bodies, errors);
+    };
+    cg.set_call_sccs(call_sccs(&graph));
+    let mut jobs = BTreeSet::new();
+    for instance in &graph.instances {
+        if let Ok(instance) = backend_variant_instance(ws, instance, FnBackend::Lua)
+            && selected.contains(&instance.func)
+        {
+            jobs.insert(instance);
+        }
+    }
+    jobs.extend(roots_for_inspection(ws, &selected));
+    let _report = crate::allocation_report::scope(hints);
+    let _activation = crate::allocation_report::activation_scope(false);
+    let results = par_map_with(
+        jobs.into_iter().collect(),
+        || worker_inline_cache(None),
+        |cache, instance| {
+            let f = &ws.module(instance.func.module).functions[instance.func.func];
+            if !is_cached_emitted_body(f, &instance) {
+                return (Vec::new(), None);
+            }
+            let symbol = instance.symbol(ws, scx.interner());
+            if published.is_some_and(|report| report.bodies.contains_key(&symbol)) {
+                return (Vec::new(), None);
+            }
+            let spec = (!instance.args.is_empty()).then_some(symbol.as_str());
+            match emit_body_chunk(ws, &cg, &scx, &concrete, &instance, spec, cache) {
+                Ok(chunk) => (chunk.allocation_bodies, None),
+                Err(error) if noalloc::marked(f) && error.message.starts_with("`@noalloc`") => {
+                    (Vec::new(), Some(error))
+                }
+                Err(_) => (Vec::new(), None),
+            }
+        },
+    );
+    for (chunk, error) in results {
+        bodies.extend(chunk);
+        errors.extend(error);
+    }
+    (bodies, errors)
+}
+
+fn roots_for_inspection(
+    ws: &Workspace,
+    selected: &FxHashSet<FuncRef>,
+) -> impl Iterator<Item = Instance> {
+    selected.iter().copied().filter_map(|fref| {
+        let f = &ws.module(fref.module).functions[fref.func];
+        is_cached_body(f).then(|| Instance::base(fref))
+    })
+}
+
 pub(super) fn emit_full_build(
     ws: &Workspace,
     user_mid: ModuleId,

@@ -65,3 +65,20 @@ for _, case in ipairs(cases) do
   end
   print('OK: ' .. case.name)
 end
+
+local root = project.create('allocation_hints', {
+  ['main.rock'] = 'fn values() -> [int] { [1, 2] }\nfn main() {}\n',
+})
+project.setup(project.binary(), { allocation_hints = true })
+vim.cmd.edit(vim.fn.fnameescape(root .. '/main.rock'))
+local buf = vim.api.nvim_get_current_buf()
+assert(vim.wait(8000, function()
+  for _, diagnostic in ipairs(vim.diagnostic.get(buf)) do
+    if diagnostic.source == 'rock allocation'
+        and diagnostic.severity == vim.diagnostic.severity.HINT
+        and diagnostic.message == 'constructs a Vec' then
+      assert_range(diagnostic)
+      return true
+    end
+  end
+end, 50), 'expected a Lua allocation hint')

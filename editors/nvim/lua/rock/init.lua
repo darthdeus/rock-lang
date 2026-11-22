@@ -39,6 +39,7 @@ M.defaults = {
   -- Tags combine open package roots and this upward-search fallback; false or '' disables them.
   tags = './.rock.tags;',
   -- Type ranking precedes fuzzy score; false leaves nvim-cmp untouched.
+  allocation_hints = false,
   cmp_type_priority = true,
 }
 

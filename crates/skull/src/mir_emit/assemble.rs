@@ -295,7 +295,7 @@ fn source_functions(
     })
 }
 
-fn ffi_extern_wrapper(
+pub(super) fn ffi_extern_wrapper(
     ws: &Workspace,
     self_ref: FuncRef,
     f: &bone_semantic::hir::Function,
@@ -334,14 +334,16 @@ fn ffi_extern_wrapper(
                         Kind::FfiArray,
                         line,
                         AllocationResultUse::DirectCall,
-                    ),
+                    )
+                    .with_reason("allocates an FFI return buffer".to_string()),
                     report::generated_site(
                         &nm,
                         f.name_span,
                         Kind::FfiReturnValue,
                         line + 2,
                         AllocationResultUse::Returned,
-                    ),
+                    )
+                    .with_reason(format!("copies `{key}` returned by FFI")),
                 ]
             });
             if let Some([array, value]) = &sites
@@ -362,6 +364,7 @@ fn ffi_extern_wrapper(
             allocation = sites.map(|sites| report::AllocationBody {
                 emitted_name: nm.clone(),
                 diagnostic_name: f.name.to_string(),
+                declaration_span: Some(f.name_span),
                 direct_sites: sites.into(),
                 call_edges: Vec::new(),
             });
@@ -564,13 +567,7 @@ fn place_function<'c>(
     }
     if let Some((_, body)) = f.inline_body {
         if noalloc::marked(f) {
-            return Placement::Text(Err(CompilerError::new_with_label(
-                f.name_span,
-                format!(
-                    "`@noalloc` function `{}`: cannot verify a verbatim inline Lua body",
-                    f.name
-                ),
-            )));
+            return Placement::Text(Err(noalloc::reject_inline(f)));
         }
         if !emits_foreign_definition(ws, &cache.lua_view, needed_foreign, self_ref) {
             return Placement::None;

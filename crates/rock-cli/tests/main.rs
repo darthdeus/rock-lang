@@ -1,5 +1,6 @@
 // One harness avoids linking the compiler into a separate binary per test file.
 
+mod allocation_sites;
 mod compile_budget;
 mod deep_programs;
 mod differential;

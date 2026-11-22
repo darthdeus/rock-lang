@@ -828,7 +828,6 @@ fn run_named_entry(
     env_pairs: Vec<(String, String)>,
     source_file: Option<PathBuf>,
     stone: Option<&mut crate::skull_backend::IncrementalProject>,
-    census_warmup_frames: Option<usize>,
     recorder: Option<&SimRunRecorder>,
     occurrence_id: Option<u64>,
 ) -> Result<(String, SimSummary)> {
@@ -857,7 +856,6 @@ fn run_named_entry(
         buffered,
         update_snapshots,
         output,
-        census_warmup_frames,
         stone: lane,
         recorder,
     })?;
@@ -1103,7 +1101,6 @@ enum SimMode<'a> {
         full_asset_jobs: usize,
         recorder: &'a SimRunRecorder,
     },
-    Census,
     Sites(&'a Path),
 }
 
@@ -1201,7 +1198,6 @@ impl SimRun<'_> {
                     recorder,
                     ..
                 } => (quiet, streaming, update_snapshots, Some(recorder)),
-                SimMode::Census => (true, false, false, None),
                 SimMode::Sites(artifact_dir) => {
                     let stem = allocation_site_artifact_stem(i, name);
                     let activation = artifact_dir.join(format!("{stem}.activation.tsv"));
@@ -1225,7 +1221,6 @@ impl SimRun<'_> {
                 env,
                 registry.source_for(name, &source_root),
                 stone,
-                matches!(mode, SimMode::Census).then_some(DEFAULT_SIM_ALLOCATION_WARMUP_FRAMES),
                 recorder,
                 occurrence_id,
             )?;
@@ -1465,279 +1460,6 @@ fn run_reload_lane_serially<T>(
         .collect()
 }
 
-const DEFAULT_SIM_ALLOCATION_WARMUP_FRAMES: usize = 2;
-
-fn census_status(summary: &SimSummary) -> &'static str {
-    if summary.timed_out {
-        "timeout"
-    } else if summary.process_failure_code.is_some() {
-        "process failure"
-    } else if !summary.saw_stop {
-        "no-verdict"
-    } else if summary.has_failures() {
-        "FAIL"
-    } else if summary.allocation_census.is_none()
-        || summary.allocation_census.as_ref().unwrap().measured_frames == 0
-        || !summary
-            .allocation_census
-            .as_ref()
-            .unwrap()
-            .measurement_complete
-    {
-        "no-verdict"
-    } else {
-        "PASS"
-    }
-}
-
-fn census_failure_messages(summary: &SimSummary) -> Vec<String> {
-    summary
-        .errors
-        .iter()
-        .chain(&summary.expects_fail)
-        .map(|m| {
-            if m.site.is_empty() {
-                m.message.clone()
-            } else {
-                format!("{}: {}", m.site, m.message)
-            }
-        })
-        .collect()
-}
-
-fn allocation_census_record(
-    name: &str,
-    summary: &SimSummary,
-) -> (serde_json::Value, Option<(f64, f64)>) {
-    let census = summary.allocation_census.as_ref();
-    let measured_frames = census.map_or(0, |c| c.measured_frames);
-    let per_frame = |total: f64| {
-        if measured_frames > 0 {
-            total / measured_frames as f64
-        } else {
-            0.0
-        }
-    };
-    let measured_gross_kb = census.map_or(0.0, |c| c.measured_gross_kb);
-    let measured_allocator_calls = census.map_or(0, |c| c.measured_allocator_calls);
-    let measured_allocation_calls = census.map_or(0, |c| c.measured_allocation_calls);
-    let measured_reallocation_calls = census.map_or(0, |c| c.measured_reallocation_calls);
-    let gross_kb_per_frame = per_frame(measured_gross_kb);
-    let allocator_calls_per_frame = per_frame(measured_allocator_calls as f64);
-    let allocation_calls_per_frame = per_frame(measured_allocation_calls as f64);
-    let reallocation_calls_per_frame = per_frame(measured_reallocation_calls as f64);
-    let record = serde_json::json!({
-        "sim_name": name,
-        "process_id": summary.process_id,
-        "build_sha": census.map(|c| c.build_sha.clone()),
-        "status": census_status(summary),
-        "sim_verdict": if entry_passed(summary) { "PASS" } else { "FAIL" },
-        "failure_messages": census_failure_messages(summary),
-        "stop_sim_reached": summary.saw_stop,
-        "rendering_enabled": census.map(|c| c.rendering_enabled),
-        "rendering_skipped": census.map(|c| !c.rendering_enabled),
-        "measurement_complete": census.map(|c| c.measurement_complete),
-        "warmup_frames_requested": census.map_or(0, |c| c.warmup_frames_requested),
-        "warmup_frames": census.map_or(0, |c| c.warmup_frames),
-        "frame_count": census.map_or(0, |c| c.frame_count),
-        "measured_frames": measured_frames,
-        "initialization_gross_kb": census.map_or(0.0, |c| c.initialization_gross_kb),
-        "outside_frame_gross_kb": census.map_or(0.0, |c| c.outside_frame_gross_kb),
-        "warmup_gross_kb": census.map_or(0.0, |c| c.warmup_gross_kb),
-        "measured_gross_kb": measured_gross_kb,
-        "total_gross_kb": census.map_or(0.0, |c| c.total_gross_kb),
-        "gross_kb_per_frame": gross_kb_per_frame,
-        "measured_allocator_calls": measured_allocator_calls,
-        "measured_allocation_calls": measured_allocation_calls,
-        "measured_reallocation_calls": measured_reallocation_calls,
-        "allocator_calls_per_frame": allocator_calls_per_frame,
-        "allocation_calls_per_frame": allocation_calls_per_frame,
-        "reallocation_calls_per_frame": reallocation_calls_per_frame,
-    });
-    let rank_values = census
-        .filter(|c| c.measurement_complete && c.measured_frames > 0)
-        .map(|_| (gross_kb_per_frame, allocation_calls_per_frame));
-    (record, rank_values)
-}
-
-fn compile_sim_diagnostic(
-    project: &str,
-    allocation_manifest: Option<&Path>,
-) -> Result<(PathBuf, TempDir, CompiledSims)> {
-    let project_path = rock_engine_host::project::resolve_project_dir(project)?;
-    rock_engine_host::engine_build::build_engine_libs(&project_path.to_string_lossy())?;
-    let out_dir = sim_output_dir()?;
-    let compiled = compile_sims_with_allocation(
-        project_path.clone(),
-        out_dir.path().to_path_buf(),
-        allocation_manifest,
-        &[],
-    )?;
-    Ok((project_path, out_dir, compiled))
-}
-
-fn census_rankings(
-    ranked: &[(String, &'static str, f64, f64, usize)],
-    by_gross: bool,
-) -> Vec<serde_json::Value> {
-    let mut rows = ranked.to_vec();
-    rows.sort_by(|a, b| {
-        let left = if by_gross { a.2 } else { a.3 };
-        let right = if by_gross { b.2 } else { b.3 };
-        right
-            .partial_cmp(&left)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.0.cmp(&b.0))
-    });
-    rows.into_iter()
-        .enumerate()
-        .map(|(rank, (name, status, gross, calls, frames))| {
-            serde_json::json!({
-                "rank": rank + 1,
-                "sim_name": name,
-                "status": status,
-                "gross_kb_per_frame": gross,
-                "allocation_calls_per_frame": calls,
-                "measured_frames": frames,
-            })
-        })
-        .collect()
-}
-
-pub(crate) fn do_run_allocation_census(
-    project: &str,
-    names: &[String],
-    output_path: &str,
-    jobs: Option<usize>,
-) -> Result<()> {
-    let path = PathBuf::from(output_path);
-    if path.exists() {
-        std::fs::remove_file(&path)
-            .with_context(|| format!("removing stale census artifact `{}`", path.display()))?;
-    }
-    let (project_path, out_dir, compiled) = compile_sim_diagnostic(project, None)?;
-    let registry = SimRegistry::from(compiled.registry);
-    let selected = registry.select(&project_path, names)?;
-    let occurrences: Vec<_> = selected.iter().map(|name| (name.as_str(), None)).collect();
-    let results = SimRun {
-        project: &project_path,
-        output: out_dir.path(),
-        registry: &registry,
-        entries: &occurrences,
-        jobs: resolve_pool_jobs(jobs, None, false)?,
-    }
-    .execute(SimMode::Census, Some(compiled.stone))?;
-    let project = project_path.to_string_lossy();
-
-    let mut records = Vec::with_capacity(selected.len());
-    let mut ranked = Vec::new();
-    let mut failed = Vec::new();
-    for (name, result) in selected.iter().zip(results) {
-        match result {
-            Ok((display_name, summary)) => {
-                let (record, rank_values) = allocation_census_record(&display_name, &summary);
-                let status = census_status(&summary);
-                if status != "PASS" {
-                    failed.push(format!("{display_name} ({status})"));
-                }
-                if let Some((gross, calls)) = rank_values {
-                    ranked.push((
-                        display_name,
-                        status,
-                        gross,
-                        calls,
-                        record["measured_frames"].as_u64().unwrap_or(0) as usize,
-                    ));
-                }
-                records.push(record);
-            }
-            Err(error) => {
-                failed.push(format!("{name} (process failure)"));
-                let (mut record, _) = allocation_census_record(name, &SimSummary::default());
-                record["status"] = "process failure".into();
-                record["failure_messages"] = serde_json::json!([error.to_string()]);
-                record["measurement_complete"] = false.into();
-                record["warmup_frames_requested"] = DEFAULT_SIM_ALLOCATION_WARMUP_FRAMES.into();
-                records.push(record);
-            }
-        }
-    }
-
-    let ranked_names: std::collections::HashSet<&str> = ranked
-        .iter()
-        .map(|(name, _, _, _, _)| name.as_str())
-        .collect();
-    let excluded: Vec<serde_json::Value> = records
-        .iter()
-        .filter_map(|record| {
-            let name = record["sim_name"].as_str()?;
-            if ranked_names.contains(name) {
-                return None;
-            }
-            let reason = if record["status"] == "no-verdict" {
-                "no complete measured window"
-            } else if record["status"] == "timeout" {
-                "timeout"
-            } else if record["status"] == "process failure" {
-                "process failure"
-            } else {
-                "zero measured frames or missing census"
-            };
-            Some(
-                serde_json::json!({"sim_name": name, "status": record["status"], "reason": reason}),
-            )
-        })
-        .collect();
-    let artifact = serde_json::json!({
-        "schema": "rock.sim-allocation-census.v1",
-        "project": project,
-        "examined": selected.len(),
-        "sensor": {
-            "accounting": "gross_lua_allocator_requests",
-            "jit": true,
-            "trace_observer": false,
-            "warmup_frames_requested": DEFAULT_SIM_ALLOCATION_WARMUP_FRAMES,
-            "final_frame": "after_deferred_stop_sim",
-            "text_layout_sim_probes": false,
-            "imgui_sim_probes": false,
-        },
-        "records": records,
-        "rankings": {
-            "eligible_records": ranked.len(),
-            "by_gross_kb_per_frame": census_rankings(&ranked, true),
-            "by_allocation_calls_per_frame": census_rankings(&ranked, false),
-            "excluded": excluded,
-        },
-        "interpretation": "Discovery evidence only. Sims differ in workload, duration, rendering mode, trace warmup, and accelerated game time; these values are not interchangeable gameplay benchmarks and are not regression thresholds.",
-    });
-    if let Some(parent) = path.parent() {
-        fs_err::create_dir_all(parent)?;
-    }
-    let bytes = serde_json::to_vec_pretty(&artifact).context("serialize allocation census")?;
-    fs_err::write(&path, bytes)
-        .with_context(|| format!("writing allocation census `{}`", path.display()))?;
-    if !path.is_file() {
-        return Err(anyhow!(
-            "allocation census write did not recreate `{}`",
-            path.display()
-        ));
-    }
-    println!(
-        "[sim] allocation census: {} examined, {} complete ranked records, artifact={}",
-        selected.len(),
-        ranked.len(),
-        path.display()
-    );
-    if !failed.is_empty() {
-        return Err(anyhow!(
-            "allocation census recorded {} failed/incomplete sims: {}",
-            failed.len(),
-            failed.join(", ")
-        ));
-    }
-    Ok(())
-}
-
 fn allocation_site_artifact_stem(index: usize, name: &str) -> String {
     let safe = name
         .chars()
@@ -1778,7 +1500,15 @@ pub(crate) fn do_run_allocation_sites(
     let artifact_dir = fs_err::canonicalize(&artifact_dir)?;
     let manifest_path = artifact_dir.join("manifest.txt");
 
-    let (project_path, out_dir, compiled) = compile_sim_diagnostic(project, Some(&manifest_path))?;
+    let project_path = rock_engine_host::project::resolve_project_dir(project)?;
+    rock_engine_host::engine_build::build_engine_libs(&project_path.to_string_lossy())?;
+    let out_dir = sim_output_dir()?;
+    let compiled = compile_sims_with_allocation(
+        project_path.clone(),
+        out_dir.path().to_path_buf(),
+        Some(&manifest_path),
+        &[],
+    )?;
     let project = project_path.to_string_lossy();
     let registry = SimRegistry::from(compiled.registry);
     let artifact_fingerprint = compiled.stone.artifact_fingerprint()?;
@@ -2613,17 +2343,11 @@ struct ChildConfig<'a> {
     buffered: bool,
     update_snapshots: bool,
     output: &'a str,
-    census_warmup_frames: Option<usize>,
     stone: Option<&'a mut crate::skull_backend::IncrementalProject>,
     recorder: Option<&'a SimRunRecorder>,
 }
 
-fn child_command(
-    part: &WorkerPart,
-    output: &str,
-    quiet: bool,
-    census_warmup_frames: Option<usize>,
-) -> (std::process::Command, PathBuf) {
+fn child_command(part: &WorkerPart, output: &str, quiet: bool) -> (std::process::Command, PathBuf) {
     let out_str = part.out_dir.to_string_lossy().to_string();
     let preset_env: Vec<(String, String)> = part
         .env
@@ -2647,20 +2371,9 @@ fn child_command(
         .env("STONE_AUDIO_STUB", unstub_override("STONE_AUDIO_STUB"))
         .envs(preset_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .env("FPS_LOG", "0")
+        .env("STONE_SIM_ALLOCATION_CENSUS", "0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-
-    match census_warmup_frames {
-        Some(warmup) => {
-            cmd.env("STONE_SIM_ALLOCATION_CENSUS", "1")
-                .env("STONE_SIM_ALLOCATION_WARMUP_FRAMES", warmup.to_string())
-                .env("STONE_TEXT_LAYOUT_SIM_PROBES", "0")
-                .env("STONE_IMGUI_SIM_PROBES", "0");
-        }
-        None => {
-            cmd.env("STONE_SIM_ALLOCATION_CENSUS", "0");
-        }
-    }
 
     let rock_log_preset = preset_env.iter().any(|(k, _)| k == "ROCK_LOG");
     if quiet && !rock_log_preset && std::env::var_os("ROCK_LOG").is_none() {
@@ -3061,7 +2774,7 @@ fn run_child(mut config: ChildConfig<'_>) -> Result<SimSummary> {
         )?;
     }
 
-    let (mut cmd, lua_file) = child_command(part, output, quiet, config.census_warmup_frames);
+    let (mut cmd, lua_file) = child_command(part, output, quiet);
 
     let (mut worker_slot, admission_ms, checks_ms, waits) = acquire_worker_slot(&part.name)?;
     let worker_attempt = recorder

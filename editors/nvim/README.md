@@ -68,6 +68,28 @@ cd ~/projects/rock-lang && cargo build --bin rock
 **Remove** any existing inline `vim.lsp.config('rock', ...)` /
 `lspconfig.rock.setup` in your dotfiles — this plugin owns that now.
 
+## Allocation diagnostics
+
+Set `allocation_hints = true` in `require('rock').setup({...})` and run
+`:RockRestart`. Other LSP clients can send
+`initializationOptions: { allocationHints: true }` at startup. The default is
+off because a buffer can have many allocation sites and the analysis costs
+more than a normal type-checking update.
+
+Rock publishes Hint diagnostics in open buffers for allocations in optimized
+Lua, such as `constructs a Vec`, `boxes Pair from scalar fields` and
+`push may grow the Vec table`. The diagnostics include possible growth and
+calls into unverified code. A LuaJIT trace can eliminate an allocation at
+runtime. Violations of `@noalloc` are errors. In Neovim, use
+`vim.diagnostic.open_float()` to read the hints at the cursor.
+
+`rock check --alloc-sites [project-or-file] [path-or-function-filter]` lists
+the same kinds of findings on stdout, one per line. The tab-separated columns
+are file and one-based line, function, reason, and a hexadecimal site ID.
+IDs match the runtime manifest for the same emitted body and build inputs.
+IDs for bodies that are pruned from a program are available only in the
+source report. Use `rock sim --allocation-sites` for measured site activity.
+
 ## Tests
 
 The suite is `tests/*_spec.lua`, each one a headless nvim process driven

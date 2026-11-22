@@ -306,6 +306,7 @@ function M.make_config(opts)
     filetypes = { 'rock' },
     root_markers = { 'stick.toml', 'project.toml', '.git' },
     capabilities = opts_cache.capabilities,
+    init_options = { allocationHints = opts_cache.allocation_hints == true },
     on_attach = function(client, bufnr)
       state.set_buffer(bufnr, {
         attached = true,

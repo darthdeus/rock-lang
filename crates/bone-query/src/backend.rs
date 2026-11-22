@@ -969,6 +969,43 @@ impl BoneWorkspace {
         })
     }
 
+    pub fn project_root(&self, path: &str) -> PathBuf {
+        Self::root_for(&self.canon(path))
+    }
+
+    pub fn has_noalloc_contract(&self, anchor: &str, files: &[String]) -> bool {
+        self.project(&self.canon(anchor)).is_some_and(|project| {
+            files
+                .iter()
+                .any(|file| has_noalloc(project.session.workspace(), &self.canon(file)))
+        })
+    }
+
+    /// Own a checked snapshot so codegen can run while the session keeps editing.
+    pub fn allocation_snapshot<'a>(
+        &self,
+        anchor: &str,
+        open_files: impl IntoIterator<Item = &'a str>,
+        hints: bool,
+    ) -> Option<AllocationSnapshot> {
+        let proj = self.project(&self.canon(anchor))?;
+        let ws = proj.session.workspace();
+        let texts: HashMap<_, _> = open_files
+            .into_iter()
+            .map(|file| self.canon(file))
+            .filter(|file| !proj.rejected_updates.contains_key(file))
+            .filter_map(|file| Some((file.clone(), proj.texts.get(&file)?)))
+            .collect();
+        if texts.is_empty() || !hints && !texts.keys().any(|file| has_noalloc(ws, file)) {
+            return None;
+        }
+        Some(AllocationSnapshot {
+            ws: ws.clone(),
+            texts: texts.into_iter().map(|(k, v)| (k, v.clone())).collect(),
+            hints,
+        })
+    }
+
     /// All diagnostics for a single file: typecheck errors plus hole warnings/hints.
     pub fn diagnostics_for(&self, path: &str) -> Vec<Diagnostic> {
         let path_c = self.canon(path);
@@ -2816,6 +2853,78 @@ pub(crate) fn expected_for_anchor<'a>(
         }
     };
     ExpectedArg::for_slot(ws, mid, inf, offset, slot)
+}
+
+fn has_noalloc(ws: &Workspace, file: &str) -> bool {
+    ws.module_ids.get(&Ustr::from(file)).is_some_and(|&mid| {
+        ws.module(mid)
+            .functions
+            .iter()
+            .any(|(_, f)| skull::mir_emit::noalloc::marked(f))
+    })
+}
+
+pub struct AllocationSnapshot {
+    ws: Workspace,
+    texts: HashMap<String, String>,
+    hints: bool,
+}
+
+impl AllocationSnapshot {
+    pub fn diagnostics(self) -> HashMap<String, Vec<Diagnostic>> {
+        let selected: Vec<_> = self.texts.keys().map(String::as_str).collect();
+        let (bodies, errors) =
+            skull::mir_emit::inspect_allocations(&self.ws, &selected, self.hints, None);
+        let mut out: HashMap<String, Vec<Diagnostic>> = HashMap::new();
+        let text_of = |f: &str| self.texts.get(f).map(String::as_str);
+        let mut ids = std::collections::HashSet::new();
+        for body in bodies {
+            for site in &body.direct_sites {
+                let (Some(span), Some(reason)) = (body.source_span(site), site.reason()) else {
+                    continue;
+                };
+                if self.texts.contains_key(span.file.as_str()) && ids.insert(site.id) {
+                    let diagnostic = Diagnostic {
+                        range: span_range(&span, &text_of),
+                        severity: Some(DiagnosticSeverity::HINT),
+                        source: Some("rock allocation".to_string()),
+                        message: reason.to_string(),
+                        data: Some(serde_json::json!({ "siteId": format!("{:016x}", site.id) })),
+                        ..Default::default()
+                    };
+                    out.entry(editor_path(span.file.as_str()).into_owned())
+                        .or_default()
+                        .push(diagnostic);
+                }
+            }
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for error in errors
+            .iter()
+            .flat_map(|error| std::iter::once(error).chain(&error.siblings))
+        {
+            for (file, diag) in compiler_error_to_diagnostics(error, &text_of) {
+                if self.texts.contains_key(file.as_str())
+                    && seen.insert((file, diag.range, diag.message.clone()))
+                {
+                    out.entry(editor_path(file.as_str()).into_owned())
+                        .or_default()
+                        .push(diag);
+                }
+            }
+        }
+        for diagnostics in out.values_mut() {
+            diagnostics.sort_by(|a, b| {
+                (a.range.start, a.range.end, &a.message).cmp(&(
+                    b.range.start,
+                    b.range.end,
+                    &b.message,
+                ))
+            });
+        }
+        out
+    }
 }
 
 /// `CompilerError.location` is 0-based in line and col, like LSP, so it passes

@@ -13,19 +13,21 @@ autotests = false
 # the pure engine; this crate is the only place that knows about `lsp_types`.
 [features]
 # Forward bone's single-threaded shim for clean profiling (see single-threaded profiling).
-sequential = ["bone-semantic/sequential"]
+sequential = ["bone-semantic/sequential", "skull/sequential"]
 
 [dependencies]
 bone-core = { workspace = true }
 bone-semantic = { workspace = true }
 bone-incremental = { path = "../bone-incremental" }
 bone-lints = { workspace = true }
+skull = { workspace = true }
 skull-parser = { workspace = true }
 rock-tokenizer = { workspace = true }
 rock-host = { workspace = true }
 rock-stdlib = { workspace = true }
 rock-core = { workspace = true }
 lsp-types = { workspace = true }
+serde_json = { workspace = true }
 
 ustr = { workspace = true }
 log = { workspace = true }
