@@ -12,7 +12,10 @@ fn world_flush_fixture(body: fn() -> ()) {
 }
 
 fn world_flush_frame(points: [Vec2]) -> [float] {
+    let canvas = CURRENT_CANVAS_HANDLE
     render_batches()
+    assert_eq(CURRENT_CANVAS_HANDLE, canvas)
+    assert(WATCHER.current_shader_name == null, "the world flush unbinds its shader")
     let out: [float] = []
     for p in points {
         let texel = world_to_scene_texel(p)
