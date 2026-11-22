@@ -1,0 +1,66 @@
+struct AbiRecord { value: int?, flag: bool? }
+struct AbiOwner { child: AbiRecord? }
+
+@nomangle fn record_abi_read(row: AbiRecord) -> int? { row.value }
+@nomangle fn record_abi_write(row: AbiRecord, value: int?) { row.value = value }
+@nomangle fn record_abi_project(owner: AbiOwner?) -> int? { owner?.child?.value }
+@nomangle fn record_abi_make() -> AbiRecord { AbiRecord { value: 7, flag: false } }
+
+inline(lua) fn record_abi_host_checks() = """
+    local row = record_abi_make()
+    assert(record_abi_read(row) == 7)
+    assert(rawget(row, "flag") == false)
+    assert(record_abi_project({child = row}) == 7)
+    assert(record_abi_project({}) == nil and record_abi_project(nil) == nil)
+    record_abi_write(row, nil)
+    assert(rawget(row, "value") == nil)
+    local alias = row
+    rawset(alias, "value", 29)
+    assert(record_abi_read(row) == 29)
+    rawset(alias, "value", nil)
+    assert(record_abi_read(row) == nil)
+
+    local reads, writes = 0, 0
+    local foreign = setmetatable({[1] = 99}, {
+        __index = function(_, key)
+            assert(key == "value")
+            reads = reads + 1
+            return 13
+        end,
+        __newindex = function(_, key, value)
+            assert(key == "value" and value == 23)
+            writes = writes + 1
+        end,
+    })
+    assert(record_abi_read(foreign) == 13 and reads == 1)
+    assert(record_abi_project({child = foreign}) == 13 and reads == 2)
+    record_abi_write(foreign, 23)
+    assert(writes == 1 and foreign[1] == 99)
+"""
+
+struct ErasedAbiRecord { value: int? }
+
+inline(lua) fn record_abi_edit_erased(alias: any, value: int?) = """
+    rawset(alias, "value", value)
+"""
+
+inline(lua) fn record_abi_make_erased() -> any = """
+    return { [1] = 99, value = 13 }
+"""
+
+@test(backends = "lua")
+fn lua_record_abi_preserves_named_foreign_and_published_records() {
+    record_abi_host_checks()
+}
+
+@test(backends = "lua")
+fn lua_record_abi_preserves_named_keys_through_any() {
+    let row = ErasedAbiRecord { value: 7 }
+    let alias: any = row
+    record_abi_edit_erased(alias, 29)
+    assert(row.value == 29)
+    record_abi_edit_erased(alias, null)
+    assert(row.value == null)
+    let foreign = cast<ErasedAbiRecord>(record_abi_make_erased())
+    assert(foreign.value == 13)
+}
