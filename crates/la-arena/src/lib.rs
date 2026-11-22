@@ -183,11 +183,6 @@ impl<T> IdxRange<T> {
         Idx::from_raw(RawIdx::from(self.range.0))
     }
 
-    /// Returns the end of the index range.
-    pub fn end(&self) -> Idx<T> {
-        Idx::from_raw(RawIdx::from(self.range.1))
-    }
-
     /// Returns the raw index range.
     pub fn make_range(&self) -> Range<u32> {
         self.range.0..self.range.1
@@ -278,11 +273,6 @@ impl<T> Arena<T> {
         Arena {
             data: Vec::with_capacity(capacity),
         }
-    }
-
-    /// Empties the arena, removing all contained values.
-    pub fn clear(&mut self) {
-        self.data.clear();
     }
 
     /// Drops every value allocated at or after index `len`; indices below it
