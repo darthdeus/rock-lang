@@ -195,9 +195,10 @@ pub fn task_poll_step<R>(pc: Task<R>, dt: float, frame: int) -> bool {
     return true
 }
 
-@nomangle fn task_owned_step(task: Task, dt: float, frame: int, prime: bool) -> bool {
-    if prime { return task_poll_step(task, dt, frame) }
-    return task_tick_step(task, dt, frame)
+@nomangle fn task_owned_step(task: Task, dt: float, frame: int?, scheduled: bool) -> bool {
+    let stamp = frame ?? return poll(task, dt)
+    if scheduled { return task_tick_step(task, dt, stamp) }
+    return task_poll_step(task, dt, stamp)
 }
 
 fn task_step_error(task: Task, message: string) {
@@ -208,14 +209,14 @@ fn task_step_error(task: Task, message: string) {
 @intrinsic @nomangle inline(lua) fn task_protected_step(
     task: Task,
     dt: float,
-    frame: int,
-    prime: bool,
+    frame: int?,
+    scheduled: bool,
     on_error: fn(Task, string) -> (),
-) -> bool = """
-    local ok, live = pcall(task_owned_step, task, dt, frame, prime)
+) -> bool? = """
+    local ok, live = pcall(task_owned_step, task, dt, frame, scheduled)
     if not ok then
         on_error(task, tostring(live))
-        return false
+        return nil
     end
     return live
 """
@@ -223,21 +224,50 @@ fn task_step_error(task: Task, message: string) {
 @intrinsic @nomangle inline(js) fn task_protected_step(
     task: Task,
     dt: float,
-    frame: int,
-    prime: bool,
+    frame: int?,
+    scheduled: bool,
     on_error: fn(Task, string) -> (),
-) -> bool = """
+) -> bool? = """
     try {
-        return task_owned_step(task, dt, frame, prime);
+        return task_owned_step(task, dt, frame, scheduled);
     } catch (err) {
         __rock_call(on_error, task, String(err));
-        return false;
+        return null;
     }
 """
 
+/// Prime a manually driven task immediately. A failed prime returns null.
+/// A coroutine that completes successfully during prime still returns its handle.
+pub fn start_protected(coroutine: Coroutine<Wait>, poller: CoroutinePoller) -> Task? {
+    if poller.scope.disposed {
+        kill(coroutine)
+        log_error("CO", "coroutine errored: cannot start a task in a disposed poller")
+        return null
+    }
+    let task = task_new_in(poller.scope, coroutine, poller.clock, Wait::Frame)
+    if task_protected_step(task, 0.0, null, false, task_step_error) == null {
+        task_abandon(task)
+        return null
+    }
+    return task
+}
+
+/// Advance a manually driven task like poll, logging and retiring it on failure.
+pub fn poll_protected(task: Task, dt: float, owner_clock: TaskClock? = null) -> bool {
+    let frame: int? = null
+    if let clock = owner_clock {
+        let state = task.state.get() ?? return false
+        if task_clock_same(state.clock, clock) && !clock.retired { frame = clock.frame }
+    }
+    let live = task_protected_step(task, dt, frame, false, task_step_error) ?? {
+        task_abandon(task)
+        return false
+    }
+    return live
+}
+
 fn task_prime_owned(task: Task) {
-    let state = task.state.get() ?? return
-    if !task_protected_step(task, 0.0, state.clock.frame_index(), true, task_step_error) {
+    if task_protected_step(task, 0.0, null, false, task_step_error) != true {
         task_abandon(task)
     }
 }
@@ -307,7 +337,7 @@ pub fn coroutine_poller_update(poller: CoroutinePoller) {
                     entry.last = task
                 }
             } else { entry.last = task }
-            if !task_protected_step(task, delta, frame, false, task_step_error) {
+            if task_protected_step(task, delta, frame, true, task_step_error) != true {
                 if let current = entry.live_task() {
                     entry.last = current
                     if task_same_instance(current, task) {

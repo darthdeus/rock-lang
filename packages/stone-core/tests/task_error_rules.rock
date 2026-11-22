@@ -183,3 +183,45 @@ fn poller_parent_resume_error_cancels_child_exactly_once() {
     assert_eq(probe.defers, 1)
     assert_eq(probe.killed, 1)
 }
+
+@test
+fn protected_manual_tasks_report_and_retire_once() {
+    let poller = CoroutinePoller { clock: task_clock_new() }
+    let body_probe = TaskErrorProbe {}
+    let wait_probe = TaskErrorProbe {}
+    let body = start_protected(task_error_child(body_probe), poller)
+    let waiting = start_protected(task_error_waiting(wait_probe), poller)
+    let body_task = body.unwrap()
+    let wait_task = waiting.unwrap()
+
+    task_error_logs_begin()
+    let prime = start_protected(task_error_during_prime(), poller)
+    let body_live = poll_protected(body_task, 0.1, poller.clock)
+    let wait_live = poll_protected(wait_task, 0.1)
+    let body_again = poll_protected(body_task, 0.1, poller.clock)
+    let wait_again = poll_protected(wait_task, 0.1)
+    let logs = task_error_logs_end()
+
+    assert(prime == null, "a failed eager start returns no task")
+    assert(!body_live && !wait_live && !body_again && !wait_again)
+    let entries = logs.split("\n")
+    assert_eq(entries.len(), 3, "each failing task logs exactly once: {logs}")
+    assert(entries[0].contains("task prime failed"), logs)
+    assert(entries[1].contains("task child failed"), logs)
+    assert(entries[2].contains("wait predicate failed"), logs)
+    assert_eq(body_probe.cleanups, 1)
+    assert_eq(wait_probe.cleanups, 1)
+    assert_eq(poller.scope.live_count, 0)
+    assert_eq(poller.entry_count, 0, "manual tasks never register with the poller")
+}
+
+co fn task_error_complete_immediately() -> Coroutine<Wait> {}
+
+@test
+fn protected_manual_start_keeps_a_successfully_completed_handle() {
+    let poller = CoroutinePoller { clock: task_clock_new() }
+    let task = start_protected(task_error_complete_immediately(), poller).unwrap()
+    assert(completed(task.coroutine))
+    assert(!poll_protected(task, 0.1))
+    assert_eq(poller.scope.live_count, 0)
+}
