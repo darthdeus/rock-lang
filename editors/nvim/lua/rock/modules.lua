@@ -24,12 +24,11 @@ local function fetch(on_done)
   local first_err = nil
   for _, c in ipairs(clients) do
     local cid = c.id
-    c:request('rock/modules', vim.empty_dict(), function(err, result)
-      if err then
-        first_err = first_err or tostring(err)
-      else
+    require('rock.stats').request(c, 'rock/modules', function(err, result, _, failure)
+      if err or failure then
+        first_err = first_err or tostring(err or failure)
+      elseif type(result) == 'table' then
         results[cid] = result
-        state.set_modules(cid, result)
       end
       pending = pending - 1
       if pending == 0 then on_done(results, first_err) end

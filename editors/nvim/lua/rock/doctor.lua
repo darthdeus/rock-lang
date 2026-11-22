@@ -103,28 +103,17 @@ local function probe_async(method, on_result)
     on_result({ status = 'FAIL', msg = 'no ' .. SERVER_NAME .. ' client to probe' })
     return
   end
-  local start = uv.hrtime()
-  local responded = false
-  cs[1]:request(method, vim.empty_dict(), function(err, result)
-    responded = true
-    local elapsed_ms = (uv.hrtime() - start) / 1e6
-    if err then
-      on_result({ status = 'FAIL', msg = method .. ' error',
-        detail = tostring(err) })
-      return
+  require('rock.stats').request(cs[1], method, function(err, result, elapsed, failure)
+    if failure then
+      on_result({ status = 'FAIL', msg = method .. ' ' .. failure })
+    elseif err then
+      on_result({ status = 'FAIL', msg = method .. ' error', detail = tostring(err) })
+    elseif type(result) ~= 'table' then
+      on_result({ status = 'WARN', msg = method .. ' returned non-table', detail = tostring(result) })
+    else
+      on_result({ status = 'PASS', msg = ('%s ok  %.1fms'):format(method, elapsed) })
     end
-    if type(result) ~= 'table' then
-      on_result({ status = 'WARN', msg = method .. ' returned non-table',
-        detail = tostring(result) })
-      return
-    end
-    on_result({ status = 'PASS', msg = ('%s ok  %.1fms'):format(method, elapsed_ms) })
   end)
-  vim.defer_fn(function()
-    if not responded then
-      on_result({ status = 'FAIL', msg = method .. ' timed out (>2s)' })
-    end
-  end, 2000)
 end
 
 local function status_glyph(s)
