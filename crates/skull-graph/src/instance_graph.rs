@@ -1821,22 +1821,6 @@ impl InstanceGraph {
             .or_else(|| self.root_instances.contains(i).then(|| &*EMPTY_SUBST))
     }
 
-    pub fn substitutions(&self) -> impl Iterator<Item = (&Instance, &MonoSubst)> {
-        let mut agreed: Vec<(&Instance, &MonoSubst)> = self
-            .index
-            .subst
-            .iter()
-            .map(|(i, a)| (i, a.decided()))
-            .collect();
-        agreed.sort_by(|left, right| left.0.cmp(right.0));
-        agreed.into_iter().chain(
-            self.root_instances
-                .iter()
-                .filter(|i| !self.index.subst.contains_key(*i))
-                .map(|i| (i, &*EMPTY_SUBST)),
-        )
-    }
-
     pub fn bound_tree(&self, i: &Instance) -> Option<&InstanceBoundTree> {
         self.index.trees.get(i).map(|a| a.decided())
     }
