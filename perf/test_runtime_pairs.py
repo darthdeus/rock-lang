@@ -206,6 +206,26 @@ class RuntimePairTests(unittest.TestCase):
             plan = json.loads((root / "run/summary.json").read_text())["plan"]
             self.assertEqual(plan["measurement_hook_sha256"], hashlib.sha256(hook[1:].encode()).hexdigest())
 
+    def test_explain_cost_arms_source_capture_before_the_allocator_lease(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            vm = root / "luajit"
+            vm.touch()
+            vm.chmod(0o755)
+            args = ["runtime_pairs.py", ".", "base", "--out", str(root / "run"),
+                    "--luajit", str(vm), "--explain-cost", "--mutator-only", "--pairs", "6"]
+            row = {"lua_sha256": "same", "settings": {}, "work": {}, "metrics": {}}
+            with patch("sys.argv", args), patch.dict("os.environ", {}, clear=True):
+                with patch("runtime_pairs.measure", return_value=row) as measure:
+                    main()
+            options, _, env, _ = measure.call_args.args
+            self.assertTrue(options.capture_sites and options.allocation_sources)
+            self.assertEqual(env["ROCK_PERF_EXPLAIN_COST"], "1")
+            self.assertLess(env["LUA_INIT"].index("luaJIT_rock_explain"),
+                            env["LUA_INIT"].index("luaJIT_rock_sites"))
+            plan = json.loads((root / "run/summary.json").read_text())["plan"]
+            self.assertTrue(plan["explain_cost"])
+
 
 if __name__ == "__main__":
     unittest.main()

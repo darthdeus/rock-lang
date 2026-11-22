@@ -10,7 +10,7 @@ import subprocess
 import sys
 
 from runtime_pairs import sha256_file
-from site_diff import read_capture, source_owners
+from site_diff import ALLOCATION_EVENTS, read_capture, source_owners
 
 
 TABLE = {"tuple-construction", "vec-construction", "vec-column-construction",
@@ -77,6 +77,8 @@ def read_manifest(path):
 
 
 def bytecode(vm, lua, coordinates):
+    if not coordinates:
+        return {}
     rows = subprocess.check_output([vm, "-E", Path(__file__).with_name("allocation_opcodes.lua"), lua],
                                    input="".join(f"{a} {b}\n" for a, b in sorted({
                                        (first, pc) for first, _, pc, _, _ in coordinates
@@ -106,7 +108,7 @@ def match_source(body, line, op, census, sources):
     return "", "unknown"
 
 
-def join(root, vm):
+def capture_inputs(root, vm):
     vm = vm.resolve()
     lua = root / "main.lua"
     manifest = root / "manifest.txt"
@@ -119,17 +121,18 @@ def join(root, vm):
     if frames <= 0:
         raise ValueError("empty allocation window")
 
-    sites, _, _, counts = read_capture(capture)
-    allocations = [(site, event, count, size) for site, event, _, _, count, size in counts
-                   if event in (0, 1, 2, 6, 7)]
-    coordinates = {sites[site][1:] for site, _, _, _ in allocations if site and sites[site][0] == "main.lua"}
+    return lua, manifest, capture, meta
+
+
+def allocation_rows(vm, lua, owners_and_lines, sites, counts, census, sources, *, sunk=False):
+    allocations = [row for row in counts if row[1] in ALLOCATION_EVENTS or sunk and row[1] == 3]
+    coordinates = {sites[site][1:] for site, event, *_ in allocations
+                   if site and event in (0, 1, 2, 3) and sites[site][0] == "main.lua"}
     ops = bytecode(vm, lua, coordinates)
-    owners, lines = source_owners(lua)
-    census, sources = read_manifest(manifest)
-    rows = defaultdict(lambda: (0, 0))
-    for site, event, count, size in allocations:
-        source = "", {6: "vm-compiler", 7: "vm-collector"}.get(event, "unknown")
-        if site and event in (0, 1, 2):
+    owners, lines = owners_and_lines
+    for site, event, *metrics in allocations:
+        source = "", {6: "vm-compiler", 7: "vm-collector", 9: "vm-runtime"}.get(event, "unknown")
+        if site and event in (0, 1, 2, 3):
             chunk, *position = sites[site]
             first, line, *_ = position
             if chunk == "main.lua" and (op := ops.get(tuple(position))) and first in owners:
@@ -137,12 +140,24 @@ def join(root, vm):
                 if "return function(" in lines[first - 1]:
                     body = body.removeprefix("__rock_mk_")
                 source = match_source(body, line - first + 1, op, census, sources)
+        yield site, event, source, *metrics
+
+
+def check_totals(meta, totals):
+    if totals != (meta["requests"], meta["bytes"]):
+        raise ValueError("site allocations do not reconcile with the allocator window")
+
+
+def join(root, vm):
+    lua, manifest, capture, meta = capture_inputs(root, vm)
+    sites, _, _, counts = read_capture(capture)
+    rows = defaultdict(lambda: (0, 0))
+    for _, _, source, _, _, count, size in allocation_rows(
+            vm, lua, source_owners(lua), sites, counts, *read_manifest(manifest)):
         previous_count, previous_size = rows[source]
         rows[source] = previous_count + count, previous_size + size
-    actual = tuple(sum(metrics[i] for metrics in rows.values()) for i in (0, 1))
-    if actual != (meta["requests"], meta["bytes"]):
-        raise ValueError("site allocations do not reconcile with the allocator window")
-    return frames, dict(rows)
+    check_totals(meta, tuple(sum(metrics[i] for metrics in rows.values()) for i in (0, 1)))
+    return meta["frames"], dict(rows)
 
 
 def main():

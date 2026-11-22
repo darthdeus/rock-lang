@@ -7,10 +7,12 @@ from pathlib import Path
 import re
 from statistics import median
 import sys
+from typing import NamedTuple
 
 
 EVENTS = ("interpreter", "trace", "restored", "sunk-ir", "abort", "exit",
-          "compiler", "collector", "wide-trace")
+          "compiler", "collector", "wide-trace", "runtime")
+ALLOCATION_EVENTS = frozenset((0, 1, 2, 6, 7, 9))
 FUNCTION = re.compile(r'^\s*(?:(?:local )?function ([\w.]+)\s*\(|([\w.]+)\s*=\s*function\b)')
 
 
@@ -24,11 +26,26 @@ def source_owners(path):
     return owners, lines
 
 
-def read_capture(path):
+class Attempt(NamedTuple):
+    start: int
+    parent: int
+    exit: int
+    end: int
+    reason: int
+    ir: int
+    constants: int
+    slots: int
+    start_phase: int
+    end_phase: int
+    path: tuple[int, ...]
+
+
+def read_capture(path, *, attempts=None, costs=None):
     sites, traces, reasons, counts = {}, {}, {}, []
     with path.open() as file:
         header = file.readline().rstrip("\n").split("\t")
-        if header != ["rock-sites-v1", "0"]:
+        if (header not in (["rock-sites-v1", "0"], ["rock-sites-v2", "0"])
+                or attempts is not None and header[0] != "rock-sites-v2"):
             raise ValueError(f"invalid or overflowed site capture: {path}")
         for line in file:
             tag, *values = line.rstrip("\n").split("\t")
@@ -41,6 +58,13 @@ def read_capture(path):
             elif tag == "trace":
                 ident, *fields = map(int, values)
                 traces[ident] = tuple(fields)
+            elif tag == "attempt" and header[0] == "rock-sites-v2":
+                if attempts is not None:
+                    ident, *fields = map(int, values)
+                    attempts[ident] = Attempt(*fields[:10], tuple(fields[10:]))
+            elif tag == "cost" and header[0] == "rock-sites-v2":
+                if costs is not None:
+                    costs.append(tuple(map(int, values)))
             elif tag == "count":
                 counts.append(tuple(map(int, values)))
             else:

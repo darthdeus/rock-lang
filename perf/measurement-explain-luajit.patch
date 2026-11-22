@@ -1,0 +1,747 @@
+diff --git a/src/Makefile b/src/Makefile
+index 1d78c7cf..bd2e1b66 100644
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -410,4 +410,7 @@ ifneq (,$(findstring ROCK_PERF_DETERMINISTIC ,$(TARGET_TESTARCH)))
+   DASM_AFLAGS+= -D ROCK_PERF_DETERMINISTIC
+ endif
++ifneq (,$(findstring ROCK_PERF_EXPLAIN_COST ,$(TARGET_TESTARCH)))
++  DASM_AFLAGS+= -D ROCK_PERF_EXPLAIN_COST
++endif
+
+ ifneq (,$(findstring LJ_LE 1,$(TARGET_TESTARCH)))
+diff --git a/src/lj_asm.c b/src/lj_asm.c
+index db1c11d3..8bef9a3f 100644
+--- a/src/lj_asm.c
++++ b/src/lj_asm.c
+@@ -1922,4 +1922,31 @@ static void asm_ir(ASMState *as, IRIns *ir)
+ }
+
++#if LJ_ROCK_COST
++static void asm_rock_cost(ASMState *as, uint32_t *next, IRRef ref)
++{
++  while (*next && rock_points[*next-1].ref >= ref) {
++    RockCostPoint p = rock_points[--*next];
++    uint32_t count = p.count, offset = p.site*sizeof(uint64_t);
++    int scratch = glofs(as, &J2GG(as->J)->rock_cost_scratch);
++    checkmclim(as);
++    /* Keep the probe outside register allocation and the trace spill frame. */
++    emit_lso(as, A64I_LDRx, RID_X0, RID_GL, scratch);
++    emit_lso(as, A64I_STRx, RID_X0, RID_TMP, 0);
++    do {
++      uint32_t step = count > 4095 ? 4095 : count;
++      emit_dn(as, A64I_ADDx ^ emit_isk12(step), RID_X0, RID_X0);
++      count -= step;
++    } while (count);
++    emit_lso(as, A64I_LDRx, RID_X0, RID_TMP, 0);
++    if (offset & 4095)
++      emit_dn(as, A64I_ADDx ^ emit_isk12(offset & 4095), RID_TMP, RID_TMP);
++    if (offset >= 4096)
++      emit_dn(as, A64I_ADDx ^ emit_isk12(offset & ~4095u), RID_TMP, RID_TMP);
++    emit_lso(as, A64I_LDRx, RID_TMP, RID_GL, glofs(as, &J2GG(as->J)->rock_compiled));
++    emit_lso(as, A64I_STRx, RID_X0, RID_GL, scratch);
++  }
++}
++#endif
++
+ /* -- Head of trace ------------------------------------------------------- */
+
+@@ -2614,4 +2641,7 @@ void lj_asm_trace(jit_State *J, GCtrace *T)
+   */
+   for (;;) {
++#if LJ_ROCK_COST
++    uint32_t next_cost = rock_cost ? rock_point_count : 0;
++#endif
+     as->mcp = as->mctop;
+ #ifdef LUA_USE_ASSERT
+@@ -2639,4 +2669,7 @@ void lj_asm_trace(jit_State *J, GCtrace *T)
+     if (!as->loopref)
+       asm_tail_link(as);
++#if LJ_ROCK_COST
++    if (next_cost) asm_rock_cost(as, &next_cost, as->curins);
++#endif
+
+     /* Assemble a trace in linear backwards order. */
+@@ -2648,11 +2681,14 @@ void lj_asm_trace(jit_State *J, GCtrace *T)
+ 		 (int)(ir - as->ir) - REF_BIAS);
+       asm_snap_prev(as);
+-      if (!ra_used(ir) && !ir_sideeff(ir) && (as->flags & JIT_F_OPT_DCE))
+-	continue;  /* Dead-code elimination can be soooo easy. */
+-      if (irt_isguard(ir->t))
+-	asm_snap_prep(as);
+-      RA_DBG_REF();
+-      checkmclim(as);
+-      asm_ir(as, ir);
++      if (ra_used(ir) || ir_sideeff(ir) || !(as->flags & JIT_F_OPT_DCE)) {
++        if (irt_isguard(ir->t))
++          asm_snap_prep(as);
++        RA_DBG_REF();
++        checkmclim(as);
++        asm_ir(as, ir);
++      }
++#if LJ_ROCK_COST
++      if (next_cost) asm_rock_cost(as, &next_cost, as->curins);
++#endif
+     }
+
+@@ -2669,4 +2705,7 @@ void lj_asm_trace(jit_State *J, GCtrace *T)
+       as->curins = as->stopins;
+     }
++#if LJ_ROCK_COST
++    if (next_cost) asm_rock_cost(as, &next_cost, 0);
++#endif
+     ra_evictk(as);
+     if (as->parent)
+diff --git a/src/lj_bcread.c b/src/lj_bcread.c
+index 197a4f2c..cd1d3431 100644
+--- a/src/lj_bcread.c
++++ b/src/lj_bcread.c
+@@ -8,4 +8,5 @@
+
+ #include "lj_obj.h"
++#include "lj_rock_sites.h"
+ #include "lj_gc.h"
+ #include "lj_err.h"
+@@ -394,4 +395,7 @@ GCproto *lj_bcread_proto(LexState *ls)
+     setmref(pt->varinfo, NULL);
+   }
++#if LJ_ROCK_COST
++  rock_cost_proto(pt);
++#endif
+   return pt;
+ }
+diff --git a/src/lj_dispatch.h b/src/lj_dispatch.h
+index 2ffce7dd..5a70c94e 100644
+--- a/src/lj_dispatch.h
++++ b/src/lj_dispatch.h
+@@ -114,4 +114,8 @@ typedef struct GG_State {
+   uint32_t health_flags;
+   uint64_t health_retired_free, health_reserved;
++#if LJ_ROCK_COST
++  uint64_t *rock_interp, *rock_compiled;
++  uint64_t rock_cost_scratch;
++#endif
+ #endif
+ } GG_State;
+diff --git a/src/lj_emit_arm64.h b/src/lj_emit_arm64.h
+index 481e49c6..89b5d28c 100644
+--- a/src/lj_emit_arm64.h
++++ b/src/lj_emit_arm64.h
+@@ -344,6 +344,16 @@ static void emit_loadk64(ASMState *as, Reg r, IRIns *ir)
+   emit_lsptr(as, A64I_STRx, (r), (void *)&J2G(as->J)->field)
+
+-/* Trace number is determined from pc of exit instruction. */
+-#define emit_setvmstate(as, i)	UNUSED(i)
++/* ARM64 exits normally get the trace number from the exit stub. */
++static void emit_setvmstate(ASMState *as, int32_t trace)
++{
++#if LJ_ROCK_SITES
++  if (rock_explain) {
++    emit_lsptr(as, A64I_STRw, RID_TMP, (void *)&J2G(as->J)->vmstate);
++    emit_loadi(as, RID_TMP, trace);
++  }
++#else
++  UNUSED(as); UNUSED(trace);
++#endif
++}
+
+ /* -- Emit control-flow instructions -------------------------------------- */
+diff --git a/src/lj_obj.h b/src/lj_obj.h
+index 981c56e0..9cea5fa4 100644
+--- a/src/lj_obj.h
++++ b/src/lj_obj.h
+@@ -658,4 +658,7 @@ typedef struct global_State {
+ #if LJ_TARGET_ARM64 && LJ_HASJIT && defined(ROCK_PERF_HEAP_BASE)
+ #define LJ_ROCK_SITES 1
++#ifdef ROCK_PERF_EXPLAIN_COST
++#define LJ_ROCK_COST 1
++#endif
+   uint32_t rock_site;     /* Current trace allocator site, with restore bit. */
+ #endif
+diff --git a/src/lj_opt_loop.c b/src/lj_opt_loop.c
+index 09e8fcec..78a908f5 100644
+--- a/src/lj_opt_loop.c
++++ b/src/lj_opt_loop.c
+@@ -284,4 +284,7 @@ static void loop_unroll(LoopState *lps)
+   subst[REF_BASE] = REF_BASE;
+
++#if LJ_ROCK_COST
++  if (rock_cost) rock_cost_loop_begin();
++#endif
+   /* LOOP separates the pre-roll from the loop body. */
+ #if LJ_ROCK_SITES
+@@ -320,4 +323,7 @@ static void loop_unroll(LoopState *lps)
+       loop_subst_snap(J, osnap++, loopmap, subst);  /* Copy-substitute it. */
+
++#if LJ_ROCK_COST
++    if (rock_cost) rock_cost_loop_copy(ins, J->cur.nins);
++#endif
+     /* Substitute instruction operands. */
+     ir = IR(ins);
+@@ -388,4 +394,7 @@ static void loop_unroll(LoopState *lps)
+   *psentinel = J->cur.snapmap[J->cur.snap[0].nent];  /* Restore PC. */
+
++#if LJ_ROCK_COST
++  if (rock_cost) rock_cost_loop_copy(invar, J->cur.nins);
++#endif
+   loop_emit_phi(J, subst, phi, nphi, onsnap);
+ }
+@@ -402,4 +411,7 @@ static void loop_undo(jit_State *J, IRRef ins, SnapNo nsnap, MSize nsnapmap)
+   J->guardemit.irt = 0;
+   lj_ir_rollback(J, ins);
++#if LJ_ROCK_COST
++  if (rock_cost) rock_cost_loop_undo();
++#endif
+   for (i = 0; i < BPROP_SLOTS; i++) {  /* Remove backprop. cache entries. */
+     BPropEntry *bp = &J->bpropcache[i];
+diff --git a/src/lj_parse.c b/src/lj_parse.c
+index 31e9f166..cfdcc835 100644
+--- a/src/lj_parse.c
++++ b/src/lj_parse.c
+@@ -11,4 +11,5 @@
+
+ #include "lj_obj.h"
++#include "lj_rock_sites.h"
+ #include "lj_gc.h"
+ #include "lj_err.h"
+@@ -1756,4 +1757,7 @@ static GCproto *fs_finish(LexState *ls)
+   ls->fs = fs->prev;
+   lj_assertL(ls->fs != NULL || ls->tok == TK_eof, "bad parser state");
++#if LJ_ROCK_COST
++  rock_cost_proto(pt);
++#endif
+   return pt;
+ }
+diff --git a/src/lj_rock_sites.h b/src/lj_rock_sites.h
+index 2e6925e9..8be4e63f 100644
+--- a/src/lj_rock_sites.h
++++ b/src/lj_rock_sites.h
+@@ -4,4 +4,5 @@
+ #if LJ_ROCK_SITES
+ extern int rock_sites_mode;
++extern int rock_explain;
+ extern uint32_t rock_sites_ir[65536];
+ LJ_FUNC uint32_t rock_sites_pc(GCproto *pt, const BCIns *pc);
+@@ -9,5 +10,20 @@ LJ_FUNC uint32_t rock_sites_caller(lua_State *L);
+ LJ_FUNC void rock_sites_alloc(lua_State *L, GCSize bytes);
+ LJ_FUNC void rock_sites_allocator(global_State *g, lua_Alloc next);
++#if LJ_ROCK_COST
++typedef struct {
++  uint32_t ref, site, count;
++} RockCostPoint;
++extern int rock_cost;
++extern RockCostPoint rock_points[];
++extern uint32_t rock_point_count;
++LJ_FUNC void rock_cost_init(global_State *g);
++LJ_FUNC void rock_cost_close(global_State *g);
++LJ_FUNC void rock_cost_proto(GCproto *pt);
++LJ_FUNC void rock_cost_loop_begin(void);
++LJ_FUNC void rock_cost_loop_copy(uint32_t from, uint32_t to);
++LJ_FUNC void rock_cost_loop_undo(void);
++#endif
+ #if defined(lj_snap_c)
++#define ROCK_RESTORE 0x80000000u
+ LJ_FUNC uint32_t rock_sites_restore(GCtrace *trace, IRRef ref);
+ #endif
+diff --git a/src/lj_rock_sites.inc b/src/lj_rock_sites.inc
+index c8f1a6fa..23942bc0 100644
+--- a/src/lj_rock_sites.inc
++++ b/src/lj_rock_sites.inc
+@@ -6,8 +6,9 @@
+ #define ROCK_COUNTS_MAX 262144u
+ #define ROCK_TRACES_MAX 65536u
++#define ROCK_PATH_MAX 2097152u
+ #define ROCK_RESTORE 0x80000000u
+
+ enum { ROCK_ALLOC, ROCK_TRACE_ALLOC, ROCK_UNSINK, ROCK_SUNK_IR,
+-       ROCK_ABORT, ROCK_EXIT, ROCK_COMPILER, ROCK_COLLECTOR, ROCK_WIDE };
++       ROCK_ABORT, ROCK_EXIT, ROCK_COMPILER, ROCK_COLLECTOR, ROCK_WIDE, ROCK_RUNTIME };
+
+ typedef struct {
+@@ -27,5 +28,10 @@ typedef struct {
+ } RockTrace;
+
+-int rock_sites_mode;
++typedef struct {
++  uint32_t start, parent, end, ir, constants, slots, path, length;
++  int exitno, reason, start_phase, end_phase;
++} RockAttempt;
++
++int rock_sites_mode, rock_explain;
+ uint32_t rock_sites_ir[65536];
+
+@@ -35,8 +41,102 @@ static RockTrace rock_traces[ROCK_TRACES_MAX];
+ static uint32_t rock_live[65536];
+ static uint32_t rock_trace_count, rock_overflow;
++static RockAttempt rock_attempts[ROCK_TRACES_MAX];
++static uint32_t rock_path[ROCK_PATH_MAX], rock_path_count;
++static uint32_t rock_attempt_count, rock_attempt;
++static int rock_window_phase;
++static GCproto *rock_previous_proto;
+ static uint32_t rock_wide[512], rock_wide_count;
+ static int rock_follow_allocator;
+ static lua_Alloc rock_original_allocator;
+
++#if LJ_ROCK_COST
++#define ROCK_POINTS_MAX 65536u
++int rock_cost;
++RockCostPoint rock_points[ROCK_POINTS_MAX];
++uint32_t rock_point_count;
++static uint64_t rock_compiled[ROCK_SITES_MAX];
++static uint64_t rock_interpreted[ROCK_SITES_MAX], rock_recorded[ROCK_SITES_MAX];
++static uint64_t rock_cut[2][3][ROCK_SITES_MAX];
++static uint32_t rock_original_points, rock_copy_point;
++static global_State *rock_cost_owner;
++
++void rock_cost_init(global_State *g)
++{
++  if (!rock_cost_owner) rock_cost_owner = g;
++}
++
++void rock_cost_close(global_State *g)
++{
++  if (rock_cost_owner == g) rock_cost_owner = NULL;
++}
++
++void rock_cost_proto(GCproto *pt)
++{
++  pt->unused_gc64 = rock_cost ? rock_sites_pc(pt, proto_bc(pt)) : 0;
++}
++
++static int rock_cost_enable(void)
++{
++  GCobj *o;
++  if (!rock_cost_owner) return 0;
++  rock_cost = 1;
++  G2GG(rock_cost_owner)->rock_interp = rock_interpreted;
++  G2GG(rock_cost_owner)->rock_compiled = rock_compiled;
++  for (o = gcref(rock_cost_owner->gc.root); o; o = gcnext(o))
++    if (o->gch.gct == ~LJ_TPROTO) rock_cost_proto(gco2pt(o));
++  return 1;
++}
++
++static void rock_cost_snapshot(int end)
++{
++  memcpy(rock_cut[end][0], rock_interpreted, sizeof(rock_interpreted));
++  memcpy(rock_cut[end][1], rock_compiled, sizeof(rock_compiled));
++  memcpy(rock_cut[end][2], rock_recorded, sizeof(rock_recorded));
++}
++
++static void rock_cost_point(IRRef ref, uint32_t site, uint32_t count)
++{
++  RockCostPoint *last = rock_point_count ? &rock_points[rock_point_count-1] : NULL;
++  if (last && last->ref == ref && last->site == site) {
++    last->count += count;
++  } else if (rock_point_count == ROCK_POINTS_MAX) {
++    rock_overflow++;
++  } else {
++    rock_points[rock_point_count++] = (RockCostPoint){ ref, site, count };
++  }
++}
++
++void rock_cost_loop_begin(void)
++{
++  rock_original_points = rock_point_count;
++  rock_copy_point = 0;
++}
++
++void rock_cost_loop_copy(uint32_t from, uint32_t to)
++{
++  while (rock_copy_point < rock_original_points &&
++         rock_points[rock_copy_point].ref <= from) {
++    RockCostPoint p = rock_points[rock_copy_point++];
++    rock_cost_point(to, p.site, p.count);
++  }
++}
++
++void rock_cost_loop_undo(void)
++{
++  rock_point_count = rock_original_points;
++}
++#endif
++
++static void rock_sites_set_mode(int mode)
++{
++#if LJ_ROCK_COST
++  if (rock_cost && (rock_sites_mode == 2) != (mode == 2))
++    rock_cost_snapshot(rock_sites_mode == 2);
++#endif
++  if (mode == 2) rock_window_phase = 1;
++  else if (rock_sites_mode == 2) rock_window_phase = 2;
++  rock_sites_mode = mode;
++}
++
+ void rock_sites_allocator(global_State *g, lua_Alloc next)
+ {
+@@ -44,15 +144,35 @@ void rock_sites_allocator(global_State *g, lua_Alloc next)
+     rock_original_allocator = g->allocf;
+     rock_follow_allocator = 2;
+-    rock_sites_mode = 2;
++    rock_sites_set_mode(2);
+   } else if (rock_follow_allocator == 2 && next == rock_original_allocator) {
+     rock_follow_allocator = 3;
+-    rock_sites_mode = 1;
++    rock_sites_set_mode(1);
+   }
+ }
+
+-static void rock_sites_begin_trace(void)
++static void rock_sites_begin_trace(jit_State *J)
+ {
+   rock_wide_count = 0;
+   rock_sites_ir[REF_BASE] = 0;
++  if (rock_explain) {
++    RockAttempt *row;
++    int stitched = !J->parent && J->exitno;
++    TraceNo parent = stitched ? J->exitno : J->parent;
++    rock_attempt = 0;
++    if (rock_attempt_count+1 == ROCK_TRACES_MAX) { rock_overflow++; return; }
++    rock_attempt = ++rock_attempt_count;
++    row = &rock_attempts[rock_attempt];
++    row->parent = rock_live[parent];
++    row->exitno = stitched ? -1 : (int)J->exitno;
++    row->start = rock_sites_pc(J->pt, J->pc);
++    row->path = rock_path_count;
++    row->reason = -2;
++    row->start_phase = rock_window_phase;
++    memset(rock_sites_ir + REF_FIRST, 0, sizeof(rock_sites_ir)-REF_FIRST*sizeof(*rock_sites_ir));
++    rock_previous_proto = NULL;
++#if LJ_ROCK_COST
++    if (rock_cost) rock_point_count = 0;
++#endif
++  }
+ }
+
+@@ -113,8 +233,14 @@ void rock_sites_alloc(lua_State *L, GCSize bytes)
+   global_State *g = G(L);
+   uint32_t site = g->rock_site, kind = ROCK_ALLOC;
++  uint32_t trace = 0, phase = 0;
+   int category = luaJIT_vmcategory(L);
+   if (category == 1) {
+     kind = ROCK_COMPILER;
+     site = 0;
++    if (rock_explain) {
++      trace = rock_attempt;
++      site = rock_attempts[trace].start;
++      phase = g->vmstate == ~LJ_VMST_RECORD ? 0 : g->vmstate == ~LJ_VMST_OPT ? 1 : 2;
++    }
+   } else if (category == 2) {
+     kind = ROCK_COLLECTOR;
+@@ -123,10 +249,52 @@ void rock_sites_alloc(lua_State *L, GCSize bytes)
+     kind = ROCK_UNSINK;
+     site &= ~ROCK_RESTORE;
++    if (rock_explain) trace = rock_live[G2J(g)->parent];
+   } else if (g->vmstate >= 0) {
+     kind = ROCK_TRACE_ALLOC;
++    if (rock_explain) trace = rock_live[g->vmstate];
+   } else {
+     site = rock_sites_caller(L);
++    if (rock_explain && !site) kind = ROCK_RUNTIME;
+   }
+-  rock_add(site, kind, 0, 0, bytes);
++  rock_add(site, kind, trace, phase, bytes);
++}
++
++static void rock_explain_step(jit_State *J)
++{
++  RockAttempt *row = &rock_attempts[rock_attempt];
++  uint32_t slots = J->baseslot + J->maxslot, function = 0;
++  if (slots > row->slots) row->slots = slots;
++#if LJ_ROCK_COST
++  if (rock_cost && J->pt && proto_bcpos(J->pt, J->pc) < J->pt->sizebc &&
++      bc_op(*J->pc) < BC_FUNCF) {
++    uint32_t site = J->pt->unused_gc64;
++    rock_recorded[site]++;
++    rock_cost_point(J->cur.nins, site, 1);
++  }
++#endif
++  if (J->pt == rock_previous_proto) return;
++  rock_previous_proto = J->pt;
++  if (rock_path_count == ROCK_PATH_MAX) { rock_overflow++; return; }
++  if (J->pt) {
++#if LJ_ROCK_COST
++    if (rock_cost)
++      function = J->pt->unused_gc64;
++    else
++#endif
++      function = rock_sites_pc(J->pt, proto_bc(J->pt));
++  }
++  rock_path[rock_path_count++] = function;
++  row->length++;
++}
++
++static void rock_explain_end(jit_State *J, int reason)
++{
++  RockAttempt *row = &rock_attempts[rock_attempt];
++  if (!rock_attempt) return;
++  row->end = rock_sites_pc(J->pt, J->pc);
++  row->ir = J->cur.nins - REF_BASE;
++  row->constants = REF_BASE - J->cur.nk;
++  row->reason = reason;
++  row->end_phase = rock_window_phase;
+ }
+
+@@ -148,4 +316,7 @@ static void rock_sites_record(jit_State *J, GCproto *pt, const BCIns *pc,
+   for (ref = first; ref < J->cur.nins; ref++) {
+     switch (J->cur.ir[ref].o) {
++    case IR_TOSTR:
++      if (!rock_explain) { rock_sites_ir[ref] = 0; break; }
++      /* fallthrough */
+     case IR_TNEW: case IR_TDUP: case IR_CNEW: case IR_CNEWI: case IR_SNEW:
+     case IR_XSNEW: case IR_NEWREF: case IR_BUFPUT: case IR_BUFSTR:
+@@ -174,6 +345,14 @@ static void rock_sites_trace(jit_State *J, GCtrace *T)
+   }
+   rock_live[T->traceno] = 0;
+-  if (rock_trace_count+1 == ROCK_TRACES_MAX) { rock_overflow++; return; }
+-  id = ++rock_trace_count;
++  if (rock_explain) {
++    if (!rock_attempt) return;
++    id = rock_attempt;
++    rock_explain_end(J, -1);
++    rock_attempt = 0;
++    rock_trace_count = id;
++  } else {
++    if (rock_trace_count+1 == ROCK_TRACES_MAX) { rock_overflow++; return; }
++    id = ++rock_trace_count;
++  }
+   row = &rock_traces[id];
+   row->trace = T;
+@@ -195,5 +374,5 @@ static void rock_sites_trace(jit_State *J, GCtrace *T)
+       }
+       row->origins[ref-REF_FIRST] = rock_sites_ir[ref];
+-      rock_add(rock_sites_ir[ref], ROCK_SUNK_IR, 0, 0, 0);
++      rock_add(rock_sites_ir[ref], ROCK_SUNK_IR, rock_explain ? id : 0, 0, 0);
+     }
+   }
+@@ -207,5 +386,5 @@ uint32_t rock_sites_restore(GCtrace *trace, IRRef ref)
+       ref-REF_FIRST < row->nins)
+     site = row->origins[ref-REF_FIRST];
+-  return site | ROCK_RESTORE;
++  return site;
+ }
+
+@@ -226,4 +405,16 @@ static void rock_sites_exit(GCtrace *T, ExitNo exitno, lua_State *L, const BCIns
+ }
+
++LUA_API int luaJIT_rock_explain(int costs)
++{
++  if (rock_sites_mode || rock_explain || costs < 0 || costs > 1) return 0;
++#if LJ_ROCK_COST
++  if (costs && !rock_cost_enable()) return 0;
++#else
++  if (costs) return 0;
++#endif
++  rock_explain = 1;
++  return 1;
++}
++
+ LUA_API int luaJIT_rock_sites(int mode, const char *path)
+ {
+@@ -233,9 +424,9 @@ LUA_API int luaJIT_rock_sites(int mode, const char *path)
+   if (mode == 3) rock_follow_allocator = 1;
+   if (path && rock_follow_allocator && rock_follow_allocator != 3) return 0;
+-  rock_sites_mode = mode == 3 ? 1 : mode;
++  rock_sites_set_mode(mode == 3 ? 1 : mode);
+   if (!path) return 1;
+   out = fopen(path, "w");
+   if (!out) return 0;
+-  fprintf(out, "rock-sites-v1\t%u\n", rock_overflow);
++  fprintf(out, "rock-sites-v%d\t%u\n", rock_explain ? 2 : 1, rock_overflow);
+ #define TREDEF(name, message) fprintf(out, "reason\t%u\t%s\n", LJ_TRERR_##name, message);
+ #include "lj_traceerr.h"
+@@ -248,7 +439,33 @@ LUA_API int luaJIT_rock_sites(int mode, const char *path)
+   for (i = 1; i <= rock_trace_count; i++) {
+     const RockTrace *t = &rock_traces[i];
++    if (!t->trace) continue;
+     fprintf(out, "trace\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\n",
+             i, t->start, t->parent, t->exitno, t->stack_bytes, t->nins, t->size, t->spills);
+   }
++  for (i = 1; i <= rock_attempt_count; i++) {
++    const RockAttempt *r = &rock_attempts[i];
++    uint32_t j;
++    fprintf(out, "attempt\t%u\t%u\t%u\t%d\t%u\t%d\t%u\t%u\t%u\t%d\t%d",
++            i, r->start, r->parent, r->exitno, r->end, r->reason, r->ir,
++            r->constants, r->slots, r->start_phase, r->end_phase);
++    for (j = 0; j < r->length; j++) fprintf(out, "\t%u", rock_path[r->path+j]);
++    fputc('\n', out);
++  }
++#if LJ_ROCK_COST
++  if (rock_cost) {
++    for (i = 0; i < ROCK_SITES_MAX; i++) {
++      uint64_t work[6];
++      int j;
++      for (j = 0; j < 3; j++) {
++        work[j] = rock_cut[0][j][i];
++        work[j+3] = rock_cut[1][j][i] - work[j];
++      }
++      if (work[0] || work[1] || work[2] || work[3] || work[4] || work[5])
++        fprintf(out, "cost\t%u\t%" PRIu64 "\t%" PRIu64 "\t%" PRIu64
++                     "\t%" PRIu64 "\t%" PRIu64 "\t%" PRIu64 "\n",
++                i, work[0], work[1], work[2], work[3], work[4], work[5]);
++    }
++  }
++#endif
+   for (i = 0; i < ROCK_COUNTS_MAX; i++) {
+     const RockCount *r = &rock_counts[i];
+diff --git a/src/lj_snap.c b/src/lj_snap.c
+index 82ec49ac..8d14da52 100644
+--- a/src/lj_snap.c
++++ b/src/lj_snap.c
+@@ -613,7 +613,15 @@ void lj_snap_replay(jit_State *J, GCtrace *T)
+ 	  }
+ 	  J->slot[snap_slot(sn)] = emitir(ir->ot & ~(IRT_MARK|IRT_ISPHI), op1, op2);
++#if LJ_ROCK_SITES
++          if (rock_explain)
++            rock_sites_ir[tref_ref(J->slot[snap_slot(sn)])] = rock_sites_restore(T, refp);
++#endif
+ 	} else {
+ 	  IRIns *irs;
+ 	  TRef tr = emitir(ir->ot, op1, op2);
++#if LJ_ROCK_SITES
++          if (rock_explain)
++            rock_sites_ir[tref_ref(tr)] = rock_sites_restore(T, refp);
++#endif
+ 	  J->slot[snap_slot(sn)] = tr;
+ 	  for (irs = ir+1; irs < irlast; irs++)
+@@ -839,5 +847,5 @@ static void snap_unsink(jit_State *J, GCtrace *T, ExitState *ex,
+   uint32_t previous_site = G(J->L)->rock_site;
+   if (rock_sites_mode == 2)
+-    G(J->L)->rock_site = rock_sites_restore(T, ir - T->ir);
++    G(J->L)->rock_site = rock_sites_restore(T, ir - T->ir) | ROCK_RESTORE;
+ #endif
+   lj_assertJ(ir->o == IR_TNEW || ir->o == IR_TDUP ||
+diff --git a/src/lj_state.c b/src/lj_state.c
+index db7118ee..939fc76f 100644
+--- a/src/lj_state.c
++++ b/src/lj_state.c
+@@ -11,4 +11,5 @@
+
+ #include "lj_obj.h"
++#include "lj_rock_sites.h"
+ #include "lj_gc.h"
+ #include "lj_err.h"
+@@ -216,4 +217,7 @@ static void close_state(lua_State *L)
+   global_State *g = G(L);
+   lj_func_closeuv(L, tvref(L->stack));
++#if LJ_ROCK_COST
++  rock_cost_close(g);
++#endif
+   lj_gc_freeall(g);
+   lj_assertG(gcref(g->gc.root) == obj2gco(L),
+@@ -316,4 +320,7 @@ LUA_API lua_State *lua_newstate(lua_Alloc allocf, void *allocd)
+   }
+   L->status = LUA_OK;
++#if LJ_ROCK_COST
++  rock_cost_init(g);
++#endif
+   return L;
+ }
+diff --git a/src/lj_trace.c b/src/lj_trace.c
+index 95475334..84a7e113 100644
+--- a/src/lj_trace.c
++++ b/src/lj_trace.c
+@@ -605,7 +605,4 @@ static void trace_start(jit_State *J)
+   memset(&J->cur, 0, sizeof(GCtrace));
+   J->cur.traceno = traceno;
+-#if LJ_ROCK_SITES
+-  if (rock_sites_mode) rock_sites_begin_trace();
+-#endif
+   J->cur.nins = J->cur.nk = REF_BASE;
+   J->cur.ir = J->irbuf;
+@@ -621,4 +618,7 @@ static void trace_start(jit_State *J)
+   J->ktrace = 0;
+   setgcref(J->cur.startpt, obj2gco(J->pt));
++#if LJ_ROCK_SITES
++  if (rock_sites_mode) rock_sites_begin_trace(J);
++#endif
+   if (J->parent) J2GG(J)->health.side_starts++; else J2GG(J)->health.root_starts++;
+
+@@ -793,4 +793,8 @@ static int trace_abort(jit_State *J)
+ #if LJ_ROCK_SITES
+     if (rock_sites_mode == 2) rock_sites_abort(J, e);
++    if (rock_explain) {
++      rock_explain_end(J, e);
++      rock_attempt = 0;
++    }
+ #endif
+     if ((uint32_t)e < LUAJIT_HEALTH_REASONS) J2GG(J)->health.aborts[e]++;
+@@ -897,4 +901,5 @@ static TValue *trace_state(lua_State *L, lua_CFunction dummy, void *ud)
+         const BCIns *pc = J->pc;
+         IRRef first = J->cur.nins;
++        if (rock_attempt) rock_explain_step(J);
+         lj_record_ins(J);
+         rock_sites_record(J, pt, pc, first);
+diff --git a/src/vm_arm64.dasc b/src/vm_arm64.dasc
+index 678b2a69..56d01b26 100644
+--- a/src/vm_arm64.dasc
++++ b/src/vm_arm64.dasc
+@@ -227,6 +227,26 @@
+ |.macro decode_RC8RD, dst, src; ubfiz dst, src, #3, #8; .endmacro
+ |
++|// Use only at standalone dispatch sites. Numeric labels are shared with callers.
++|.macro rock_interp
++|.if ROCK_PERF_EXPLAIN_COST
++|  ldr TMP0, [GL, #(GG_OFS(rock_interp) - GG_OFS(g))]
++|  cbz TMP0, >7
++|  ldr TMP1, [BASE, FRAME_FUNC]
++|  and TMP1, TMP1, #LJ_GCVMASK
++|  ldrb TMP0w, LFUNC:TMP1->ffid
++|  cbnz TMP0w, >7
++|  ldr TMP1, LFUNC:TMP1->pc
++|  ldr TMP1w, [TMP1, #PC2PROTO(unused_gc64)]
++|  ldr TMP0, [GL, #(GG_OFS(rock_interp) - GG_OFS(g))]
++|  add TMP0, TMP0, TMP1, lsl #3
++|  ldr TMP1, [TMP0]
++|  add TMP1, TMP1, #1
++|  str TMP1, [TMP0]
++|7:
++|.endif
++|.endmacro
++|
+ |// Instruction decode+dispatch.
+-|.macro ins_NEXT
++|.macro ins_NEXT_RAW
+ |  ldr INSw, [PC], #4
+ |  add TMP1, GL, INS, uxtb #3
+@@ -237,4 +257,12 @@
+ |.endmacro
+ |
++|.macro ins_NEXT
++|.if ROCK_PERF_EXPLAIN_COST
++|  ldr TMP0, [GL, #(GG_OFS(rock_interp) - GG_OFS(g))]
++|  cbnz TMP0, ->rock_ins_next
++|.endif
++|  ins_NEXT_RAW
++|.endmacro
++|
+ |// Instruction footer.
+ |.if 1
+@@ -374,4 +402,10 @@ static void build_subroutines(BuildCtx *ctx)
+   |.code_sub
+   |
++  |.if ROCK_PERF_EXPLAIN_COST
++  |->rock_ins_next:
++  |  rock_interp
++  |  ins_NEXT_RAW
++  |.endif
++  |
+   |//-----------------------------------------------------------------------
+   |//-- Return handling ----------------------------------------------------
+@@ -2122,4 +2156,11 @@ static void build_subroutines(BuildCtx *ctx)
+   |  bhs >4
+   |2:
++  |.if ROCK_PERF_EXPLAIN_COST
++  |  cmp RBw, #BC_FUNCF
++  |  bhs >8
++  |  rock_interp
++  |8:
++  |  add TMP1, GL, INS, uxtb #3  // Dispatch hooks use this static dispatch base.
++  |.endif
+   |  cmp RBw, #BC_FUNCF			// Function header?
+   |  add TMP0, GL, RB, uxtb #3
+@@ -2151,4 +2192,5 @@ static void build_subroutines(BuildCtx *ctx)
+   |
+   |5:  // Dispatch to static entry of original ins replaced by BC_JLOOP.
++  |  rock_interp
+   |  ldr RA, [GL, #GL_J(trace)]
+   |  decode_RD RC, INS

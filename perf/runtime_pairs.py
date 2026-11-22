@@ -16,6 +16,14 @@ from site_diff import EVENTS, read_capture
 
 ALLOC_START = 100
 COUNTER_PREFIXES = ("alloc_", "jit_", "mutator_")
+EXPLAIN_PROBE = '''
+do
+    local ffi = require("ffi")
+    ffi.cdef[[int luaJIT_rock_explain(int costs);]]
+    assert(ffi.C.luaJIT_rock_explain(tonumber(os.getenv("ROCK_PERF_EXPLAIN_COST"))) == 1,
+        "expected an explanation-enabled measurement LuaJIT")
+end
+'''
 INSTRUCTION_PROBE = r'''
 local frames = tonumber(os.getenv("PERF_DEFAULT_MEASURE_FRAMES"))
 if not frames then return end
@@ -55,6 +63,25 @@ end
 def sha256_file(path):
     with path.open("rb") as source:
         return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def source_roots(project, env):
+    path = Path(project).resolve()
+    if path.is_file():
+        path = path.parent
+    root = path
+    try:
+        repo = subprocess.run(["git", "-C", path, "rev-parse", "--show-toplevel"],
+                              capture_output=True, text=True)
+        if repo.returncode == 0:
+            root = Path(repo.stdout.strip()).resolve()
+    except FileNotFoundError:
+        pass
+    roots = {str(root): ""}
+    for var, name in (("ROCK_PACKAGES_DIR", "<packages>"), ("ROCK_STDLIB_DIR", "<stdlib>")):
+        if env.get(var):
+            roots[str(Path(env[var]).resolve())] = name
+    return roots
 
 
 def frame_interval(report, late_window):
@@ -146,7 +173,7 @@ def allocation_requests_by_origin(path, metrics):
     mutator_bytes = jit_bytes = total_bytes = 0
     for _, kind, _, _, count, size in counts:
         event = EVENTS[kind]
-        if event in ("interpreter", "trace", "restored"):
+        if event in ("interpreter", "trace", "restored", "runtime"):
             requests["mutator_requests"] += count
             mutator_bytes += size
         elif event == "compiler":
@@ -251,6 +278,10 @@ def measure(args, binary, env, name):
                       capture_sha256=sha256_file(capture), manifest_sha256=sha256_file(manifest),
                       frames=report["memory"]["gc_window"]["measured_frames"],
                       requests=metrics["alloc_requests"], bytes=metrics["alloc_bytes"])
+        if getattr(args, "explain", False):
+            record["window_start"] = gc_start
+            record["late_window"] = late_window is not None
+            record["source_roots"] = source_roots(args.project, env)
         (output / "allocation-capture.json").write_text(json.dumps(record, indent=2) + "\n")
     return {"metrics": metrics, "work": work, "settings": settings, "uptime": load,
             "lua_sha256": lua_digest,
@@ -280,6 +311,10 @@ def main():
                         help="use Stone's fixed image work and reset JIT and GC on frame three")
     parser.add_argument("--capture-sites", action="store_true",
                         help="capture allocator and trace sites in a separate diagnostic run")
+    parser.add_argument("--explain", action="store_true",
+                        help="capture native trace lineage and allocation execution modes")
+    parser.add_argument("--explain-cost", action="store_true",
+                        help="also count bytecode work (requires a cost-enabled VM)")
     parser.add_argument("--mutator-only", action="store_true",
                         help="use site capture to count requests by origin and report JIT traffic separately")
     parser.add_argument("--allocation-sources", action="store_true",
@@ -293,6 +328,12 @@ def main():
         start, length = args.late_window
         if not (start > args.warmup_frames > 0 and 0 < length < args.frames - 1):
             parser.error("--late-window requires positive warmup, a later GC start and a shorter length")
+    if args.explain_cost:
+        args.explain = True
+    if args.explain:
+        if args.timing:
+            parser.error("--explain requires deterministic counter mode")
+        args.capture_sites = args.allocation_sources = True
     if args.mutator_only and (args.timing or not args.capture_sites):
         parser.error("--mutator-only requires deterministic --capture-sites")
     if not args.timing:
@@ -323,6 +364,8 @@ def main():
             "vars_sha256": hashlib.sha256(json.dumps(args.var).encode()).hexdigest()}
     if args.late_window:
         plan["late_window"] = args.late_window
+    if args.explain:
+        plan["explain_cost"] = args.explain_cost
     if args.mutator_only:
         plan["mutator_only"] = True
     if args.luajit:
@@ -336,6 +379,8 @@ def main():
         hook = Path(__file__).with_name("measurement.lua").read_text()
         if not args.timing:
             hook += "\n" + Path(__file__).with_name("measurement-churn.lua").read_text()
+        if args.explain:
+            hook = EXPLAIN_PROBE + hook
         plan.update(fixed_work=args.fixed_work, capture_sites=args.capture_sites,
                     measurement_hook_sha256=hashlib.sha256(hook.encode()).hexdigest())
     if calibration and (not calibration["aa"] or calibration["plan"] != plan
@@ -347,6 +392,8 @@ def main():
                PERF_GC_WINDOW_AFTER_WARMUP="0",
                ROCK_PERF_DETERMINISTIC="0" if args.timing else "1",
                PERF_FIXED_WORK=str(int(args.fixed_work)), ROCK_PERF_CAPTURE_SITES=str(int(args.capture_sites)))
+    if args.explain:
+        env["ROCK_PERF_EXPLAIN_COST"] = str(int(args.explain_cost))
     if not args.timing:
         env["PERF_JIT_HEALTH"] = "0"
     if args.luajit:

@@ -164,6 +164,7 @@ make -C luajit XCFLAGS="$flags" PREFIX="$timing_vm" install
 make -C luajit clean
 git -C luajit apply "$rock_lang/perf/measurement-sites-luajit.patch"
 git -C luajit apply "$rock_lang/perf/measurement-deterministic-luajit.patch"
+git -C luajit apply "$rock_lang/perf/measurement-explain-luajit.patch"
 make -C luajit XCFLAGS="$flags -DROCK_PERF_DETERMINISTIC" PREFIX="$counter_vm" install
 ```
 
@@ -248,3 +249,36 @@ value helper is charged to its type declaration. An opaque call or inline
 Lua allocation is tracked to the Rock boundary. VM compiler and collector
 traffic have separate rows. Conflicting source candidates and PCs without
 compiler provenance appear as unknown.
+
+### Explaining a runtime change
+
+Collect a diagnostic pair with `runtime_pairs.py --explain`. It saves the
+source manifest and trace attempts from startup through the end of the run.
+The allocator rows cover the same lease as `--mutator-only`. Use
+`--late-window GC_START LENGTH` to measure after startup recording subsides.
+
+```sh
+python3 perf/explain_runtime.py results/01-a results/01-b --luajit "$counter_vm/bin/luajit"
+```
+
+Use `--focus REGEX` to inspect a function, source file or trace lineage.
+The report matches a trace by its starting source site and its ancestry.
+Sites without a unique source mapping use the generated function and its
+bytecode offset. The raw capture keeps trace generations, parent exit
+numbers, ordered function crossings, outcomes, IR and constant counts,
+and peak recorded slots. Side traces that replay a sunk allocation keep
+the parent's allocation site. Exit restoration has a separate lane.
+
+For per-function bytecode work, clean and build a separate counter VM with
+`-DROCK_PERF_EXPLAIN_COST` added to the deterministic flags and use
+`--explain-cost`. The three lanes count interpreted dispatches, recorded
+bytecodes reached along compiled paths, and bytecodes visited by the
+recorder. Compiled work uses checkpoints at IR boundaries, so folded
+bytecodes at the same boundary are charged together. The report splits
+work before the window from work inside it. Use the ordinary timing VM
+for frame time and leave explanation disabled for acceptance counters.
+Trace stores and cost checkpoints can change machine-code size and trace
+selection.
+
+Run the native fixture and report tests with
+`ROCK_MEASUREMENT_LUAJIT="$cost_vm/bin/luajit" python3 -m unittest discover -s perf`.
