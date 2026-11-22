@@ -54,3 +54,11 @@ fn qualified_coroutine_method_yields() {
     let generator = mob_id().slot_once()
     assert_eq(generator.resume(), 4)
 }
+
+fn sequence::Sequence<T>.get_item(sequence) -> T { sequence.item }
+
+@test
+fn qualified_generic_method_binds_receiver_arguments() {
+    assert_eq(Sequence { item: 7 }.get_item(), 7)
+    assert_eq(Sequence { item: "seven" }.get_item(), "seven")
+}

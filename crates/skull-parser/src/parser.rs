@@ -1105,14 +1105,13 @@ impl<'a> Parser<'a> {
                     )));
                 }
             }
-            let receiver = if let Some(path) = path {
-                let last = path.segments.last().expect("path has segments").clone();
-                let ty = self.ast.ty(path.span(), TypeExprKind::Path(path), false);
-                ((last, 0), ty)
-            } else {
-                let ty = self.synth_receiver_type(&name, &generics);
-                ((name, generics.len()), ty)
-            };
+            let receiver_name = path
+                .as_ref()
+                .and_then(|path| path.segments.last())
+                .unwrap_or(&name)
+                .clone();
+            let ty = self.synth_receiver_type(&receiver_name, path, &generics);
+            let receiver = ((receiver_name, generics.len()), ty);
             name = method;
             generics.extend(method_generics);
             Some(receiver)
@@ -1257,28 +1256,28 @@ impl<'a> Parser<'a> {
     fn synth_receiver_type(
         &mut self,
         ident: &Ident,
+        path: Option<Path>,
         path_generics: &[Generic],
     ) -> Idx<TypeExprData> {
-        if path_generics.is_empty() {
-            let kind = primitive_type(ident.name.as_str())
-                .unwrap_or_else(|| TypeExprKind::Ident(ident.clone()));
-            return self.ast.ty(ident.span, kind, false);
-        }
-        let mut args = Vec::with_capacity(path_generics.len());
-        for g in path_generics {
-            args.push(
+        let span = path.as_ref().map_or(ident.span, Path::span);
+        let args: Vec<_> = path_generics
+            .iter()
+            .map(|g| {
                 self.ast
-                    .ty(g.name.span, TypeExprKind::Ident(g.name.clone()), false),
-            );
-        }
-        self.ast.ty(
-            ident.span,
-            TypeExprKind::App {
+                    .ty(g.name.span, TypeExprKind::Ident(g.name.clone()), false)
+            })
+            .collect();
+        let kind = match (path, args.is_empty()) {
+            (Some(path), true) => TypeExprKind::Path(path),
+            (Some(ctor), false) => TypeExprKind::AppPath { ctor, args },
+            (None, true) => primitive_type(ident.name.as_str())
+                .unwrap_or_else(|| TypeExprKind::Ident(ident.clone())),
+            (None, false) => TypeExprKind::App {
                 ctor: ident.clone(),
                 args,
             },
-            false,
-        )
+        };
+        self.ast.ty(span, kind, false)
     }
 
     fn parse_params(

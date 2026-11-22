@@ -176,3 +176,15 @@ fn qualified_coroutine_method_keeps_its_coroutine_flag() {
     let ast = parse("co fn ns::Actor.step(self) -> Coroutine<int> { yield 1 }");
     assert!(first_fn(&ast).is_coroutine);
 }
+
+#[test]
+fn qualified_generic_method_applies_the_receiver_arguments() {
+    let ast = parse("fn ns::Box<T>.get<U>(self, fallback: U) { }");
+    let function = first_fn(&ast);
+    let TypeExprKind::AppPath { ctor, args } = &ast.types[function.params[0].ty].kind else {
+        panic!("expected an applied qualified receiver");
+    };
+    assert_eq!(ctor.segments.len(), 2);
+    assert_eq!(args.len(), 1);
+    assert!(matches!(&ast.types[args[0]].kind, TypeExprKind::Ident(id) if id.name.as_str() == "T"));
+}

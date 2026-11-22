@@ -385,20 +385,17 @@ impl<'a> Printer<'a> {
         let coroutine = if f.is_coroutine { "co " } else { "" };
         let mut sig = vec![Doc::text(format!("{coroutine}{keyword} "))];
         if let Some((ty_ident, k)) = &f.receiver_surface {
-            let receiver_ty = self.ast.te(&f.params[0].ty);
-            let k = if matches!(receiver_ty.kind, TypeExprKind::Path(_)) {
-                sig.push(self.raw(receiver_ty.span));
-                let method_start = f.name.span.offset_range().0;
-                f.generics
-                    .partition_point(|g| g.name.span.offset_range().0 < method_start)
-            } else {
-                sig.push(Doc::text(kw(ty_ident.name)));
-                *k
+            let receiver = match &self.ast.te(&f.params[0].ty).kind {
+                TypeExprKind::Path(path) | TypeExprKind::AppPath { ctor: path, .. } => {
+                    self.raw(path.span())
+                }
+                _ => Doc::text(kw(ty_ident.name)),
             };
-            sig.push(self.generics(&f.generics[..k]));
+            sig.push(receiver);
+            sig.push(self.generics(&f.generics[..*k]));
             sig.push(Doc::text("."));
             sig.push(Doc::text(kw(f.name.name)));
-            sig.push(self.generics(&f.generics[k..]));
+            sig.push(self.generics(&f.generics[*k..]));
             sig.push(self.params_impl(&f.params, f.params_span, true));
         } else {
             sig.push(Doc::text(kw(f.name.name)));
