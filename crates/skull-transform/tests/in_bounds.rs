@@ -174,6 +174,7 @@ fn counted_loop_body_barriers_keep_the_check() {
         p.emit(
             b,
             Inst::StoreField {
+                native_leaf: None,
                 base,
                 field: u("len"),
                 value,
@@ -353,6 +354,7 @@ fn affine_probe(case: &str) -> ContainerKind {
         p.emit(
             b,
             Inst::StoreField {
+                native_leaf: None,
                 base,
                 field: u("len"),
                 value: zero,

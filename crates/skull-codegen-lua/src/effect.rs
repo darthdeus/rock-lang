@@ -46,7 +46,13 @@ impl Emitter<'_> {
                 }
                 _ => true,
             },
-            Inst::StoreField { base, field, value } => {
+            Inst::StoreField {
+                native_leaf: Some(_),
+                ..
+            } => false,
+            Inst::StoreField {
+                base, field, value, ..
+            } => {
                 // A guarded literal nil store only overwrites an existing slot.
                 let guarded_clear = matches!(self.func.insts[*value], Inst::Const(Lit::Nil))
                     && self.opnd_is_plain(*base);
@@ -149,7 +155,19 @@ impl Emitter<'_> {
                 write_cellname(out, self.func, self.frame, self.cell_colors, *cell);
                 self.write_assignment_rhs(out, *value);
             }
-            Inst::StoreField { base, field, value } => {
+            Inst::StoreField {
+                base,
+                field,
+                value,
+                native_leaf,
+            } => {
+                if native_leaf.is_some() {
+                    out.push(' ');
+                    self.write_opnd(out, *base);
+                    write_field_key(out, field.as_str());
+                    self.write_assignment_rhs(out, *value);
+                    return;
+                }
                 if let Some(frame) = self.frame {
                     if matches!(self.func.insts[*base], Inst::Load(cell) if cell == frame.s_cell) {
                         let mut target = cellname(self.func, None, self.cell_colors, frame.s_cell);

@@ -1705,7 +1705,12 @@ impl<'a> Builder<'a> {
     }
 
     fn write_field(&mut self, base: Idx<Inst>, field: Ustr, value: Idx<Inst>) -> Idx<Inst> {
-        self.emit_cur(Inst::StoreField { base, field, value })
+        self.emit_cur(Inst::StoreField {
+            base,
+            field,
+            value,
+            native_leaf: None,
+        })
     }
 
     fn read_index(&mut self, base: Idx<Inst>, index: Idx<Inst>, kind: ContainerKind) -> Idx<Inst> {
@@ -1815,7 +1820,12 @@ impl<'a> Builder<'a> {
                     };
                 }
             }
-            Inst::StoreField { base, field, value } => {
+            Inst::StoreField {
+                base,
+                field,
+                value,
+                native_leaf: None,
+            } => {
                 if let Some(&owner) = self.callback_records.get(&base) {
                     let index = self.emit_cur(Inst::Const(Lit::Str(field)));
                     inst = Inst::StoreIndex {

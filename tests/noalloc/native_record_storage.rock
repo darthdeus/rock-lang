@@ -1,0 +1,78 @@
+struct Asset { id: int }
+value Point { x: int, y: int }
+value WideRow {
+    handle: Entity<Asset>,
+    point: Point,
+    angle: float,
+    flags: int,
+    alpha: float,
+}
+
+struct Rows { items: [WideRow] = [] }
+
+fn handle(slot: int) -> Entity<Asset> {
+    return Entity { _scene_id: 1, _arena_id: 2, _slot: slot, _generation: 4 }
+}
+
+fn row(slot: int) -> WideRow {
+    return WideRow { handle: handle(slot), point: Point { x: 5, y: 6 }, angle: 7, flags: 8, alpha: 0.5 }
+}
+
+@noalloc fn overwrite(items: [WideRow], index: int, next: Entity<Asset>, point: Point) {
+    items[index].handle = next
+    items[index].point = point
+}
+
+@noalloc fn flip_point(items: [WideRow], index: int) {
+    items[index].point = Point { x: items[index].point.y, y: items[index].point.x }
+}
+
+@noalloc fn projected_slot(items: [WideRow], index: int) -> int {
+    return items[index].handle._slot
+}
+
+fn erased<T>(v: T) -> any { return v }
+
+inline(lua) fn carrier(v: any) -> any = """
+    assert(rawget(v, 0) == 1)
+    local item = rawget(v, 1)
+    assert(type(item) == "cdata")
+    return item
+"""
+
+inline(lua) fn same_identity(a: any, b: any) -> bool = "return rawequal(a, b)"
+inline(lua) fn raw_slot(row: any) -> int = "return row.handle._slot"
+
+@test(backends = "lua") fn boxed_raw_vec_carrier_is_stable_between_writes() {
+    let rows = [row(3)]
+    let opaque = erased(rows)
+    let first = carrier(opaque)
+    overwrite(rows, 0, handle(9), Point { x: 13, y: 14 })
+    assert(same_identity(first, carrier(opaque)))
+    assert_eq(raw_slot(first), 9)
+    rows[0] = row(9)
+    assert(!same_identity(first, carrier(opaque)))
+}
+
+@test fn mutable_alias_sees_writes_while_value_snapshots_keep_their_fields() {
+    let owner = Rows { items: [row(3)] }
+    let alias = owner.items
+    let saved = owner.items[0]
+    let prev_handle = alias[0].handle
+    overwrite(alias, 0, handle(9), Point { x: 13, y: 14 })
+    assert_eq(projected_slot(owner.items, 0), 9)
+    assert_eq(owner.items[0].point.y, 14)
+    flip_point(alias, 0)
+    assert_eq(owner.items[0].point.x, 14)
+    assert_eq(owner.items[0].point.y, 13)
+    assert_eq(saved.handle._slot, 3)
+    assert_eq(saved.point.y, 6)
+    assert_eq(prev_handle._slot, 3)
+}
+
+@test(backends = "lua") fn inspect_recovers_wide_nested_record_fields() {
+    let text = inspect(Rows { items: [row(3)] })
+    assert(text.contains("WideRow"))
+    assert(text.contains("flags = 8"))
+    assert(text.contains("x = 5"))
+}

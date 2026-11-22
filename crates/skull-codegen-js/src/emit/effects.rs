@@ -107,7 +107,9 @@ impl Emitter<'_> {
                     self.push(&format!("{k} = __map_next({t}, {k});"));
                     self.push(&format!("{v} = ({k} === null ? null : {t}.get({k}));"));
                 }
-                Inst::StoreField { base, field, value } => {
+                Inst::StoreField {
+                    base, field, value, ..
+                } => {
                     let line = format!(
                         "{} = {};",
                         js_member(&self.render_val(*base)?, field),

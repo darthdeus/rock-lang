@@ -94,7 +94,16 @@ fn state_store(
     value: Idx<Inst>,
 ) {
     let base = emit(step, block, Inst::Load(state));
-    emit(step, block, Inst::StoreField { base, field, value });
+    emit(
+        step,
+        block,
+        Inst::StoreField {
+            native_leaf: None,
+            base,
+            field,
+            value,
+        },
+    );
 }
 
 fn stamp_state(
@@ -426,6 +435,7 @@ pub fn transform_coroutine(
                 let sv = step.alloc_inst(Inst::Load(s_cell));
                 step.blocks[bid].insts.push(sv);
                 let store = step.alloc_inst(Inst::StoreField {
+                    native_leaf: None,
                     base: sv,
                     field: ustr::Ustr::from("__inner"),
                     value: x,
@@ -539,6 +549,7 @@ pub fn transform_coroutine(
         &mut step,
         entry,
         Inst::StoreField {
+            native_leaf: None,
             base: frame,
             field: ustr::Ustr::from(STATE),
             value: running,

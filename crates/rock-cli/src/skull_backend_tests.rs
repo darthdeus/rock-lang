@@ -672,14 +672,24 @@ mod shape_drift_tests {
                   fn spawn() { M = Mob { hp: 10, armor: 5 } }\n\
                   fn main() { }\n";
         let reordered = v1.replace("hp: int, armor: int", "armor: int, hp: int");
-        for (before, after) in [(v0, v1), (v1, v0), (v1, reordered.as_str())] {
+        let native = "value NativePoint { x: float }\n\
+                      value NativeRow { point: NativePoint, a: int, b: int, c: int, d: int }\n\
+                      global ROWS: [NativeRow] = []\n\
+                      fn main() { ROWS.push(NativeRow { point: NativePoint { x: 1.0 }, a: 0, b: 0, c: 0, d: 0 }) }\n";
+        let native_wide = native.replace("x: float", "x: float, y: float = 0.0");
+        for (before, after, drifted) in [
+            (v0, v1, "Mob"),
+            (v1, v0, "Mob"),
+            (v1, reordered.as_str(), "Mob"),
+            (native, native_wide.as_str(), "NativePoint"),
+        ] {
             let mut fx = ProjectFixture::boot(before);
             let baseline = fx.main_text();
 
             let reload = fx.edit(after).expect("recompile edited layout");
             match &reload {
                 SkullReload::ShapeChanged { types } => assert!(
-                    types.iter().any(|t| t == "Mob"),
+                    types.iter().any(|t| t == drifted),
                     "the restart request must name the drifted type, got {types:?}"
                 ),
                 other => {

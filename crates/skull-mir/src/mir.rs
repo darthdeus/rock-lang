@@ -492,6 +492,8 @@ pub enum Inst {
         base: Idx<Inst>,
         field: Ustr,
         value: Idx<Inst>,
+        /// The logical leaf name when `field` aliases nested cdata storage.
+        native_leaf: Option<Ustr>,
     },
     StoreIndex {
         base: Idx<Inst>,

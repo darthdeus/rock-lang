@@ -1596,36 +1596,68 @@ impl<'a> Builder<'a> {
             self.store_flat_cells(b, key, cells);
             return Ok(());
         }
-        // A non-inline `nobox` child lives nested in its cdata parent: write its
-        // leaves through the stored child rather than box a copy.
         if !self.scx.values_first_class
-            && let Some(cname) = self.value_struct_of(target)
-            && self.is_nobox_struct(cname)
+            && let Some(child) = self.value_struct_of(target)
         {
-            let shape = self.nominal_rep_shape_required(cname, false)?;
-            if self.shape_is_plain_keys(&shape) {
-                let r = self.lower_expr_repr(value)?;
-                let leaves = self.repr_to_leaves_bundle_for_shape(&r, &shape)?;
-                let paths = self.boxed_leaf_paths(&shape, true)?;
-                if paths.len() != leaves.len() {
-                    return Err(self.gap_here(format!(
-                        "`{cname}` has {} leaf paths but the value produced {} leaves",
-                        paths.len(),
-                        leaves.len()
-                    )));
-                }
-                let child = self.read_field(b, key);
-                for (path, leaf) in paths.into_iter().zip(leaves) {
-                    let (last, walk) = path.split_last().ok_or_else(|| {
-                        self.gap_here(format!("`{cname}` has an empty leaf path"))
-                    })?;
-                    let mut at = child;
-                    for seg in walk {
-                        at = self.read_field(at, *seg);
+            let native_owner = if key == field
+                && self.scx.target == bone_core::hir::FnBackend::Lua
+                && matches!(self.body.expr_arena[base], Expr::Index { .. })
+                && let Some(owner) = self.value_struct_of(base)
+                && self
+                    .scx
+                    .rep_arena()
+                    .nominal_value_storage_required(self.ws, self.scx.target, owner)
+                    .map_err(|e| self.gap_here(e.message))?
+                    == ValueStorage::CData
+            {
+                Some(owner)
+            } else {
+                None
+            };
+            if native_owner.is_some() || self.is_nobox_struct(child) {
+                let shape = self.nominal_rep_shape_required(child, false)?;
+                if self.shape_is_plain_keys(&shape) {
+                    let rhs = self.lower_expr_repr(value)?;
+                    let leaves = self.repr_to_leaves_bundle_for_shape(&rhs, &shape)?;
+                    if let Some(owner) = native_owner {
+                        // The parent owns these bytes; indexing its child would make
+                        // LuaJIT allocate an FFI reference in the interpreter.
+                        for (path, value) in
+                            Self::pair_embed_leaves(value_leaf_paths(&shape), leaves)?
+                        {
+                            let name = path.as_str().rsplit('.').next().unwrap_or(path.as_str());
+                            let alias =
+                                cdata_leaf_alias(self.ws, owner, &format!("{field}.{path}"));
+                            self.emit_cur(Inst::StoreField {
+                                base: b,
+                                field: alias,
+                                value,
+                                native_leaf: Some(crate::names::ustr(name)),
+                            });
+                        }
+                    } else {
+                        let paths = self.boxed_leaf_paths(&shape, true)?;
+                        if paths.len() != leaves.len() {
+                            return Err(self.gap_here(format!(
+                                "`{child}` has {} leaf paths but the value produced {} leaves",
+                                paths.len(),
+                                leaves.len()
+                            )));
+                        }
+                        let boxed_child = self.read_field(b, key);
+                        for (path, leaf) in paths.into_iter().zip(leaves) {
+                            let (last, walk) = path.split_last().ok_or_else(|| {
+                                self.gap_here(format!("`{child}` has an empty leaf path"))
+                            })?;
+                            let mut at = boxed_child;
+                            for seg in walk {
+                                at = self.read_field(at, *seg);
+                            }
+                            self.write_field(at, *last, leaf);
+                        }
                     }
-                    self.write_field(at, *last, leaf);
+                    return Ok(());
                 }
-                return Ok(());
             }
         }
         let expected = self.concrete_expr_ty(target);

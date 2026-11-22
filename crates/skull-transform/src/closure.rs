@@ -345,7 +345,12 @@ pub fn convert_closures_framed(
                     };
                     if let Some((base, field)) = place {
                         mf.insts[id] = match value {
-                            Some(value) => Inst::StoreField { base, field, value },
+                            Some(value) => Inst::StoreField {
+                                native_leaf: None,
+                                base,
+                                field,
+                                value,
+                            },
                             None => Inst::Field {
                                 nonthrowing: false,
                                 base,

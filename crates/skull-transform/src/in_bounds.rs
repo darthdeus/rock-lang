@@ -1442,11 +1442,14 @@ fn step(facts: &mut Facts, func: &Body<'_>, ctx: &Ctx<'_>, id: Idx<Inst>, may_re
         Inst::StoreGlobal { name, .. } => facts.forget(func, Mentions::kinds(GLOBAL), |k| {
             k == KeyData::Global(*name)
         }),
-        Inst::StoreField { field, .. } => {
-            if is_length(*field) {
+        Inst::StoreField {
+            field, native_leaf, ..
+        } => {
+            let field = native_leaf.unwrap_or(*field);
+            if is_length(field) {
                 facts.forget_lengths();
             }
-            facts.forget_field(func, *field);
+            facts.forget_field(func, field);
         }
         // A foreign backing can enter __newindex while appending an absent slot.
         Inst::ArrayPush { .. } => {

@@ -51,6 +51,7 @@ fn materialize_frame_inner(
                     let sv = mf.alloc_inst(Inst::Load(s_cell));
                     new.push(sv);
                     mf.insts[id] = Inst::StoreField {
+                        native_leaf: None,
                         base: sv,
                         field: frame_field(slots[&cell]),
                         value,
@@ -165,6 +166,7 @@ fn store_back(
     let value = func.alloc_inst(Inst::Load(temp));
     let base = func.alloc_inst(Inst::Load(state));
     let store = func.alloc_inst(Inst::StoreField {
+        native_leaf: None,
         base,
         field: frame_field(slot),
         value,

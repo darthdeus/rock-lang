@@ -710,7 +710,9 @@ fn field_store(
     load: Idx<Inst>,
 ) -> Option<(Idx<Inst>, ustr::Ustr, Idx<Inst>)> {
     let (base, field, value) = match &func.insts[i] {
-        Inst::StoreField { base, field, value } => (*base, *field, *value),
+        Inst::StoreField {
+            base, field, value, ..
+        } => (*base, *field, *value),
         Inst::StoreIndex {
             base,
             index,
