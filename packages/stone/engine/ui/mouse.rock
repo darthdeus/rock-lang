@@ -316,7 +316,7 @@ pub fn ui_mouse_begin_frame() {
     ui_slider_drag_begin_frame()
 }
 
-pub fn ui_hot(id: int) -> bool { return UI_MOUSE.hot == id }
+pub @noalloc fn ui_hot(id: int) -> bool { return UI_MOUSE.hot == id }
 
 pub fn ui_item_hot() -> bool {
     let m = UI_MOUSE
@@ -327,7 +327,7 @@ fn ui_hover_entered(id: int) -> bool {
     let m = UI_MOUSE
     return m.hot == id && m.hot_prev != id && m.active == 0
 }
-pub fn ui_active(id: int) -> bool { return UI_MOUSE.active == id }
-pub fn ui_clicked(id: int) -> bool { return UI_MOUSE.clicked == id }
+pub @noalloc fn ui_active(id: int) -> bool { return UI_MOUSE.active == id }
+pub @noalloc fn ui_clicked(id: int) -> bool { return UI_MOUSE.clicked == id }
 
-pub fn ui_wants_mouse() -> bool { return UI_MOUSE.hot != 0 || UI_MOUSE.active != 0 }
+pub @noalloc fn ui_wants_mouse() -> bool { return UI_MOUSE.hot != 0 || UI_MOUSE.active != 0 }

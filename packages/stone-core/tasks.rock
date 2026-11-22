@@ -27,13 +27,13 @@ pub fn TaskClock.state(clock) -> TaskClock {
     return clock
 }
 
-pub fn task_clock_retire(clock: TaskClock) -> bool {
+pub @noalloc fn task_clock_retire(clock: TaskClock) -> bool {
     if clock.retired { return false }
     clock.retired = true
     return true
 }
 
-pub fn task_clock_same(a: TaskClock, b: TaskClock) -> bool { return same_ref(a, b) }
+pub @noalloc fn task_clock_same(a: TaskClock, b: TaskClock) -> bool { return same_ref(a, b) }
 
 pub fn TaskClock.now(clock) -> float { return clock.state().time }
 pub fn TaskClock.delta(clock) -> float { return clock.state().dt }
@@ -68,27 +68,27 @@ pub value Task<R = ()> {
 
 /// The bound clock is available while the task state is live. Completion or
 /// abandonment retires that state, so terminal handles have no task clock.
-pub fn Task<R>.clock(task) -> TaskClock {
+pub @noalloc fn Task<R>.clock(task) -> TaskClock {
     if let state = task.state.get() { return state.clock }
     error("Task.clock: task state has been retired")
     return phantom()
 }
 
-pub @pure @inline fn task_same_instance(a: Task, b: Task) -> bool {
+pub @pure @inline @noalloc fn task_same_instance(a: Task, b: Task) -> bool {
     return same_ref(a.state, b.state)
 }
 
-pub fn Task.last_tick_frame(task) -> int {
+pub @noalloc fn Task.last_tick_frame(task) -> int {
     if let state = task.state.get() { return state.last_tick_frame }
     return -1
 }
 
-pub fn Task.active(task) -> Wait {
+pub @noalloc fn Task.active(task) -> Wait {
     if let state = task.state.get() { return state.active }
     return Wait::Frame
 }
 
-pub fn TaskState.get(state) -> TaskState? {
+pub @noalloc fn TaskState.get(state) -> TaskState? {
     if state.retired || state.scope.disposed { return null }
     return state
 }

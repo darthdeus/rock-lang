@@ -317,11 +317,11 @@ fn ui_text_input_prefix(value: string, count: int) -> string {
     return sb_build(out)
 }
 
-pub fn ui_text_input_active(id: int) -> bool {
+pub @noalloc fn ui_text_input_active(id: int) -> bool {
     return id != 0 && UI_TEXT_INPUT.active_id == id
 }
 
-pub fn ui_text_input_value(id: int) -> string {
+pub @noalloc fn ui_text_input_value(id: int) -> string {
     if !ui_text_input_active(id) { return "" }
     return UI_TEXT_INPUT.value
 }

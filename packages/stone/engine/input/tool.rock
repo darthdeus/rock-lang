@@ -18,7 +18,7 @@ pub enum ToolKey {
     Escape, R, C, Tab, Return, Backspace, Delete, F, P, Z,
 }
 
-fn tool_key_name(key: ToolKey) -> string {
+@noalloc fn tool_key_name(key: ToolKey) -> string {
     match key {
         ToolKey::F3 => "f3", ToolKey::F5 => "f5", ToolKey::F6 => "f6", ToolKey::F7 => "f7",
         ToolKey::F8 => "f8", ToolKey::F10 => "f10",

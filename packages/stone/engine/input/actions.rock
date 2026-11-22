@@ -81,7 +81,7 @@ pub fn action_claims_begin_frame() {
     ACTION_CLAIMED_SCANCODES.clear()
 }
 
-pub fn action_scancode_claimed(scan: string) -> bool {
+pub @noalloc fn action_scancode_claimed(scan: string) -> bool {
     for claimed in ACTION_CLAIMED_SCANCODES {
         if claimed == scan { return true }
     }
@@ -357,7 +357,7 @@ fn action_key_matches(scan: string, ctrl: bool, shift: bool, alt: bool, gui: boo
     return action_modifiers_for(scan) == wanted
 }
 
-fn action_axis_value_at(raw: float, dir: int, deadzone: float) -> float {
+@noalloc fn action_axis_value_at(raw: float, dir: int, deadzone: float) -> float {
     let directed = raw * (dir as float)
     if directed <= deadzone { return 0.0 }
     return clamp((directed - deadzone) / (1.0 - deadzone), 0.0, 1.0)

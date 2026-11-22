@@ -183,7 +183,7 @@ fn input_classify_last_device(event: InputDeviceEvent) -> InputDevice? {
 
 global LAST_INPUT_DEVICE: InputDevice = InputDevice::KeyboardMouse
 
-pub fn input_note_last_device(event: InputDeviceEvent) {
+pub @noalloc fn input_note_last_device(event: InputDeviceEvent) {
     let device = input_classify_last_device(event)
     if device != null { LAST_INPUT_DEVICE = device }
 }
