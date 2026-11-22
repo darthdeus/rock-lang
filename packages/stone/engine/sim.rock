@@ -182,7 +182,6 @@ fn sim_start_entry(frame: int) {
         + "\",\"runtime\":{{\"width\":" + to_string(size.x)
         + ",\"height\":" + to_string(size.y)
         + ",\"jit\":\"" + jit_status_string() + "\"}}}}")
-    sim_alloc_census_begin()
 
     let entry = SIMS.get(SIM_NAME)
     if entry == null {
@@ -787,14 +786,7 @@ pub fn _stop_sim_impl(site: string) {
 
 // Emits `stop` last, after whatever it found.
 fn sim_finish_stop() {
-    let stop_sim_reached = SIM_STOP_PENDING
-    let census = sim_alloc_census_json(stop_sim_reached, !SIM_SKIP_RENDER)
-    if !SIM_STOP_PENDING {
-        if census != "" {
-            _sim_emit_impl(census, "stone/engine/sim.rock:928")
-        }
-        return
-    }
+    if !SIM_STOP_PENDING { return }
     SIM_STOP_PENDING = false
     let site = SIM_STOP_SITE
     SIM_STOP_SITE = ""
@@ -820,9 +812,6 @@ fn sim_finish_stop() {
     let unfilled_textures = stone_unfilled_texture_slot_count()
     if unfilled_textures > 0 {
         _sim_emit_impl("{{\"op\":\"expect_fail\",\"message\":\"texture slots drawn with but never filled (see the [SHADER] errors above)\",\"actual\":\"{unfilled_textures}\",\"expected\":\"0\"}}", site)
-    }
-    if census != "" {
-        _sim_emit_impl(census, "stone/engine/sim.rock:928")
     }
     _sim_emit_impl("{{\"op\":\"stop\"}}", site)
 }

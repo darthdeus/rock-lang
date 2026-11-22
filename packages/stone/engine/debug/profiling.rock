@@ -538,107 +538,6 @@ fn live_allocation_frame_end() {
     c.frame_open = false
 }
 
-pub value SimAllocationCensus {
-    enabled: bool = false,
-    started: bool = false,
-    finished: bool = false,
-    warmup_frames_requested: int = 0,
-    frame_count: int = 0,
-    measured_frames: int = 0,
-    frame_started: bool = false,
-    start_kb: float = 0.0,
-    last_kb: float = 0.0,
-    frame_start_kb: float = 0.0,
-    initialization_kb: float = 0.0,
-    outside_frame_kb: float = 0.0,
-    warmup_kb: float = 0.0,
-    measured_kb: float = 0.0,
-    frame_start_calls: int = 0,
-    frame_start_allocation_calls: int = 0,
-    frame_start_reallocation_calls: int = 0,
-    measured_calls: int = 0,
-    measured_allocation_calls: int = 0,
-    measured_reallocation_calls: int = 0,
-}
-
-pub global SIM_ALLOC_CENSUS: SimAllocationCensus = SimAllocationCensus {}
-
-fn sim_alloc_census_begin() {
-    let warmup = max(get_env_int("STONE_SIM_ALLOCATION_WARMUP_FRAMES", 2), 0)
-    SIM_ALLOC_CENSUS = SimAllocationCensus {}
-    SIM_ALLOC_CENSUS.warmup_frames_requested = warmup
-    SIM_ALLOC_CENSUS.enabled = get_env_int("STONE_SIM_ALLOCATION_CENSUS", 0) == 1
-    if !SIM_ALLOC_CENSUS.enabled { return () }
-
-    stone_lua_counter_install()
-    stone_lua_counter_begin()
-    let kb = lua_alloc_gross_request_kb()
-    SIM_ALLOC_CENSUS.started = true
-    SIM_ALLOC_CENSUS.start_kb = kb
-    SIM_ALLOC_CENSUS.last_kb = kb
-}
-
-fn sim_alloc_census_frame_begin() {
-    if !SIM_ALLOC_CENSUS.enabled || !SIM_ALLOC_CENSUS.started
-            || SIM_ALLOC_CENSUS.finished { return () }
-    let kb = lua_alloc_gross_request_kb()
-    let outside = max(0.0, kb - SIM_ALLOC_CENSUS.last_kb)
-    if SIM_ALLOC_CENSUS.frame_count == 0 {
-        SIM_ALLOC_CENSUS.initialization_kb = SIM_ALLOC_CENSUS.initialization_kb + outside
-    } else {
-        SIM_ALLOC_CENSUS.outside_frame_kb = SIM_ALLOC_CENSUS.outside_frame_kb + outside
-    }
-    SIM_ALLOC_CENSUS.frame_start_kb = kb
-    SIM_ALLOC_CENSUS.frame_start_calls = lua_alloc_call_count()
-    SIM_ALLOC_CENSUS.frame_start_allocation_calls = lua_alloc_allocation_call_count()
-    SIM_ALLOC_CENSUS.frame_start_reallocation_calls = lua_alloc_reallocation_call_count()
-    SIM_ALLOC_CENSUS.frame_started = true
-}
-
-fn sim_alloc_census_frame_end() {
-    if !SIM_ALLOC_CENSUS.enabled || !SIM_ALLOC_CENSUS.started
-            || SIM_ALLOC_CENSUS.finished || !SIM_ALLOC_CENSUS.frame_started { return () }
-    let kb = lua_alloc_gross_request_kb()
-    let frame_kb = max(0.0, kb - SIM_ALLOC_CENSUS.frame_start_kb)
-    let calls = max(0, lua_alloc_call_count() - SIM_ALLOC_CENSUS.frame_start_calls)
-    let allocation_calls = max(0,
-        lua_alloc_allocation_call_count() - SIM_ALLOC_CENSUS.frame_start_allocation_calls)
-    let reallocation_calls = max(0,
-        lua_alloc_reallocation_call_count() - SIM_ALLOC_CENSUS.frame_start_reallocation_calls)
-    let frame = SIM_ALLOC_CENSUS.frame_count
-    if frame < SIM_ALLOC_CENSUS.warmup_frames_requested {
-        SIM_ALLOC_CENSUS.warmup_kb = SIM_ALLOC_CENSUS.warmup_kb + frame_kb
-    } else {
-        SIM_ALLOC_CENSUS.measured_frames += 1
-        SIM_ALLOC_CENSUS.measured_kb = SIM_ALLOC_CENSUS.measured_kb + frame_kb
-        SIM_ALLOC_CENSUS.measured_calls += calls
-        SIM_ALLOC_CENSUS.measured_allocation_calls += allocation_calls
-        SIM_ALLOC_CENSUS.measured_reallocation_calls += reallocation_calls
-    }
-    SIM_ALLOC_CENSUS.frame_count += 1
-    SIM_ALLOC_CENSUS.last_kb = kb
-    SIM_ALLOC_CENSUS.frame_started = false
-}
-
-fn sim_alloc_census_finish() {
-    if !SIM_ALLOC_CENSUS.enabled || !SIM_ALLOC_CENSUS.started
-            || SIM_ALLOC_CENSUS.finished { return () }
-    let kb = lua_alloc_gross_request_kb()
-    SIM_ALLOC_CENSUS.outside_frame_kb = SIM_ALLOC_CENSUS.outside_frame_kb
-        + max(0.0, kb - SIM_ALLOC_CENSUS.last_kb)
-    SIM_ALLOC_CENSUS.last_kb = kb
-    SIM_ALLOC_CENSUS.finished = true
-    stone_lua_counter_end()
-}
-
-fn sim_alloc_census_json(stop_sim_reached: bool, rendering_enabled: bool) -> string {
-    if !SIM_ALLOC_CENSUS.enabled || !SIM_ALLOC_CENSUS.started { return "" }
-    sim_alloc_census_finish()
-    let warmup_frames = min(SIM_ALLOC_CENSUS.frame_count,
-        SIM_ALLOC_CENSUS.warmup_frames_requested)
-    return "{{\"op\":\"allocation_census\",\"build_sha\":\"{__perf_build_sha()}\",\"rendering_enabled\":{rendering_enabled},\"warmup_frames_requested\":{SIM_ALLOC_CENSUS.warmup_frames_requested},\"warmup_frames\":{warmup_frames},\"frame_count\":{SIM_ALLOC_CENSUS.frame_count},\"measured_frames\":{SIM_ALLOC_CENSUS.measured_frames},\"initialization_gross_kb\":{SIM_ALLOC_CENSUS.initialization_kb},\"outside_frame_gross_kb\":{SIM_ALLOC_CENSUS.outside_frame_kb},\"warmup_gross_kb\":{SIM_ALLOC_CENSUS.warmup_kb},\"measured_gross_kb\":{SIM_ALLOC_CENSUS.measured_kb},\"total_gross_kb\":{SIM_ALLOC_CENSUS.initialization_kb + SIM_ALLOC_CENSUS.outside_frame_kb + SIM_ALLOC_CENSUS.warmup_kb + SIM_ALLOC_CENSUS.measured_kb},\"measured_allocator_calls\":{SIM_ALLOC_CENSUS.measured_calls},\"measured_allocation_calls\":{SIM_ALLOC_CENSUS.measured_allocation_calls},\"measured_reallocation_calls\":{SIM_ALLOC_CENSUS.measured_reallocation_calls},\"stop_sim_reached\":{stop_sim_reached},\"measurement_complete\":true}}"
-}
-
 // The GC-window sample is gross Lua allocator request volume, not heap growth or net live memory.
 pub inline(lua) fn __gc_collect_stop() = "collectgarbage('collect'); collectgarbage('stop')"
 pub inline(lua) fn __gc_restart() = "collectgarbage('restart')"
@@ -1584,7 +1483,6 @@ fn init_profiler() {
     live_allocation_capture_reset()
     PROFILER_ENABLED_PENDING = -1
     PROFILER_ALLOC_COUNTER_OWNER = if GC_STEP_ENABLED { 3 } else { 0 }
-    SIM_ALLOC_CENSUS = SimAllocationCensus {}
     gc_step_capture_init()
     SECTION_IDS = map_new()
     SECTION_NAMES = vec_new()
@@ -1962,7 +1860,6 @@ fn profile_frame_begin() {
     if !IMAGE_PROFILE_STARTED { image_profile_restart() }
 
     profile_frame_timing_begin()
-    sim_alloc_census_frame_begin()
 
     PROFILER.frame_profile_active = profiler_capture_enabled()
     if !PROFILER.frame_profile_active { return () }
@@ -2002,7 +1899,6 @@ fn profile_frame_end() {
     let frame_end_time = stone_get_time()
 
     profile_frame_timing_end(frame_end_time, -1.0)
-    sim_alloc_census_frame_end()
 
     if !PROFILER.frame_profile_active { return () }
 

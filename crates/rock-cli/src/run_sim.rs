@@ -2371,7 +2371,6 @@ fn child_command(part: &WorkerPart, output: &str, quiet: bool) -> (std::process:
         .env("STONE_AUDIO_STUB", unstub_override("STONE_AUDIO_STUB"))
         .envs(preset_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .env("FPS_LOG", "0")
-        .env("STONE_SIM_ALLOCATION_CENSUS", "0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
