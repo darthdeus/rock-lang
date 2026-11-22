@@ -106,10 +106,7 @@ mod loops;
 mod nobox;
 mod pattern;
 mod resolve;
-pub use resolve::{
-    NoServingBinding, backend_variant, backend_variant_group, backend_variant_instance,
-    canonical_variant,
-};
+pub use resolve::{NoServingBinding, backend_variant, backend_variant_instance, canonical_variant};
 mod stmt;
 mod storage;
 pub use storage::SYNTHESIZED_ENTRIES;

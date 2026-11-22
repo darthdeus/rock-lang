@@ -154,11 +154,6 @@ pub struct Dominators {
 }
 
 impl Dominators {
-    pub fn idom(&self, b: Idx<Block>) -> Option<Idx<Block>> {
-        let &d = self.idom.get(dense::bx(b))?;
-        (d != dense::NO_BLOCK).then(|| dense::bi(d as usize))
-    }
-
     pub fn dominates(&self, a: Idx<Block>, b: Idx<Block>) -> bool {
         dense::dominates(&self.idom, dense::bx(a) as u32, dense::bx(b) as u32)
     }

@@ -70,15 +70,6 @@ pub fn canonical_variant(ws: &Workspace, rep: FuncRef) -> FuncRef {
     }
 }
 
-pub fn backend_variant_group(ws: &Workspace, member: FuncRef) -> Vec<FuncRef> {
-    let mut group = Vec::new();
-    if visit_variant_group(ws, member, |_, candidate| group.push(candidate)) {
-        group
-    } else {
-        vec![member]
-    }
-}
-
 // A repeated backend is an overload ambiguity; the group is discarded.
 fn visit_variant_group(
     ws: &Workspace,
