@@ -1,4 +1,5 @@
 """Intervals use paired windows and a matching-work A/A reference."""
+from argparse import Namespace
 import hashlib
 import json
 from pathlib import Path
@@ -6,7 +7,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from runtime_pairs import INSTRUCTION_PROBE, instructions_per_frame, main, summarize
+from runtime_pairs import INSTRUCTION_PROBE, instructions_per_frame, main, measure, summarize
 
 
 def pairs(deltas, work=1):
@@ -71,6 +72,16 @@ class RuntimePairTests(unittest.TestCase):
                 self.assertEqual(env["LUA_INIT"], INSTRUCTION_PROBE)
             plan = json.loads((Path(directory) / "run" / "summary.json").read_text())["plan"]
             self.assertEqual(plan["luajit_sha256"], hashlib.sha256(vm.read_bytes()).hexdigest())
+
+    def test_measurement_frames_override_the_scenario_default(self):
+        with TemporaryDirectory() as directory:
+            args = Namespace(out=Path(directory), project=".", frames=200,
+                             warmup_frames=20, seconds=5, var=[])
+            with patch("runtime_pairs.subprocess.check_output", return_value="load"):
+                with patch("runtime_pairs.subprocess.run", return_value=Namespace(returncode=1)) as run:
+                    with self.assertRaisesRegex(RuntimeError, "exited 1"):
+                        measure(args, Path("base"), {"PERF_MEASURE_FRAMES": "600"}, "trial")
+            self.assertEqual(run.call_args.kwargs["env"]["PERF_MEASURE_FRAMES"], "200")
 
     def test_counters_default_to_the_deterministic_vm_and_fixed_work(self):
         with TemporaryDirectory() as directory:

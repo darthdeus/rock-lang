@@ -168,6 +168,7 @@ def measure(args, binary, env, name):
                "--seconds", str(args.seconds), "--gc-window", str(args.frames - ALLOC_START),
                "--gc-window-start", str(ALLOC_START), "--gc-window-mode", "running",
                "--output", str(output), *(f"--var={var}" for var in args.var)]
+    env = env | {"PERF_MEASURE_FRAMES": str(args.frames)}
     with (output / "run.log").open("w") as log:
         result = subprocess.run(command, env=env, stdout=log, stderr=subprocess.STDOUT)
     if result.returncode:
