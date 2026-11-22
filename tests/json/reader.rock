@@ -72,6 +72,14 @@ fn reader_integer_conversion_matches_host_at_precision_boundaries() {
         assert_eq(json_reader_strict_int(reader).unwrap(), expected, literal)
         assert_eq(json_reader_as_float(reader).unwrap(), expected as float, literal)
     }
+    for literal in ["1.0", "1e0"] {
+        let raw = json_reader_decode(literal).unwrap()
+        let materialized = json_reader_value(json_reader_materialize(raw))
+        for reader in [raw, materialized] {
+            assert(json_reader_strict_int(reader) == null, literal)
+            assert_eq(json_reader_as_float(reader).unwrap(), 1.0, literal)
+        }
+    }
 }
 
 @test

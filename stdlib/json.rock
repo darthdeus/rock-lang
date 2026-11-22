@@ -1011,32 +1011,27 @@ fn json_reader_as_bool(reader: JsonReader) -> bool? {
     return json_reader_as_bool_at(reader.src.unwrap(), reader.at)
 }
 
-fn json_reader_number_end_at(src: string, at: int, strict: bool = false) -> (float?, int) {
+fn json_reader_number_end_at(src: string, at: int) -> (float?, int) {
     if at < 0 { return (null, at) }
     let b = src.unit_at(at)
     if b != 45 && (b < 48 || b > 57) { return (null, at) }
     let (end, is_float, ok) = parse_number_scan_at(src, at)
     assert(ok, "validated JSON reader number must scan")
-    if strict && is_float { return (null, end) }
     if is_float { return (src.parse_float_at(at, end), end) }
     return (src.substring(at, end).parse_int().unwrap() as float, end)
 }
 
-fn json_reader_number_at(src: string, at: int, strict: bool = false) -> float? {
-    let (value, _) = json_reader_number_end_at(src, at, strict)
+fn json_reader_number_at(src: string, at: int) -> float? {
+    let (value, _) = json_reader_number_end_at(src, at)
     return value
 }
 
-fn json_reader_number(reader: JsonReader, strict: bool = false) -> float? {
-    if let value = reader.value {
-        if strict { return match value { JsonValue::Int(i) => i as float, _ => null } }
-        return json_as_float(value)
-    }
+fn json_reader_as_float(reader: JsonReader) -> float? {
+    if let value = reader.value { return json_as_float(value) }
     if reader.at < 0 { return null }
-    return json_reader_number_at(reader.src.unwrap(), reader.at, strict)
+    return json_reader_number_at(reader.src.unwrap(), reader.at)
 }
 
-fn json_reader_as_float(reader: JsonReader) -> float? { return json_reader_number(reader) }
 fn json_reader_read_int_at(src: string, at: int, strict: bool) -> int? {
     if at < 0 { return null }
     let b = src.unit_at(at)
