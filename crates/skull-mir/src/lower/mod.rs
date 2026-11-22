@@ -714,11 +714,20 @@ fn hash_init_node(body: &Body, node: HirChild, h: &mut std::collections::hash_ma
                 }
                 return;
             }
-            Expr::Not(..)
-            | Expr::BitNot(_)
-            | Expr::UnaryMinus(..)
-            | Expr::Spread(_)
-            | Expr::YieldDelegate(_) => tag!(14),
+            Expr::Not(value, _) | Expr::UnaryMinus(value, _) => {
+                let numeric_literal =
+                    matches!(body.expr_arena[value], Expr::Int(_) | Expr::Float(_));
+                let negation = matches!(body.expr_arena[e], Expr::UnaryMinus(..));
+                // The operand tag distinguishes the two legacy encodings.
+                tag!(match (negation, numeric_literal) {
+                    (true, true) | (false, false) => 14,
+                    (true, false) => 15,
+                    (false, true) => 16,
+                });
+            }
+            Expr::BitNot(_) => tag!(17),
+            Expr::Spread(_) => tag!(18),
+            Expr::YieldDelegate(_) => tag!(26),
             Expr::Return(_) => tag!(19),
             Expr::Yield(_) => tag!(20),
             Expr::Break => tag!(21),
