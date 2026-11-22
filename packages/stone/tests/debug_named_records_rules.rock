@@ -1,0 +1,37 @@
+struct DebugNamedProbe {
+    hp: int,
+    label: string,
+    next: DebugNamedProbe? = null,
+}
+
+// A live debugger reads and writes Rock records by field name.
+inline(lua) fn __debug_named_get<T>(@repr(opaque) o: T, field: string) -> any = "return o[field]"
+inline(lua) fn __debug_named_set<T, V>(@repr(opaque) o: T, field: string, @repr(opaque) v: V) = "o[field] = v"
+inline(lua) fn __debug_named_set_fails<T>(@repr(opaque) o: T, field: string) -> bool = """
+    return not pcall(function() o[field] = 1 end)
+"""
+// MobDebug's serializer replaces a value by its metatable's __serialize result.
+inline(lua) fn __debug_named_serialized<T>(@repr(opaque) o: T, field: string) -> any = """
+    local mt = getmetatable(o)
+    if type(mt) ~= "table" or not mt.__serialize then return nil end
+    return mt.__serialize(o)[field]
+"""
+
+@test(backends = "lua")
+fn debug_named_records_read_write_and_serialize_by_field_name() {
+    let probe = DebugNamedProbe { hp: 5, label: "probe" }
+    debug_named_records(true)
+    defer { debug_named_records(false) }
+    assert_eq(cast<int>(__debug_named_get(probe, "hp")), 5, "named read")
+    assert(__debug_named_get(probe, "next") == null, "unset nullable field reads nil")
+    __debug_named_set(probe, "hp", 7)
+    assert_eq(probe.hp, 7, "a named write reaches the typed field")
+    let other = DebugNamedProbe { hp: 1, label: "other" }
+    __debug_named_set(probe, "next", other)
+    assert(probe.next?.label == "other", "a named write fills an unset slot")
+    assert(__debug_named_set_fails(probe, "missing"), "writing an undeclared field fails")
+    assert_eq(cast<string>(__debug_named_serialized(probe, "label")), "probe", "serialized view uses names")
+    debug_named_records(false)
+    assert(__debug_named_serialized(probe, "label") == null, "disabling removes the view")
+    assert(__debug_named_get(probe, "hp") == null, "disabled records keep compiler-private keys")
+}

@@ -110,3 +110,29 @@ fn toggle_profiler_key() {
         log_info("STONE", "Profiler enabled: {enabled}")
     }
 }
+
+// Ordinary records keep compiler-private integer keys on Lua. While a live
+// debugger is attached, their metatables map declared field names to those
+// keys, so raw Lua reads, writes and MobDebug's serializer see names. The
+// metamethods cost every nil-slot access, so they exist only while enabled.
+pub inline(lua) fn debug_named_records(enabled: bool) = """
+    for _, mt in pairs(__rock_box_mts) do
+        local slots, fields = mt.__rock_slots, mt.__rock_fields
+        if mt.__rock_debug_named and not enabled then
+            mt.__index, mt.__newindex, mt.__serialize, mt.__rock_debug_named = nil, nil, nil, nil
+        elseif slots and enabled then
+            mt.__rock_debug_named = true
+            mt.__index = function(t, key) local slot = slots[key]; if slot then return rawget(t, slot) end end
+            mt.__newindex = function(t, key, value)
+                local slot = type(key) == "number" and key or slots[key]
+                if not slot then error("no field `" .. tostring(key) .. "` in " .. tostring(mt.__ty), 2) end
+                rawset(t, slot, value)
+            end
+            mt.__serialize = function(t)
+                local view = {}
+                for key, value in pairs(t) do view[fields[key] or key] = value end
+                return view
+            end
+        end
+    end
+"""
