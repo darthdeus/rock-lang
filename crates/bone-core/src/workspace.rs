@@ -312,13 +312,6 @@ impl Workspace {
         id
     }
 
-    pub fn insert_module(&mut self, module: Module) -> ModuleId {
-        let id = self.place_module(module);
-        let signatures = self.render_param_signatures(id);
-        self.store_param_signatures(id, signatures);
-        id
-    }
-
     pub fn insert_modules(&mut self, modules: impl IntoIterator<Item = Module>) -> Vec<ModuleId> {
         let mut modules = modules.into_iter();
         let mut ids = Vec::with_capacity(modules.size_hint().0);
