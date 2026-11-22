@@ -88,15 +88,6 @@ pub fn prebuilt_dir() -> PathBuf {
     dir
 }
 
-pub fn source_root() -> PathBuf {
-    let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    manifest
-        .ancestors()
-        .find(|dir| dir.join("Cargo.toml").is_file() && dir.join("gamelibs.version").is_file())
-        .unwrap_or_else(|| panic!("no Rock source workspace above {}", manifest.display()))
-        .to_path_buf()
-}
-
 pub fn link_search_and_rpath() {
     let lib = prebuilt_dir().join("lib");
     println!("cargo:rustc-link-search=native={}", lib.display());
