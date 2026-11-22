@@ -103,7 +103,7 @@ fn uniform_block_dump_begin_frame() {
 fn uniform_block_dump_key() {
     if !(debug_keys_enabled() && tool_ctrl_held() && tool_key_pressed(ToolKey::F7)) { return }
     if UNIFORM_BLOCK_DUMP_ON { return }
-    let base = "{UNIFORM_BLOCK_DUMP_DIR}/capture_{os_time()}"
+    let base = "{UNIFORM_BLOCK_DUMP_DIR}/capture_{clock_unix_seconds()}"
     let dir = base
     let suffix = 1
     while file_exists(dir) || stone_is_directory(dir) {
@@ -251,7 +251,7 @@ fn uniform_block_dump_finish() {
         let _ = create_directory(UNIFORM_BLOCK_DUMP_DIR)
         let base = if UNIFORM_BLOCK_DUMP_SCREENSHOT_DIR != "" {
             "{UNIFORM_BLOCK_DUMP_SCREENSHOT_DIR}/uniform_blocks"
-        } else { "{UNIFORM_BLOCK_DUMP_DIR}/uniform_blocks_{os_time()}_frames{first}-{RENDER_FRAME}" }
+        } else { "{UNIFORM_BLOCK_DUMP_DIR}/uniform_blocks_{clock_unix_seconds()}_frames{first}-{RENDER_FRAME}" }
         let path = "{base}.json"
         let suffix = 1
         while file_exists(path) {

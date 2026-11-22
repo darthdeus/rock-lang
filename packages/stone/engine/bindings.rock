@@ -927,8 +927,6 @@ fn get_game_identity() -> string {
     return "rockgun"  // Game identity
 }
 
-pub @inline fn os_time() -> int { clock_unix_seconds() }
-
 pub @nowrite @nomangle @inline fn os_getenv(var: string) -> string? { return env_var(var) }
 
 pub inline(lua) fn os_getpid() -> int = """
