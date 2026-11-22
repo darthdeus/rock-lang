@@ -7,7 +7,7 @@ impl<'a> Builder<'a> {
         if self.scx.target == bone_core::hir::FnBackend::Any {
             return;
         }
-        let may_callback = if let Some(mut ty) = self.concrete_expr_ty(source) {
+        let owner = if let Some(mut ty) = self.concrete_expr_ty(source) {
             loop {
                 match ty {
                     MonoTy::Nullable(inner) => ty = inner,
@@ -22,34 +22,39 @@ impl<'a> Builder<'a> {
                 MonoTy::App {
                     ctor: crate::monoty::MonoCtor::Nominal(name),
                     ..
-                } => self
-                    .ws
-                    .nominals
-                    .struct_id(*name)
-                    .is_some_and(|sid| !self.ws.module(sid.module).structs[sid.def].is_value),
-                MonoTy::Any => true,
-                _ => false,
+                } => Some(*name),
+                MonoTy::Any => None,
+                _ => return,
             }
         } else {
             match self.field_base_ty(source) {
                 Some(TypeExpr::App {
                     ctor: TypeCtor::Nominal(name),
                     ..
-                }) => self
-                    .ws
-                    .nominals
-                    .struct_id(name)
-                    .is_some_and(|sid| !self.ws.module(sid.module).structs[sid.def].is_value),
+                }) => Some(name),
                 None
                 | Some(
                     TypeExpr::Generic(..) | TypeExpr::Infer(..) | TypeExpr::Builtin(BuiltinTy::Any),
-                ) => true,
-                _ => false,
+                ) => None,
+                _ => return,
             }
         };
-        if may_callback {
-            self.callback_records.insert(value);
+        if owner.is_some_and(|name| {
+            self.ws
+                .nominals
+                .struct_id(name)
+                .is_none_or(|sid| self.ws.module(sid.module).structs[sid.def].is_value)
+        }) {
+            return;
         }
+        self.callback_records
+            .entry(value)
+            .and_modify(|old| {
+                if *old != owner {
+                    *old = None;
+                }
+            })
+            .or_insert(owner);
     }
 
     pub(crate) fn container_plan_for_type(

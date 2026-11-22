@@ -326,7 +326,7 @@ impl Emitter<'_> {
                     out.push('#');
                     self.write_opnd(out, *base);
                 }
-                ContainerKind::Record => unreachable!("len of a heap record"),
+                ContainerKind::Record(_) => unreachable!("len of a heap record"),
             },
 
             Inst::Store { .. }
@@ -585,7 +585,7 @@ impl Emitter<'_> {
             ContainerKind::NativeBufferInBounds => {
                 out.push_str(".ptr");
             }
-            ContainerKind::Record => {
+            ContainerKind::Record(_) => {
                 if let Inst::Const(Lit::Str(field)) = &self.func.insts[index] {
                     write_field_key(out, field.as_str());
                     return;

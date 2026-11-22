@@ -35,7 +35,7 @@ impl Emitter<'_> {
             Inst::StoreIndex {
                 base,
                 index,
-                kind: ContainerKind::Record,
+                kind: ContainerKind::Record(_),
                 ..
             } => match self.func.insts[*index] {
                 Inst::Const(Lit::Str(field)) => {
@@ -179,7 +179,7 @@ impl Emitter<'_> {
                     out.push(' ');
                     self.write_builtin_call(out, setter, &[*base, *index, *value]);
                     out.push('\n');
-                } else if matches!(kind, ContainerKind::Record)
+                } else if matches!(kind, ContainerKind::Record(_))
                     && let Inst::Const(Lit::Str(field)) = &self.func.insts[*index]
                 {
                     self.write_field_assignment(out, *base, field.as_str(), *value, true);
@@ -217,7 +217,7 @@ impl Emitter<'_> {
                     | ContainerKind::VecColumn
                     | ContainerKind::VecStrideSlot
                     | ContainerKind::Map
-                    | ContainerKind::Record => {
+                    | ContainerKind::Record(_) => {
                         unreachable!("ArrayPush only lowers for Vec array literals, got {kind:?}")
                     }
                 }

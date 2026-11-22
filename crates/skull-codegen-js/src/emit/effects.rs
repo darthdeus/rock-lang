@@ -12,7 +12,7 @@ pub(super) fn evaluated_when_unused(inst: &Inst) -> bool {
                     | ContainerKind::VecNonNull
                     | ContainerKind::VecNonNullInBounds
                     | ContainerKind::Map
-                    | ContainerKind::Record
+                    | ContainerKind::Record(_)
             ) || kind.is_native_buffer()
         }
         _ => matches!(
@@ -83,7 +83,7 @@ impl Emitter<'_> {
                             format!("{b}._data[{i}] = {v};")
                         }
                         ContainerKind::Map => format!("__map_set({b}, {i}, {v});"),
-                        ContainerKind::Record => {
+                        ContainerKind::Record(_) => {
                             if let Inst::Const(Lit::Str(field)) = &self.mf.insts[*index] {
                                 format!("{} = {v};", js_member(&b, field.as_str()))
                             } else {

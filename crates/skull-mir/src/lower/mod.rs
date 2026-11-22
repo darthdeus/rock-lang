@@ -1383,7 +1383,7 @@ struct Builder<'a> {
     shareable_value_boxes: HashSet<Idx<Inst>>,
     /// A host may supply heap records with property callbacks, so even generated
     /// projections must keep that effect.
-    callback_records: HashSet<Idx<Inst>>,
+    callback_records: HashMap<Idx<Inst>, Option<Ustr>>,
     /// Shallow local snapshots cannot be lent across a call or return.
     unshareable_value_cells: HashSet<Idx<Cell>>,
     boundary_materializes: HashSet<Idx<Expr>>,
@@ -1471,7 +1471,7 @@ impl<'a> Builder<'a> {
             value_copy_stack: Vec::new(),
             borrowed_value_children: HashMap::default(),
             shareable_value_boxes: HashSet::default(),
-            callback_records: HashSet::default(),
+            callback_records: HashMap::default(),
             unshareable_value_cells: HashSet::default(),
             boundary_materializes: HashSet::default(),
             element_tuples: HashSet::default(),
@@ -1792,27 +1792,31 @@ impl<'a> Builder<'a> {
         (call, self.load_cells(&loads_from))
     }
 
-    fn emit_cur(&mut self, inst: Inst) -> Idx<Inst> {
-        let inst = match inst {
-            Inst::Field { base, field, .. } if self.callback_records.contains(&base) => {
-                let index = self.emit_cur(Inst::Const(Lit::Str(field)));
-                Inst::Index {
-                    base,
-                    index,
-                    kind: ContainerKind::Record,
+    fn emit_cur(&mut self, mut inst: Inst) -> Idx<Inst> {
+        match inst {
+            Inst::Field { base, field, .. } => {
+                if let Some(&owner) = self.callback_records.get(&base) {
+                    let index = self.emit_cur(Inst::Const(Lit::Str(field)));
+                    inst = Inst::Index {
+                        base,
+                        index,
+                        kind: ContainerKind::Record(owner),
+                    };
                 }
             }
-            Inst::StoreField { base, field, value } if self.callback_records.contains(&base) => {
-                let index = self.emit_cur(Inst::Const(Lit::Str(field)));
-                Inst::StoreIndex {
-                    base,
-                    index,
-                    value,
-                    kind: ContainerKind::Record,
+            Inst::StoreField { base, field, value } => {
+                if let Some(&owner) = self.callback_records.get(&base) {
+                    let index = self.emit_cur(Inst::Const(Lit::Str(field)));
+                    inst = Inst::StoreIndex {
+                        base,
+                        index,
+                        value,
+                        kind: ContainerKind::Record(owner),
+                    };
                 }
             }
-            inst => inst,
-        };
+            _ => {}
+        }
         let is_call = matches!(
             inst,
             Inst::Call { .. }

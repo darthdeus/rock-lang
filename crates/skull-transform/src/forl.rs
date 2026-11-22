@@ -90,7 +90,7 @@ fn may_write_fields(inst: &Inst) -> bool {
             kind,
             ContainerKind::Vec
                 | ContainerKind::VecInBounds
-                | ContainerKind::Record
+                | ContainerKind::Record(_)
                 | ContainerKind::Map
         ),
         _ => {

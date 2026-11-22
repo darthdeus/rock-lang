@@ -187,7 +187,7 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
                 // contents are still the observed snapshot.
                 Inst::Field { .. }
                 | Inst::Index {
-                    kind: ContainerKind::Record,
+                    kind: ContainerKind::Record(_),
                     ..
                 } => {
                     let Some((base, field)) = func.field_projection(id) else {
@@ -347,7 +347,7 @@ fn keeps_vec_lengths(inst: &Inst) -> bool {
                 ContainerKind::Vec
                 | ContainerKind::VecInBounds
                 | ContainerKind::Map
-                | ContainerKind::Record,
+                | ContainerKind::Record(_),
             ..
         } => false,
         // A boxed Vec, Map, or heap-record lookup can enter a Lua metamethod.

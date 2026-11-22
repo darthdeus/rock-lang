@@ -433,7 +433,7 @@ impl Families {
                         let ok = match &func.insts[i] {
                             Inst::Field { .. }
                             | Inst::Index {
-                                kind: ContainerKind::Record,
+                                kind: ContainerKind::Record(_),
                                 ..
                             } => field_read(func, i, op).is_some_and(|(_, field)| {
                                 uses.projections[ProjectionKind::Field as usize]
@@ -448,7 +448,7 @@ impl Families {
                             }
                             Inst::StoreField { .. }
                             | Inst::StoreIndex {
-                                kind: ContainerKind::Record,
+                                kind: ContainerKind::Record(_),
                                 ..
                             } => field_store(func, i, op).is_some_and(|(_, field, value)| {
                                 uses.projections[ProjectionKind::Store as usize]
@@ -715,7 +715,7 @@ fn field_store(
             base,
             index,
             value,
-            kind: ContainerKind::Record,
+            kind: ContainerKind::Record(_),
         } => {
             let Inst::Const(Lit::Str(field)) = &func.insts[*index] else {
                 return None;

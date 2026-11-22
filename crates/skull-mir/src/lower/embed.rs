@@ -592,7 +592,7 @@ impl<'a> Builder<'a> {
         // record stores remain observable even when the slot is absent.
         let skip_clear = if nullable
             && matches!(self.body.expr_arena[value], Expr::Null)
-            && !self.callback_records.contains(&parent)
+            && !self.callback_records.contains_key(&parent)
         {
             // False presence still needs normalization for boxed embed readers.
             let present = self.read_field(parent, field);

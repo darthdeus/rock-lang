@@ -982,7 +982,7 @@ impl BodyHasher {
             ContainerKind::VecInBounds => self.tag(9),
             ContainerKind::VecNonNullInBounds => self.tag(13),
             ContainerKind::NativeBufferInBounds => self.tag(10),
-            ContainerKind::Record => self.tag(14),
+            ContainerKind::Record(_) => self.tag(14),
         }
     }
 

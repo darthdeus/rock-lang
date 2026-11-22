@@ -487,7 +487,7 @@ fn only_private_lua_record_reads_preserve_bounds() {
             Inst::Index {
                 base,
                 index: field,
-                kind: ContainerKind::Record,
+                kind: ContainerKind::Record(None),
             },
         );
         let zero = p.int(body, 0);

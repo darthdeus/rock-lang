@@ -96,8 +96,8 @@ pub enum ContainerKind {
     /// The index is absolute (`i * stride + leaf_off`) and already bounds-checked
     /// per element: no `+1`, no check.
     NativeBufferLeaf,
-    /// Raw `base[index]`; records have no sequence length or iteration.
-    Record,
+    /// Raw `base[index]` with the receiver's nominal type when known.
+    Record(Option<Ustr>),
     /// Keyed directly by K, no `+1`.
     Map,
 }
@@ -994,7 +994,7 @@ impl MirFunc {
             Inst::Index {
                 base,
                 index,
-                kind: ContainerKind::Record,
+                kind: ContainerKind::Record(_),
             } => match self.insts[index] {
                 Inst::Const(Lit::Str(field)) => Some((base, field)),
                 _ => None,

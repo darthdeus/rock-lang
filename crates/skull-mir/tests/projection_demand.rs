@@ -1,4 +1,4 @@
-use crate::common::lower;
+use crate::common::{MirFixture, checked_ws_of, decl, key, lower};
 use skull_mir::mir::{ContainerKind, Inst, Lit, MirFunc};
 
 fn fields(body: &MirFunc) -> usize {
@@ -10,7 +10,7 @@ fn fields(body: &MirFunc) -> usize {
                     inst,
                     Inst::Index {
                         index,
-                        kind: ContainerKind::Record,
+                        kind: ContainerKind::Record(_),
                         ..
                     } if matches!(&body.insts[*index], Inst::Const(Lit::Str(_)))
                 )
@@ -68,4 +68,50 @@ fn leaf_table_reference_projects_before_expanding_siblings() {
         3,
         "nullable subtree keeps presence: {anchor}"
     );
+}
+
+#[test]
+fn record_projections_keep_the_physical_owner() {
+    let source = r#"
+        struct Inner { value: int? }
+        struct Outer { child: Inner?, value: int? }
+        fn project(x: Outer?, y: Inner) -> int? {
+            x?.value = 4
+            y.value = 7
+            x?.child?.value
+        }
+    "#;
+    let ws = checked_ws_of(source);
+    let project = decl(&ws, "project");
+    let body = MirFixture::new(&ws, &[project]).lower(project).unwrap();
+    let mut accesses = Vec::new();
+    for (_, inst) in body.insts.iter() {
+        let (owner, index, store) = match inst {
+            Inst::Index {
+                kind: ContainerKind::Record(Some(owner)),
+                index,
+                ..
+            } => (owner, index, false),
+            Inst::StoreIndex {
+                kind: ContainerKind::Record(Some(owner)),
+                index,
+                ..
+            } => (owner, index, true),
+            _ => continue,
+        };
+        if let Inst::Const(Lit::Str(field)) = body.insts[*index] {
+            accesses.push((*owner, field.as_str(), store));
+        }
+    }
+    let inner = key(&ws, "Inner");
+    let outer = key(&ws, "Outer");
+    let mut expected = [
+        (outer, "value", true),
+        (inner, "value", true),
+        (outer, "child", false),
+        (inner, "value", false),
+    ];
+    accesses.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(accesses, expected, "{body}");
 }

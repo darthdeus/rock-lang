@@ -157,7 +157,7 @@ impl<'a> Builder<'a> {
                 self.lower_for_array(vars, iter, body)
             }
             ContainerKind::Map => self.lower_for_map(None, &vars, iter, body),
-            ContainerKind::Record => unreachable!("for over a heap record"),
+            ContainerKind::Record(_) => unreachable!("for over a heap record"),
             // Leaf columns and leaf views are minted during element lowering, never user
             // types, so neither can be a `for` head.
             ContainerKind::VecColumn => Err(gap("for over a synthetic Vec leaf column")),

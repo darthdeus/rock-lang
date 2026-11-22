@@ -72,7 +72,7 @@ fn proven_accesses(ws: Option<&Workspace>, func: &MirFunc, target: FnBackend) ->
                 Inst::MakeVec(_) => has_make_vec = true,
                 Inst::MakeStruct { .. } => has_make_struct = true,
                 Inst::Index {
-                    kind: ContainerKind::Record,
+                    kind: ContainerKind::Record(_),
                     ..
                 } => has_record_read = true,
                 Inst::ArrayPush { .. } => has_array_push = true,
@@ -770,7 +770,7 @@ impl Facts {
         let record = match inst {
             Inst::Index {
                 base,
-                kind: ContainerKind::Record,
+                kind: ContainerKind::Record(_),
                 ..
             } if self
                 .private_root(&value_key(func, *base))
@@ -1299,7 +1299,7 @@ fn step(facts: &mut Facts, func: &Body<'_>, ctx: &Ctx<'_>, id: Idx<Inst>, may_re
             }
         }
         Inst::Index {
-            kind: ContainerKind::Record,
+            kind: ContainerKind::Record(_),
             ..
         } if private_record_read => {}
         Inst::Index {
@@ -1307,7 +1307,7 @@ fn step(facts: &mut Facts, func: &Body<'_>, ctx: &Ctx<'_>, id: Idx<Inst>, may_re
                 ContainerKind::Vec
                 | ContainerKind::VecInBounds
                 | ContainerKind::Map
-                | ContainerKind::Record,
+                | ContainerKind::Record(_),
             ..
         } => facts.after_unknown_call(func),
         Inst::Index {
@@ -1328,7 +1328,7 @@ fn step(facts: &mut Facts, func: &Body<'_>, ctx: &Ctx<'_>, id: Idx<Inst>, may_re
                 ContainerKind::Vec
                     | ContainerKind::VecInBounds
                     | ContainerKind::Map
-                    | ContainerKind::Record
+                    | ContainerKind::Record(_)
             ) {
                 facts.after_unknown_call(func);
             } else {
