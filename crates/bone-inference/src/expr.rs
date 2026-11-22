@@ -544,7 +544,7 @@ pub(crate) fn infer_expr_used(
             let ret = gamma.coroutine_ret.ok_or_else(|| {
                 CompilerError::new_with_label(
                     expr_span,
-                    "yield is only allowed in functions with an annotated return type".to_string(),
+                    "await is only allowed in a coroutine (co fn)".to_string(),
                 )
             })?;
 

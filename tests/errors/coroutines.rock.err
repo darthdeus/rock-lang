@@ -374,3 +374,8 @@ co fn tick() -> Coroutine<int> {
     print("{3:{borrowed.width}d}")
 }
 fn main() {}
+
+//=== TEST CASE: await_outside_coroutine_Generic ===
+//! expect: await is only allowed in a coroutine (co fn)
+co fn tick() -> Coroutine<int> { yield 1 }
+fn main() { await tick() }
