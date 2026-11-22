@@ -18,7 +18,7 @@ use stone::*
 // Native pointer narrowing spends different constant slots on each target.
 @nomangle inline(lua) fn vertex_writer_trace_limit() -> int = 'return jit.arch == "arm64" and 128 or 144'
 
-@nomangle fn vertex_writer_trace_loop(mesh: SpriteMesh, count: int) {
+fn vertex_writer_trace_loop(mesh: SpriteMesh, count: int) {
     for i in 0..count {
         mesh.count = (i % 128) * 6
         let x = float(i)

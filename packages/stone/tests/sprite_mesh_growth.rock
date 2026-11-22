@@ -25,10 +25,10 @@ use stone::*
     return not result.ok and string.find(result.value, "forced mesh growth failure", 1, true) ~= nil
 """
 
-@nomangle inline(lua) fn __sprite_mesh_growth_mutate_during_alloc(mesh: SpriteMesh, body: fn() -> ()) -> bool = """
+@nomangle inline(lua) fn __sprite_mesh_growth_mutate_during_alloc(mutate: fn() -> (), body: fn() -> ()) -> bool = """
     local saved = __rock_nb_alloc
     __rock_nb_alloc = function(ctype, n, ...)
-        if ctype == "Vertex" and n == 12 then mesh.count = 12 end
+        if ctype == "Vertex" and n == 12 then mutate() end
         return saved(ctype, n, ...)
     end
     local result = world_fixture_call(body, debug.traceback)
@@ -56,23 +56,17 @@ use stone::*
 
 @nomangle inline(lua) fn __sprite_mesh_growth_getter_meter() -> any = "return { count = 0, capacity = 0, mesh = 0 }"
 
-@nomangle inline(lua) fn __sprite_mesh_growth_proxy(mesh: SpriteMesh, meter: any) -> SpriteMesh = """
+// Forwards every compiler-private slot to the record and counts reads of the
+// fields the meter names.
+inline(lua) fn __sprite_mesh_growth_proxy<T>(@repr(opaque) record: T, meter: any) -> any = """
+    local names = getmetatable(record).__rock_fields
     return setmetatable({}, {
-        __index = function(_, key)
-            if key == "count" or key == "capacity" then meter[key] = meter[key] + 1 end
-            return mesh[key]
+        __index = function(_, slot)
+            local name = names[slot]
+            if meter[name] ~= nil then meter[name] = meter[name] + 1 end
+            return record[slot]
         end,
-        __newindex = function(_, key, value) mesh[key] = value end,
-    })
-"""
-
-@nomangle inline(lua) fn __retained_mesh_growth_proxy(rm: RetainedMesh, meter: any) -> RetainedMesh = """
-    return setmetatable({}, {
-        __index = function(_, key)
-            if key == "mesh" then meter.mesh = meter.mesh + 1 end
-            return rm[key]
-        end,
-        __newindex = function(_, key, value) rm[key] = value end,
+        __newindex = function(_, slot, value) record[slot] = value end,
     })
 """
 
@@ -191,7 +185,7 @@ fn sprite_mesh_preflight_skips_metatable_getters() {
     let mesh = sprite_mesh_growth_test_mesh()
     sprite_mesh_growth_append_kind(mesh, 0)
     let meter = __sprite_mesh_growth_getter_meter()
-    let proxy = __sprite_mesh_growth_proxy(mesh, meter)
+    let proxy = cast<SpriteMesh>(__sprite_mesh_growth_proxy(mesh, meter))
     sprite_mesh_add_quad(proxy, v(1.0, 2.0), v(3.0, 4.0),
         v(5.0, 6.0), v(7.0, 8.0), irect(0, 0, 8, 8))
     assert_eq(__sprite_mesh_growth_getter_count(meter, "count"), 4)
@@ -205,7 +199,7 @@ fn retained_mesh_preflight_skips_metatable_getters() {
     let rm = RetainedMesh { mesh: sprite_mesh_growth_test_mesh() }
     rm.add(v(8.0, 12.0), irect(0, 0, 8, 8), v(6.0, 10.0))
     let meter = __sprite_mesh_growth_getter_meter()
-    let proxy = __retained_mesh_growth_proxy(rm, meter)
+    let proxy = cast<RetainedMesh>(__sprite_mesh_growth_proxy(rm, meter))
     proxy.add_quad(v(1.0, 2.0), v(3.0, 4.0),
         v(5.0, 6.0), v(7.0, 8.0), irect(0, 0, 8, 8))
     assert_eq(__sprite_mesh_growth_getter_count(meter, "mesh"), 1)
@@ -239,7 +233,7 @@ fn sprite_mesh_growth_callback_keeps_single_growth_and_span_error() {
     let mesh = sprite_mesh_growth_test_mesh()
     mesh.vbo = native_buffer_vertex(12)
     mesh.count = 6
-    let failed = __sprite_mesh_growth_mutate_during_alloc(mesh, () => {
+    let failed = __sprite_mesh_growth_mutate_during_alloc(() => { mesh.count = 12 }, () => {
         sprite_mesh_growth_callback_append(mesh)
     })
     assert(failed, "one growth leaves the callback's overfull count to the writer span check")

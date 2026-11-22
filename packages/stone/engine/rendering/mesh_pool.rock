@@ -113,7 +113,7 @@ pub fn recycle_pending_meshes() {
     MESH_PENDING.clear()
 }
 
-pub @lua_named struct RetainedMesh {
+pub struct RetainedMesh {
     mesh: SpriteMesh,
     gpu_mesh: MeshId? = null,
     dirty: bool = true,
