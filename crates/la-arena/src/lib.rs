@@ -207,7 +207,10 @@ impl<T> Iterator for IdxRange<T> {
     }
 
     fn nth(&mut self, n: usize) -> Option<Self::Item> {
-        let new_start = self.range.0.saturating_add(n as u32);
+        let new_start = self
+            .range
+            .0
+            .saturating_add(u32::try_from(n).unwrap_or(u32::MAX));
         if new_start >= self.range.1 {
             self.range.0 = self.range.1;
             return None;

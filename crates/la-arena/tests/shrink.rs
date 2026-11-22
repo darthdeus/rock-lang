@@ -49,3 +49,14 @@ fn shrinking_moves_into_an_exact_allocation() {
     assert_eq!(map.get(first), Some(&0));
     assert_eq!(map.values().copied().sum::<u64>(), 999 * 1000);
 }
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn nth_past_u32_exhausts_the_range() {
+    let mut arena = Arena::new();
+    arena.alloc(0);
+    arena.alloc(1);
+    let mut indices = arena.allocated_since(0);
+    assert_eq!(indices.nth(1usize << 32), None);
+    assert_eq!(indices.next(), None);
+}
