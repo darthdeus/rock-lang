@@ -594,6 +594,14 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         assert_co_fn_rejected(src, "defer");
     }
 
+    // Mob uses compiler-private slots, so the probe reads the global's storage
+    // and resolves field names through the reloaded type's slot map.
+    const LIVE_MOB_PROBE: &str = r#"
+local m = __rock_globals[__rock_global_entry("M").slots[1]]
+local slots = getmetatable(m).__rock_slots
+print("hp=" .. tostring(m[slots.hp]) .. " armor=" .. tostring(m[slots.armor]))
+"#;
+
     #[test]
     fn struct_field_add_full_reload_nil_poisons_live_instances() {
         let v0 = "struct Mob { hp: int }\n\
@@ -622,9 +630,9 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
                 "describe()",
                 "_G.HOT_RELOAD = true",
                 &full1,
-                "print(_G.M ~= nil and _G.M.armor == nil)",
+                LIVE_MOB_PROBE,
             ],
-            "10\ntrue",
+            "10\nhp=10 armor=nil",
             "a live struct instance must survive the full re-dofile WITHOUT the added field",
         );
 

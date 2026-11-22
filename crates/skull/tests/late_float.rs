@@ -71,10 +71,10 @@ fn main() {
 fn deferral_keeps_mutable_read_snapshots_and_throws_before_calls() {
     let lua = emit_module(READ_ORDER);
     let sample = function_body(&lua, "sample");
-    assert_before(sample, "c0.x", "b0(c0)");
+    assert_before(sample, "c0[1]", "b0(c0)");
     assert_before(sample, "b0(c0)", "* (2.0)");
     let nullable = function_body(&lua, "sample_nullable");
-    assert_before(nullable, "c0.x", "b0()");
+    assert_before(nullable, "c0[1]", "b0()");
     assert_before(nullable, "b0()", "* (2.0)");
     assert_eq!(run_main(&lua), "156 10 0");
 }

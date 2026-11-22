@@ -5,7 +5,7 @@
 // rejected; those rejections are pinned in the skull Rust tests.
 
 value G { x: float, y: float }
-struct B { s: string }
+@lua_named struct B { s: string }
 
 @nomangle inline(lua) fn make_boxed<T>() -> T = """
     return setmetatable({[0] = 0}, __rock_box_mts.Vec)

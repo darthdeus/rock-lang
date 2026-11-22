@@ -1,4 +1,4 @@
-struct Box { values: [int] }
+@lua_named struct Box { values: [int] }
 
 fn apply_temp_field(strip: Box, insertion: int) -> int {
     let length = strip.values.len()

@@ -46,7 +46,7 @@ inline(lua) fn shrink(buf: NativeBuffer<int>) = "buf.len = 0"
     return 1
 }
 
-struct Size { width: int }
+@lua_named struct Size { width: int }
 inline(lua) fn grow(size: Size) = "size.width = size.width + 1"
 @nomangle fn changed_size(size: Size) -> int {
     let buf = native_buffer_int(size.width)
@@ -109,7 +109,7 @@ inline(lua) fn grow(size: Size) = "size.width = size.width + 1"
     return 1
 }
 
-struct Mask { width: int, pixels: NativeBufferU8 }
+@lua_named struct Mask { width: int, pixels: NativeBufferU8 }
 @nomangle fn copy_mask(mask: Mask, height: int) -> NativeBufferU8 {
     let buf = native_buffer_u8(mask.width * height)
     for i in 0..mask.width * height { buf[i] = mask.pixels[i] }

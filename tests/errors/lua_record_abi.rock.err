@@ -1,0 +1,69 @@
+//=== TEST CASE: lua_named_inline_param ===
+//! expect: requires `@lua_named`
+struct Payload { count: int }
+inline(lua) fn host(value: Payload) -> int = "return value.count"
+fn main() { print(host(Payload { count: 1 })) }
+
+//=== TEST CASE: lua_named_extern_result ===
+//! expect: requires `@lua_named`
+struct Payload { count: int }
+@lua_named struct Wrapper { payload: Payload? }
+extern(lua) fn host() -> Wrapper
+fn main() { print(host().payload?.count) }
+
+//=== TEST CASE: lua_named_published_record ===
+//! expect: requires `@lua_named`
+struct Payload { count: int }
+@nomangle fn host() -> Payload { Payload { count: 1 } }
+
+//=== TEST CASE: lua_named_erased_alias ===
+//! expect: requires `@lua_named`
+struct Payload { count: int }
+inline(lua) fn host(value: any) = "rawset(value, 'count', 9)"
+fn main() {
+    let row = Payload { count: 1 }
+    let alias: any = row
+    host(alias)
+    print(row.count)
+}
+
+//=== TEST CASE: lua_named_required_for_global_lookup_Generic ===
+//! expect: requires `@lua_named`
+struct Payload { count: int }
+global RAW_SHARED: Payload = Payload { count: 1 }
+inline(lua) fn host(name: string) -> int = "return __rock_global_get(__rock_global_entry(name)).count"
+fn main() { print(host("RAW_SHARED")) }
+
+//=== TEST CASE: lua_named_required_for_forwarded_erasure_Generic ===
+//! expect: requires `@lua_named`
+struct Payload { count: int }
+fn erase<T>(value: T) -> any { return value }
+inline(lua) fn host(value: any) = "rawset(value, 'count', 9)"
+fn main() { host(erase(Payload { count: 1 })) }
+
+//=== TEST CASE: lua_named_required_for_opaque_cast_Generic ===
+//! expect: requires `@lua_named`
+struct Payload { count: int }
+inline(lua) fn make_opaque() -> any = "return { count = 1 }"
+fn main() {
+    let item = cast<Payload>(make_opaque())
+    print(item.count)
+}
+
+//=== TEST CASE: lua_named_required_in_concrete_foreign_call_Generic ===
+//! expect: requires `@lua_named`
+struct Payload { count: int }
+inline(lua) fn host<T>(value: T) = "rawset(value, 'count', 9)"
+fn relay<T>(value: T) { host(value) }
+fn main() { relay(Payload { count: 1 }) }
+
+//=== TEST CASE: lua_named_required_for_aliased_opaque_cast_Generic ===
+//! expect: requires `@lua_named`
+struct Payload { count: int }
+inline(lua) fn make_opaque() -> any = "return { count = 1 }"
+fn main() {
+    let raw = make_opaque()
+    let alias: any = raw
+    let item = cast<Payload>(alias)
+    print(item.count)
+}

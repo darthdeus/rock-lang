@@ -205,8 +205,8 @@ fn stone_pad_type_name_raw() -> string {
 }
 
 // Handles are LuaJIT cdata; these phantoms prevent mixing pointer types.
-pub struct StoneWindow { }
-pub struct StoneEvent  { }
+pub @lua_named struct StoneWindow { }
+pub @lua_named struct StoneEvent  { }
 
 pub extern(ffi, "stone") fn stone_create_window_ex(title: string, x: int, y: int, width: int, height: int, display: int, resizable: bool, fullscreen: int) -> StoneWindow
 extern(ffi, "stone") fn stone_gpu_host_acquire() -> StoneWindow

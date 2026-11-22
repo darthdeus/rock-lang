@@ -49,7 +49,7 @@ fn external_equal(a: any, b: any) -> bool { return a == b }
     return -2
 }
 
-struct ExternalRecord { value: int? }
+@lua_named struct ExternalRecord { value: int? }
 fn read_external(record: ExternalRecord) -> int? { return record.value }
 fn write_external(record: ExternalRecord) { record.value = 1 }
 @nomangle fn repeated_record_read(record: ExternalRecord) -> int {
@@ -96,7 +96,7 @@ fn write_external(record: ExternalRecord) { record.value = 1 }
     return xs[0]
 }
 value EmbeddedValue { n: int }
-struct ExternalHolder { embed child: EmbeddedValue }
+@lua_named struct ExternalHolder { embed child: EmbeddedValue }
 @nomangle fn after_embedded_read(xs: [int], record: ExternalHolder) -> int {
     if xs.len() <= 0 { return -1 }
     let value = record.child.n

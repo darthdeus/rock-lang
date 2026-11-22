@@ -116,7 +116,7 @@ fn closure_records_share_their_code_slot() {
     assert(a() == 1 && b() == 2)
 }
 
-struct Holder { cb: fn() -> int }
+@lua_named struct Holder { cb: fn() -> int }
 struct Pair { get: fn() -> int, bump: fn() -> int }
 
 fn make_pair() -> Pair {

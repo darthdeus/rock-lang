@@ -1,5 +1,5 @@
 value Layer { volume: float, speed: float, offset: float, name: string }
-struct Step { layers: Vec<Layer> }
+@lua_named struct Step { layers: Vec<Layer> }
 global marks: int = 0
 fn mark() -> int { marks += 1; return 1 }
 @nomangle fn name_total(step: Step) -> int {

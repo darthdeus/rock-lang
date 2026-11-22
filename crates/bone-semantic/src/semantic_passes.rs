@@ -1682,6 +1682,7 @@ pub(crate) fn pass_register_forward_decls(
                 is_nobox: s.is_nobox,
                 consume: false,
                 nomangle: annotations.iter().any(|anno| anno.is_builtin("nomangle")),
+                lua_named: annotations.iter().any(|anno| anno.is_builtin("lua_named")),
                 span: item.span,
                 generics: Vec::new(),
                 fields: Vec::new(),

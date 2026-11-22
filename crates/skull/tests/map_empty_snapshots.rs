@@ -1,7 +1,7 @@
 use crate::common::{emit_module, run_luajit};
 
 const SOURCE: &str = r#"
-struct Item { id: int }
+@lua_named struct Item { id: int }
 nobox value Column { a: int, b: int, c: int, d: int }
 newtype Label(string)
 

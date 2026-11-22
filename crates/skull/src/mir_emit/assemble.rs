@@ -635,6 +635,7 @@ type GlobalKey = (ModuleId, Idx<bone_semantic::hir::GlobalDef>);
 fn scaffold_prelude_lua(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
+    cg: &CodegenCtx,
 ) -> Result<(String, crate::ValueCtors), CompilerError> {
     let mut out = String::from(crate::runtime_prelude());
     if skull_mir::verify::checks_enabled() {
@@ -678,6 +679,7 @@ end
     out.push_str(&crate::cdata_metatype_trampolines(&metatype_syms));
     out.push_str(&crate::c_struct_inspect_defs(ws, &vstructs, &value_emitted));
     out.push_str(&crate::type_table_defs(ws, &value_gc, rep_arena)?);
+    out.push_str(&cg.record_slot_metadata(ws));
     out.push_str(&crate::enum_runtime_defs(ws));
     Ok((out, value_ctors))
 }
@@ -809,7 +811,7 @@ pub(super) fn prepare_early_assembly(
     let (scaffold, units) = parallel_join(
         || {
             let ts = Instant::now();
-            let scaffold = scaffold_prelude_lua(ws, scx);
+            let scaffold = scaffold_prelude_lua(ws, scx, cg);
             let scaffold_time = ts.elapsed();
             let global_layout = skull_mir::global_storage::global_layout_id(ws, scx);
             let globals_directory = globals_directory_lua(ws, scx, cg, global_accessors);

@@ -14,7 +14,7 @@ fn main() {
 "#;
 
 const GENERIC_RETURN_NOBOX: &str = r#"
-struct Box2 { p: Vec2 }
+@lua_named struct Box2 { p: Vec2 }
 
 @inline inline(lua) fn unwrap_generic<V>(b: Box2) -> V = """
     return b.p

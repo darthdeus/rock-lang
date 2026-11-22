@@ -752,6 +752,9 @@ pub(super) fn emit_full_build(
     let project_root = setup_phases.timed("setup: validation+context", || {
         let project_root = canonical_project_root(ws, project_root)?;
         reject_workspace(ws, user_mid)?;
+        if let Some(err) = SkullEmitCache::combine_errors(skull_mir::lua_interop::errors(ws)) {
+            return Err(err);
+        }
         Ok::<_, CompilerError>(project_root)
     })?;
     let project_root = project_root.as_deref();

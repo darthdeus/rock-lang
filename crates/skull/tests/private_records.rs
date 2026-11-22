@@ -4,7 +4,7 @@ use crate::common::{emit_module, function_body, run_luajit};
 fn a_local_record_read_preserves_loop_bounds_until_publication() {
     let lua = emit_module(
         r#"
-struct Report { offset: int }
+@lua_named struct Report { offset: int }
 @nomangle fn fill_report(xs: [int], offset: int) -> Report {
     let report = Report { offset }
     for i in 0..xs.len() { xs[i] = i + report.offset }

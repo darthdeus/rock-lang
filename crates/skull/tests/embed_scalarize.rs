@@ -7,7 +7,7 @@ struct Pt { x: int, y: int }
 struct Holder { embed p: Pt, tag: int }
 enum Mode { Fast(string), Slow }
 global MODE: Mode = Mode::Slow
-inline(lua) fn embed_field_x(h: Holder) -> string = """
+inline(lua) fn embed_field_x(@repr(opaque) h: Holder) -> string = """
     local decl = __rock_field_declaration(h)
     for i = 1, #decl.fields do
         local f = decl.fields[i]

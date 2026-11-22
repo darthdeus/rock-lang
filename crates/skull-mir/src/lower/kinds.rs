@@ -39,12 +39,18 @@ impl<'a> Builder<'a> {
                 _ => return,
             }
         };
-        if owner.is_some_and(|name| {
-            self.ws
-                .nominals
-                .struct_id(name)
-                .is_none_or(|sid| self.ws.module(sid.module).structs[sid.def].is_value)
-        }) {
+        self.mark_record_owner(value, owner);
+    }
+
+    pub(crate) fn mark_record_owner(&mut self, value: Idx<Inst>, owner: Option<Ustr>) {
+        if self.scx.target == bone_core::hir::FnBackend::Any
+            || owner.is_some_and(|name| {
+                self.ws
+                    .nominals
+                    .struct_id(name)
+                    .is_none_or(|sid| self.ws.module(sid.module).structs[sid.def].is_value)
+            })
+        {
             return;
         }
         self.callback_records

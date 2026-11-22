@@ -1196,24 +1196,24 @@ fn json_reader_is_object(reader: JsonReader) -> bool {
     return reader.at >= 0 && reader.src.unwrap().unit_at(reader.at) == 123
 }
 
-struct JsonField<T> {
+@lua_named struct JsonField<T> {
     present: bool = false,
     value: T? = null,
 }
 
-struct JsonRecordAdapter {
+@lua_named struct JsonRecordAdapter {
     name: string,
     encode: fn(any) -> JsonValue,
     decode: fn(JsonValue) -> any?,
 }
 
-struct JsonRecordError {
+@lua_named struct JsonRecordError {
     path: string,
     expected: string,
     actual: string,
 }
 
-struct JsonRecordCodec {
+@lua_named struct JsonRecordCodec {
     reject_unknown_fields: bool = false,
     on_error: fn(JsonRecordError)? = null,
     adapters: [JsonRecordAdapter] = [],
@@ -1255,63 +1255,84 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
 @nomangle inline(lua) fn __json_record_tag(value: any, tag: string) -> bool = "return type(value) == 'table' and value.__variant == tag"
 @nomangle inline(lua) fn __json_record_finite(n: float) -> bool = "return n == n and n ~= math.huge and n ~= -math.huge"
 
-@nomangle inline(lua) fn __json_record_native_get(source: any, name: string, prefix: string) -> any = """
+@nomangle inline(lua) fn __json_record_native_get(source: any, name: string, prefix: string, slots: any? = null) -> any = """
     local result = _G[name .. '_ct']()
     for _, field in ipairs(_G.__ROCK_TYPE_TABLE[name].fields) do
         local path = prefix .. field.name
         local child = _G.__ROCK_TYPE_TABLE[field.type]
         result[field.name] = child and child.kind == 'c_struct'
-            and __json_record_native_get(source, field.type, path .. '.') or source[path]
+            and __json_record_native_get(source, field.type, path .. '.', slots) or source[slots and slots[path] or path]
     end
     return result
 """
 
-@nomangle inline(lua) fn __json_record_native_put(target: any, value: any, name: string, prefix: string) = """
+@nomangle inline(lua) fn __json_record_native_put(target: any, value: any, name: string, prefix: string, slots: any? = null) = """
     for _, field in ipairs(_G.__ROCK_TYPE_TABLE[name].fields) do
         local path = prefix .. field.name
         local child = _G.__ROCK_TYPE_TABLE[field.type]
         if child and child.kind == 'c_struct' then
-            __json_record_native_put(target, value[field.name], field.type, path .. '.')
-        else target[path] = value[field.name] end
+            __json_record_native_put(target, value[field.name], field.type, path .. '.', slots)
+        else target[slots and slots[path] or path] = value[field.name] end
     end
 """
 
-@nomangle inline(lua) fn __json_record_field_get(source: any, field: any) -> any = """
+@nomangle inline(lua) fn __json_record_field_get(source: any, field: any, slots: any) -> any = """
     local key = field.name
     if field.flat then
-        if source[field.flat[1]] == nil then return nil end
-        local value = setmetatable({ __variant = source[field.flat[1]] }, __rock_box_mts[field.type])
-        for i = 2, #field.flat do value[i - 1] = source[field.flat[i]] end
+        local tag_key = field.flat[1]
+        local tag = source[slots and slots[tag_key] or tag_key]
+        if tag == nil then return nil end
+        local value = setmetatable({ __variant = tag }, __rock_box_mts[field.type])
+        for i = 2, #field.flat do
+            local path = field.flat[i]
+            value[i - 1] = source[slots and slots[path] or path]
+        end
         return value
     end
-    if not field.embed then return source[key] end
-    if field.nullable and not source[key] then return nil end
+    if not field.embed then return source[slots and slots[key] or key] end
+    if field.nullable and not source[slots and slots[key] or key] then return nil end
     if _G.__ROCK_TYPE_TABLE[field.type].kind == 'c_struct' then
-        return __json_record_native_get(source, field.type, key .. '.')
+        return __json_record_native_get(source, field.type, key .. '.', slots)
     end
-    local value, prefix = setmetatable({}, __rock_box_mts[field.type]), key .. '.'
+    local mt = __rock_box_mts[field.type]
+    local child_slots = mt.__rock_slots
+    local value, prefix = setmetatable({}, mt), key .. '.'
+    local source_names = slots and getmetatable(source).__rock_fields
     for name, item in pairs(source) do
-        if type(name) == 'string' and name:sub(1, #prefix) == prefix then value[name:sub(#prefix + 1)] = item end
+        name = source_names and source_names[name] or name
+        if type(name) == 'string' and name:sub(1, #prefix) == prefix then
+            local child_key = name:sub(#prefix + 1)
+            value[child_slots and child_slots[child_key] or child_key] = item
+        end
     end
     return value
 """
 
-@nomangle inline(lua) fn __json_record_field_put(target: any, field: any, value: any) = """
+@nomangle inline(lua) fn __json_record_field_put(target: any, field: any, value: any, slots: any) = """
     local key = field.name
     if field.flat then
         if value == nil then return end
-        target[field.flat[1]] = value.__variant
-        for i = 2, #field.flat do target[field.flat[i]] = value[i - 1] end
+        local tag_key = field.flat[1]
+        target[slots and slots[tag_key] or tag_key] = value.__variant
+        for i = 2, #field.flat do
+            local path = field.flat[i]
+            target[slots and slots[path] or path] = value[i - 1]
+        end
     elseif field.embed then
-        if field.nullable then target[key] = value ~= nil and true or nil end
+        if field.nullable then target[slots and slots[key] or key] = value ~= nil and true or nil end
         if type(value) == 'cdata' then
-            __json_record_native_put(target, value, field.type, key .. '.')
+            __json_record_native_put(target, value, field.type, key .. '.', slots)
         elseif value ~= nil then
+            local mt = getmetatable(value)
+            local names = type(mt) == 'table' and mt.__rock_fields
             for name, item in pairs(value) do
-                if name ~= '__ty' then target[key .. '.' .. name] = item end
+                if name ~= '__ty' then
+                    local path = key .. '.' .. (names and names[name] or name)
+                    target[slots and slots[path] or path] = item
+                end
             end
         end
-    else target[key] = value end
+    else target[slots and slots[key] or key] = value end
 """
 
 @nomangle inline(lua) fn __json_record_payload_get(value: any, shape: any, index: int) -> any = """
@@ -1636,14 +1657,15 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
             end
         end
         local data = reading and decl.kind == 'c_struct' and _G[name .. '_ct']() or {}
+        local slots = __rock_box_mts[name].__rock_slots
         for _, field in ipairs(decl.fields) do
             if field.json_skip then
-                if reading then __json_record_field_put(data, field, _G[field.json_default]()) end
+                if reading then __json_record_field_put(data, field, _G[field.json_default](), slots) end
             else
                 local wire_name = field.json_name or field.name
                 local item
                 if reading then item = value[1][wire_name]
-                elseif type(value) == 'table' then item = __json_record_field_get(value, field)
+                elseif type(value) == 'table' then item = __json_record_field_get(value, field, slots)
                 else item = value[field.name] end
                 local child = field.desc
                 if not child then
@@ -1656,7 +1678,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
                         error('json record does not support nullable native fields', 0)
                     end
                     local fallback
-                    if reading and defaults ~= nil then fallback = __json_record_field_get(defaults, field) end
+                    if reading and defaults ~= nil then fallback = __json_record_field_get(defaults, field, slots) end
                     local ok, decoded
                     if reading and item == nil then
                         if defaults ~= nil then ok, decoded = true, __json_record_copy_default(fallback)
@@ -1671,7 +1693,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
                         if not reading then error('json record invalid field ' .. name .. '.' .. field.name, 0) end
                         return false, __json_record_error_at(decoded, wire_name)
                     end
-                    if reading then __json_record_field_put(data, field, decoded)
+                    if reading then __json_record_field_put(data, field, decoded, slots)
                     else data[wire_name] = decoded end
                 end
             end
@@ -1685,7 +1707,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     return true, result
 """
 
-struct __JsonRecordContext {
+@lua_named struct __JsonRecordContext {
     adapters: Map<string, JsonRecordAdapter>?,
     field_names: Map<string, Map<string, bool>>?,
     encode_float: fn(float) -> JsonValue,

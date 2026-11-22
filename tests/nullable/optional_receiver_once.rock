@@ -1,5 +1,5 @@
 value Row { text: string, n: int }
-struct Counter { calls: int = 0 }
+@lua_named struct Counter { calls: int = 0 }
 @nomangle fn next_row(c: Counter) -> Row? {
     c.calls += 1
     if c.calls == 1 { return Row { text: "first", n: 7 } }

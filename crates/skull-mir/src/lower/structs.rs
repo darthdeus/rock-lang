@@ -32,7 +32,11 @@ impl<'a> Builder<'a> {
     ) -> Result<Idx<Inst>, CompilerError> {
         // A functional-update base is evaluated once, before the fields (source order).
         let base_inst: Option<Idx<Inst>> = match bases.into_iter().next() {
-            Some(b) => Some(self.lower_expr(b)?),
+            Some(b) => {
+                let value = self.lower_expr(b)?;
+                self.mark_record_owner(value, Some(name));
+                Some(value)
+            }
             None => None,
         };
         let mut literal = Vec::new();

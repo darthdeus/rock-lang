@@ -58,7 +58,7 @@ fn nested_constants_keep_all_lanes() {
 }
 
 enum Slice { Sliced, Empty, Leather(int) }
-struct Holder { slice: Slice }
+@lua_named struct Holder { slice: Slice }
 
 @nomangle fn in_field() -> Holder { Holder { slice: Slice::Sliced } }
 @noalloc @nomangle fn reset(h: Holder) { h.slice = Slice::Sliced }

@@ -1,5 +1,5 @@
 enum Entry { Empty, Text(string), Pair(int, float), Names([string]) }
-struct Record { entries: [Entry], title: string?, weights: Map<string, float> }
+@lua_named struct Record { entries: [Entry], title: string?, weights: Map<string, float> }
 inline(lua) fn verify(value: any) = """
     local fields = __rock_field_declaration(value).fields
     assert(fields[2].desc.k == 'opt' and fields[2].desc.inner.k == 'string')

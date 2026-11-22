@@ -1,4 +1,4 @@
-struct Item { id: int }
+@lua_named struct Item { id: int }
 nobox value Column { a: int, b: int }
 
 @nomangle fn boxed_map(n: int) -> Map<string, Item> {

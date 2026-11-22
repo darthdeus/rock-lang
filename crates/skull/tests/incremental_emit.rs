@@ -431,7 +431,7 @@ fn body_edits_match_full_emission() {
     let enum_projection = r#"
 enum Count { Zero, Seven }
 value Item { spare: int = 11, count: Count = Count::Seven }
-struct Holder { item: Item? }
+@lua_named struct Holder { item: Item? }
 @nomangle fn probe(holder: Holder) -> bool { holder.item?.count == Count::Zero }
 fn main() { print(probe(Holder { item: Item {} })) }
 "#;
@@ -610,4 +610,31 @@ fn multi_region_coroutine_topology_gates_overlays() {
         .map(|_| ())
         .expect_err("inserting a lambda into a region must refuse the overlay");
     assert!(err.message.contains("CodeRef compatibility") && err.message.contains("safe restart"));
+}
+
+#[test]
+fn adding_a_named_escape_rejects_the_overlay() {
+    let before = r#"
+        struct ClosedRecord { value: int }
+        fn make_record() -> ClosedRecord { ClosedRecord { value: 7 } }
+        inline(lua) fn host_edit(x: any) = "rawset(x, 'value', 31)"
+        fn main() {
+            let record = make_record()
+            print(record.value)
+        }
+    "#;
+    let (emitted, mut cache) = emit_full_of(&ws_with_stdlib(before), "initial emit");
+    assert!(
+        emitted
+            .lua
+            .contains(r#"local mt=__rock_box_mts["ClosedRecord"]; mt.__rock_fields={"value","#,)
+    );
+    let after = ws_with_stdlib(&before.replace(
+        "print(record.value)",
+        "host_edit(record); print(record.value)",
+    ));
+    let error = emit_overlay_result(&after, &mut cache, &[body_id(&after, "main")])
+        .err()
+        .expect("an overlay cannot expose a slotted record as named");
+    assert!(error.message.contains("requires `@lua_named`"));
 }

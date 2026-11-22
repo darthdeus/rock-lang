@@ -14,7 +14,7 @@ fn main() {
 "#;
 
 const ARENA_BOXED_ELEM: &str = r#"
-struct B { s: string }
+@lua_named struct B { s: string }
 
 @nomangle inline(lua) fn probe(a: Arena<B>) -> int = """
     return a.data.len
@@ -40,7 +40,7 @@ fn main() {
 "#;
 
 const CTOR_RETURNS_BOXED_VEC: &str = r#"
-struct B { s: string }
+@lua_named struct B { s: string }
 
 @nomangle inline(lua) fn make() -> [B] = """
     return setmetatable({[0] = 0}, __rock_box_mts.Vec)

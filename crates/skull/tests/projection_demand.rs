@@ -45,7 +45,7 @@ fn enum_projection_does_not_expand_sibling_fields() {
         r#"
 enum Choice { Empty, Number(int), Text(string) }
 value Config { choice: Choice, unused_sibling: int, items: [string] }
-struct Owner { config: Config }
+@lua_named struct Owner { config: Config }
 @nomangle fn selected(owner: Owner) -> Choice { owner.config.choice }
 fn main() {
     let owner = Owner { config: Config { choice: Choice::Number(7), unused_sibling: 11, items: [] } }

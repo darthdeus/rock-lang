@@ -1,6 +1,6 @@
 value Task<R = ()> { coroutine: Coroutine<int, R>, state: Entity<int> }
 struct Owner { slot: Task? = null }
-struct Entry { fetch: (() -> Task?)? = null, task: Task? = null, last: Task? = null }
+@lua_named struct Entry { fetch: (() -> Task?)? = null, task: Task? = null, last: Task? = null }
 fn Entry.live_task(entry) -> Task? {
     if let fetch = entry.fetch { return fetch() }
     return entry.task

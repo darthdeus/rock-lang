@@ -17,6 +17,7 @@ mod late_float;
 mod line_directives;
 mod names;
 mod preludes;
+mod record;
 mod regalloc;
 mod scc;
 mod scope;
@@ -284,6 +285,7 @@ pub struct CodegenCtx {
     frame_limits: bool,
     line_directives: bool,
     allocation_sources: bool,
+    record_slots: std::sync::Arc<record::RecordSlots>,
 }
 
 impl Clone for CodegenCtx {
@@ -302,6 +304,7 @@ impl Clone for CodegenCtx {
             frame_limits: self.frame_limits,
             line_directives: self.line_directives,
             allocation_sources: self.allocation_sources,
+            record_slots: self.record_slots.clone(),
         }
     }
 }
@@ -575,6 +578,7 @@ impl CodegenCtx {
             frame_limits: true,
             line_directives: line_directives_mode(),
             allocation_sources: false,
+            record_slots: std::sync::Arc::new(record::plan(ws)),
         };
         if skull_mir::verify::checks_enabled() {
             ctx.mint_synthetic(skull_mir::mir::VALUE_INTEGER_CHECK.to_string());

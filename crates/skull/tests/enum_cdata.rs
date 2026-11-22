@@ -2,7 +2,7 @@ use crate::common::{emit_module, function_body, run_luajit};
 
 const UNIT_EQ_SRC: &str = r#"
 enum Slice { Sliced, Empty, Leather(int) }
-struct Holder { slice: Slice, maybe: Slice? }
+@lua_named struct Holder { slice: Slice, maybe: Slice? }
 
 @nomangle fn field_is(h: Holder) -> bool { h.slice == Slice::Sliced }
 @nomangle fn field_is_not(h: Holder) -> bool { Slice::Empty != h.slice }

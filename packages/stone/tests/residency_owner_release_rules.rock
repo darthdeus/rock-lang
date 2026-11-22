@@ -12,7 +12,9 @@
     local saved = {}
     for _, name in ipairs(names) do
         local entry = assert(__rock_global_entry(name), name)
-        saved[#saved + 1] = { entry = entry, value = __rock_global_get(entry) }
+        for _, slot in ipairs(entry.slots) do
+            saved[#saved + 1] = { slot = slot, value = __rock_globals[slot] }
+        end
     end
     local baseline_handles = {}
     for handle in ffi.string(stone.stone_native_live_handles("image")):gmatch("%d+") do
@@ -51,7 +53,7 @@
     end
     local cleaned = world_fixture_call(cleanup)
     if not cleaned.ok then cleanup_errors[#cleanup_errors + 1] = tostring(cleaned.value) end
-    for _, record in ipairs(saved) do __rock_global_set(record.entry, record.value) end
+    for _, record in ipairs(saved) do __rock_globals[record.slot] = record.value end
     for _, name in ipairs(log_names) do _G[name] = logs[name] end
     if not result.ok then cleanup_errors[#cleanup_errors + 1] = tostring(result.value) end
     if #cleanup_errors > 0 then error(table.concat(cleanup_errors, "; "), 0) end

@@ -180,6 +180,7 @@ impl Emitter<'_> {
                     self.write_builtin_call(out, setter, &[*base, *index, *value]);
                     out.push('\n');
                 } else if matches!(kind, ContainerKind::Record(_))
+                    && self.record_slot(*kind, *index).is_none()
                     && let Inst::Const(Lit::Str(field)) = &self.func.insts[*index]
                 {
                     self.write_field_assignment(out, *base, field.as_str(), *value, true);

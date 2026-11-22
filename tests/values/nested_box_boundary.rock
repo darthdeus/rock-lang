@@ -19,7 +19,7 @@ value Wide {
     child: Child?,
 }
 
-struct WideOwner { row: Wide }
+@lua_named struct WideOwner { row: Wide }
 
 inline(lua) fn read_row(owner: WideOwner) -> Wide = "return owner.row"
 inline(lua) fn read_optional(owner: WideOwner) -> Wide? = "return owner.row"
@@ -133,7 +133,7 @@ enum Event { Cast(Receipt), Other }
 @nomangle fn retain(receipt: Receipt) -> Event { return Event::Cast(receipt) }
 @nomangle fn relay(receipt: Receipt) -> Receipt { return receipt }
 
-struct ReceiptOwner { receipt: Receipt }
+@lua_named struct ReceiptOwner { receipt: Receipt }
 global SAVED: Receipt? = null
 
 fn change(receipt: ref Receipt) {
@@ -150,8 +150,8 @@ fn signal(receipt: Receipt) -> float { return receipt.landing.unwrap().a.f0 }
 fn Receipt.pass(receipt) -> Receipt { return receipt }
 inline(lua) fn foreign_receipt(owner: ReceiptOwner) -> Receipt = """return owner.receipt"""
 
-struct SelectionOwner { receipt: Receipt }
-struct SelectionState { effects: int = 0, flag: bool }
+@lua_named struct SelectionOwner { receipt: Receipt }
+@lua_named struct SelectionState { effects: int = 0, flag: bool }
 
 fn selected_flag(state: SelectionState) -> bool {
     state.effects = state.effects * 10 + 1

@@ -125,7 +125,7 @@ fn user_json_field_keeps_its_nominal_descriptor() {
                 r#"
 mod a;
 value JsonField { value: int }
-struct Holder { field: JsonField }
+@lua_named struct Holder { field: JsonField }
 inline(lua) fn check(value: Holder) = """
         local desc = __rock_field_declaration(value).fields[1].desc
         assert(desc.k == 'nom')

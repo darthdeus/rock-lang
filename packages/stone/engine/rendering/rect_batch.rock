@@ -120,7 +120,7 @@ fn audit_implicit_texture_slot(texture_bound: bool) {
     audit_texture_slots_for_draw(shader_name)
 }
 
-pub struct RectBatch {
+pub @lua_named struct RectBatch {
     vbo: NativeBuffer<Vertex>,  // contiguous typed cdata, one slot per vertex
     capacity: int,         // max rects
     count: int,            // vertices pushed since last flush (6 per rect)
@@ -413,7 +413,7 @@ pub fn rect_batch_flush(b: RectBatch) {
     b.count = 0
 }
 
-pub struct SpriteMesh {
+pub @lua_named struct SpriteMesh {
     shared_capacity: int = -1,
     vbo: NativeBuffer<Vertex>,  // contiguous cdata, one slot per vertex
     batch: RenderBatchHandle = RenderBatchHandle {},

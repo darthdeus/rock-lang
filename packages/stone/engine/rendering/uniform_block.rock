@@ -454,7 +454,7 @@ pub fn shader_block_uploads(shader_name: string, binding: int) -> int {
 }
 
 // Queued draws need their own bytes; shared scratch would retain only the last pack.
-pub struct OwnedUniformBlock {
+pub @lua_named struct OwnedUniformBlock {
     size: int,
     fingerprint: int,
     bytes: NativeBufferU8,

@@ -1,10 +1,10 @@
-pub inline(lua) fn native_flow_handle<W>(owner: W, key: int) -> int = """
+pub inline(lua) fn native_flow_handle<W>(@repr(opaque) owner: W, key: int) -> int = """
     local owners = _G.__stone_flow_owners
     local context = owners and owners[owner]
     return context and context.jobs[key] or 0
 """
 
-pub inline(lua) fn native_flow_handle_set<W>(owner: W, key: int, handle: int) = """
+pub inline(lua) fn native_flow_handle_set<W>(@repr(opaque) owner: W, key: int, handle: int) = """
     local owners = _G.__stone_flow_owners
     local context = owners and owners[owner]
     if handle == 0 then
@@ -27,7 +27,7 @@ pub inline(lua) fn native_flow_handle_set<W>(owner: W, key: int, handle: int) = 
     context.jobs[key] = handle
 """
 
-pub inline(lua) fn native_flow_handles_reset<W>(owner: W) = """
+pub inline(lua) fn native_flow_handles_reset<W>(@repr(opaque) owner: W) = """
     local owners = _G.__stone_flow_owners
     local context = owners and owners[owner]
     if not context then return end

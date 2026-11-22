@@ -63,7 +63,7 @@ pub fn check_modules(
     modules: &mut ModuleSet,
     aliases: impl FnOnce(&ModuleSet) -> Result<NsAliases, CompilerError>,
 ) -> Result<(Workspace, Vec<CompilerError>), Vec<CompilerError>> {
-    check_modules_impl(modules, aliases, false)
+    check_modules_impl(modules, aliases, false, true)
 }
 
 /// The same gates as [`check_modules`], with in-process stdlib reuse for a suite.
@@ -71,13 +71,14 @@ pub fn check_test_modules(
     modules: &mut ModuleSet,
     aliases: impl FnOnce(&ModuleSet) -> Result<NsAliases, CompilerError>,
 ) -> Result<(Workspace, Vec<CompilerError>), Vec<CompilerError>> {
-    check_modules_impl(modules, aliases, true)
+    check_modules_impl(modules, aliases, true, true)
 }
 
 fn check_modules_impl(
     modules: &mut ModuleSet,
     aliases: impl FnOnce(&ModuleSet) -> Result<NsAliases, CompilerError>,
     reuse_stdlib: bool,
+    check_lua_interop: bool,
 ) -> Result<(Workspace, Vec<CompilerError>), Vec<CompilerError>> {
     let gates_timer = bone_core::prelude::Instant::now();
     let syntax = syntax_errors(modules.iter());
@@ -109,7 +110,10 @@ fn check_modules_impl(
     ws.phase_timings.push(("gates", gates_time));
     ws.phase_timings.push(("aliases", aliases_time));
     let timer = bone_core::prelude::Instant::now();
-    let errs = skull_mir::verdict::body_errors(&ws);
+    let mut errs = skull_mir::verdict::body_errors(&ws);
+    if errs.is_empty() && check_lua_interop {
+        errs = skull_mir::lua_interop::errors(&ws);
+    }
     ws.log_time("body verdict", timer);
     Ok((ws, errs))
 }
@@ -283,8 +287,9 @@ pub fn compile_modules(
     host: &mut dyn CompileHost,
 ) -> Result<Compiled, CompileFailure> {
     let reuse_stdlib = host.reuse_checked_stdlib();
-    let (mut ws, body_errors) = check_modules_impl(&mut modules, |m| host.aliases(m), reuse_stdlib)
-        .map_err(|errors| CompileFailure::at(Stage::Check, errors))?;
+    let (mut ws, body_errors) =
+        check_modules_impl(&mut modules, |m| host.aliases(m), reuse_stdlib, false)
+            .map_err(|errors| CompileFailure::at(Stage::Check, errors))?;
     if !body_errors.is_empty() {
         return Err(CompileFailure::at(Stage::Check, body_errors));
     }

@@ -67,7 +67,7 @@ pub extern(ffi, "stone") fn stone_nav_plan(handle: int, slot: int, generation: i
 pub extern(ffi, "stone") fn stone_nav_step(handle: int, slot: int, generation: int, space: int, x: int, y: int, due_tick: int, out: Ptr<NativeNavInt>) -> int
 pub extern(ffi, "stone") fn stone_nav_route_copy(handle: int, slot: int, generation: int, out: Ptr<NativeNavInt>, len: int) -> int
 
-pub struct NativeNavOwner { token: any? = null }
+pub @lua_named struct NativeNavOwner { token: any? = null }
 
 pub inline(lua) fn native_nav_owner(owner: NativeNavOwner, handle: int) = """
     local function own(id)

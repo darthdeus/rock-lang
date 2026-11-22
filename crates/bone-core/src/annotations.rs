@@ -125,6 +125,7 @@ fn validate_one(
             positional(2, nonempty_string),
             "`@preflight` requires prepare and tail function name strings",
         ),
+        "lua_named" => no_args_at(StructItem),
         "nomangle" => {
             if !matches!(pos, FnItem | StructItem) {
                 comp_error!(

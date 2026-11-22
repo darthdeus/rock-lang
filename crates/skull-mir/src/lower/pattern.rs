@@ -300,6 +300,19 @@ impl<'a> Builder<'a> {
                     .is_some_and(|n| self.ws.nominals.struct_id(n).is_some())
                     && enum_name.is_none()
                     && !(top && name.is_some_and(|n| variants.contains(&n)));
+                if en.is_none() {
+                    let owner = name.or_else(|| match ty.map(|ty| ty.peel_nullable().0) {
+                        Some(crate::monoty::MonoTy::App {
+                            ctor: crate::monoty::MonoCtor::Nominal(name),
+                            ..
+                        }) => Some(*name),
+                        _ => None,
+                    });
+                    if let Some(owner) = owner {
+                        let value = self.scrut_value(scrut);
+                        self.mark_record_owner(value, Some(owner));
+                    }
+                }
                 for rfidx in fields {
                     let rpf = self.body.record_pat_field_arena[rfidx];
                     // Embedded children are rebuilt from their parent's leaves.

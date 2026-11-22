@@ -61,10 +61,11 @@ struct ImageStorageHolder {
     verts: NativeBuffer<ImageVert>,
 }
 
-inline(lua) fn image_round_trip(value: ImageStorageHolder) -> ImageStorageHolder = """
+inline(lua) fn image_round_trip(@repr(opaque) value: ImageStorageHolder) -> any = """
     __stone_install_data_image()
     local capture = { image_mode = "capture", global = "test", storage = {}, storage_records = {} }
     local image = __stone_data_image(value, {}, capture)
+    assert(rawget(image, "small") ~= nil and rawget(image, 1) == nil)
     local materialize = { image_mode = "materialize", global = "test", storage = {},
         image_storage = capture.storage_records }
     return __stone_data_image(image, {}, materialize)
@@ -83,7 +84,7 @@ fn data_image_round_trips_large_storage() {
     holder.verts[0] = ImageVert { x: 1.5, id: 3 }
     holder.verts[n - 1] = ImageVert { x: 2.5, id: 9 }
 
-    let copy = image_round_trip(holder)
+    let copy = cast<ImageStorageHolder>(image_round_trip(holder))
     assert_eq(copy.small.len, 16)
     assert_eq(nb_get(copy.small, 15), 7)
     assert_eq(copy.large.len, 70000)
@@ -99,7 +100,7 @@ fn data_image_round_trips_large_storage() {
 
 value ImageLabel { text: string }
 enum ImageChoice { Empty, Text(string) }
-struct ImageTypedGraph {
+@lua_named struct ImageTypedGraph {
     label: ImageLabel,
     nullable: [bool?],
     choice: any,

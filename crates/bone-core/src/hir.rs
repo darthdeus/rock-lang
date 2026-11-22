@@ -986,6 +986,7 @@ pub struct StructDef {
     pub consume: bool,
     /// `@nomangle`: preserve the declared name in emitted type symbols.
     pub nomangle: bool,
+    pub lua_named: bool,
     pub span: Span,
     pub generics: Vec<TyId>,
     pub fields: Vec<StructFieldDef>,

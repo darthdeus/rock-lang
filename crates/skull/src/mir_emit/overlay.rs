@@ -394,6 +394,11 @@ pub fn emit_overlay_with_span_edits(
     reinferred: &[(ModuleId, BodyOwner)],
     edits: &[crate::instance_graph::TextEditDelta],
 ) -> Result<MirEmit, CompilerError> {
+    if let Some(err) =
+        SkullEmitCache::combine_errors(skull_mir::lua_interop::edited_errors(ws, reinferred))
+    {
+        return Err(err);
+    }
     cache.concrete.detach_plan_store();
     let t0 = Instant::now();
     let t_cg = t0.elapsed();

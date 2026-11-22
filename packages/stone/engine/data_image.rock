@@ -193,7 +193,10 @@
         if image_mode == "capture" then
             has_storage, view_fields = storage_fields(x)
         end
+        local fields = image_mode == "capture" and mt and mt.__rock_fields
+        local slots = image_mode == "materialize" and tagged and __rock_box_mts[rt].__rock_slots
         for k, v in pairs(x) do
+            k = fields and fields[k] or k
             -- A real leaf view is DERIVED from the storage beside it, so a
             -- capture does not image it and materialize does not rebuild it.
             -- Anything that is not one of those views -- including a field
@@ -201,6 +204,7 @@
             if (k ~= "__ty" or not tagged)
                 and __rock_field_selected(x, k, "image", view_fields) then
                 ctx.last_owner = who; ctx.last_key = k
+                k = slots and slots[k] or k
                 if not plain(type(k)) then
                     o[dc(k, seen, ctx)] = dc(v, seen, ctx)
                 elseif plain(type(v)) then

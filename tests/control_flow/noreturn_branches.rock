@@ -15,7 +15,7 @@ fn return_after_guard() { print(check_0(3)) }
 @test(output = "5")
 fn return_after_unwrap() { print(get(4)) }
 
-struct W { n: int }
+@lua_named struct W { n: int }
 @nomangle fn live(w: W) -> bool { return w.n > 0 }
 @nomangle fn check_2(a: int, b: int, c: int, w: W?) -> bool {
     let ok = a > 0

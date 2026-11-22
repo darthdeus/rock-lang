@@ -1,4 +1,4 @@
-struct SnapshotState { i: int }
+@lua_named struct SnapshotState { i: int }
 inline(lua) fn snapshot_build(state: SnapshotState) -> any = """
 return setmetatable({}, {
   __index = function()

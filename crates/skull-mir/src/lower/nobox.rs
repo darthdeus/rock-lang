@@ -106,7 +106,21 @@ impl<'a> Builder<'a> {
             e,
             concrete_callee.func,
             &callee.signature,
-        )
+        )?;
+        if self.scx.target == bone_core::hir::FnBackend::Lua {
+            crate::lua_interop::check_concrete_boundary(
+                self.ws,
+                concrete_callee.func,
+                self.body.expr_spans[e],
+                callee
+                    .signature
+                    .params
+                    .iter()
+                    .map(|&id| self.concrete_mono(id)),
+                callee.signature.result.map(|id| self.concrete_mono(id)),
+            )?;
+        }
+        Ok(())
     }
 
     /// Nullable and tuple slots can still carry the same underlying container.

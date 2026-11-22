@@ -78,6 +78,7 @@ fn struct_shape_hash(
     "struct".hash(&mut h);
     s.is_value.hash(&mut h);
     s.is_nobox.hash(&mut h);
+    s.lua_named.hash(&mut h);
     for f in s.fields.iter() {
         f.name.as_str().hash(&mut h);
         ws.render(None, f.ty).hash(&mut h);
@@ -698,12 +699,19 @@ _G.__rock_global_decorate = function(rows)
     for key, value in pairs(fields) do entry[key] = value end
   end
 end
+local function check_global_record_abi(entry)
+  if entry.private_record then
+    error("Lua access to global " .. entry.identity .. " requires @lua_named on its record types", 0)
+  end
+end
 _G.__rock_global_get = function(entry)
+  check_global_record_abi(entry)
   if entry.get then return entry.get() end
   if #entry.slots == 1 then return _G.__rock_globals[entry.slots[1]] end
   error("Rock global " .. entry.identity .. " has no single-value accessor", 0)
 end
 _G.__rock_global_set = function(entry, value)
+  check_global_record_abi(entry)
   if entry.set then return entry.set(value) end
   if #entry.slots == 1 then _G.__rock_globals[entry.slots[1]] = value; return end
   error("Rock global " .. entry.identity .. " has no single-value accessor", 0)

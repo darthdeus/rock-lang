@@ -1,10 +1,10 @@
-struct __DecoTarget {
+@lua_named struct __DecoTarget {
     name: string,
     params: [string],
     func: any,
 }
 
-struct ArtifactDefinition<T> {
+@lua_named struct ArtifactDefinition<T> {
     catalog: string,
     key: string,
     name: string,
@@ -272,7 +272,7 @@ fn metric_recent(m: Metric, i: int) -> float {
 // NativeBuffer value elements use contiguous C-layout storage. Whole reads copy;
 // field access addresses the live slot. FlatVec requires an FFI-clean value type.
 
-struct FlatVec<T> { buf: NativeBuffer<T>, len: int }   // buf.len = capacity
+@lua_named struct FlatVec<T> { buf: NativeBuffer<T>, len: int }   // buf.len = capacity
 
 @inline fn flat_vec_new<T>(cap: int = 8) -> FlatVec<T> {
     return FlatVec { buf: native_buffer_alloc(cap), len: 0 }
@@ -464,7 +464,7 @@ value SceneBuilder {
 """
 
 // Values must not retain this owner: LuaJIT weak tables are not ephemerons.
-struct CacheOwner { retired: bool = false }
+@lua_named struct CacheOwner { retired: bool = false }
 
 inline(lua) fn weak_cache_get<V>(name: string, owner: CacheOwner) -> V? = """
     if owner.retired then return nil end
@@ -1607,11 +1607,15 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
 """
 
 @inline inline(lua) fn field_get<T, V>(o: T, f: ReadFieldRef<T, V>) -> V = """
-    return o[f]
+    local mt = type(o) == "table" and getmetatable(o)
+    local slots = type(mt) == "table" and mt.__rock_slots
+    return o[slots and slots[f] or f]
 """
 
 @inline inline(lua) fn field_set<T, V>(o: T, f: WriteFieldRef<T, V>, v: V) = """
-    o[f] = v
+    local mt = type(o) == "table" and getmetatable(o)
+    local slots = type(mt) == "table" and mt.__rock_slots
+    o[slots and slots[f] or f] = v
 """
 
 // Both callers unset only present keys.
@@ -2061,7 +2065,10 @@ const EPSILON: float = 0.0000001
         result = "{ " .. table.concat(parts, ", ") .. " }"
     else
         -- Collect and sort keys, skipping metadata
-        local keys = __rock_field_keys(t, "inspect")
+        local mt = getmetatable(t)
+        local slots = type(mt) == "table" and mt.__rock_slots
+        local keys = {}
+        if not slots then keys = __rock_field_keys(t, "inspect") end
         local seen = {}
         for _, k in ipairs(keys) do
             seen[k] = true
@@ -2081,10 +2088,11 @@ const EPSILON: float = 0.0000001
                 -- presence flag, so rebuild its logical value from the leaves.
                 -- A TABLE there means this is already a rebuilt logical view
                 -- (nested embed), whose child sits under the name directly.
-                if f.embed and type(t[f.name]) ~= "table" then
+                local value = t[slots and slots[f.name] or f.name]
+                if f.embed and type(value) ~= "table" then
                     embed_vals = embed_vals or {}
                     embed_vals[f.name] = __rock_embed_view(t, f.name, f.type, f.nullable)
-                elseif f.flat and type(t[f.name]) ~= "table" then
+                elseif f.flat and type(value) ~= "table" then
                     embed_vals = embed_vals or {}
                     embed_vals[f.name] = __rock_flat_enum_view(t, f.name, f.type)
                 end
@@ -2125,7 +2133,7 @@ const EPSILON: float = 0.0000001
             for i, k in ipairs(keys) do
                 local dk = (payload_names and payload_names[k]) or k
                 local key_str = type(dk) == "string" and dk or ("[" .. tostring(dk) .. "]")
-                local v = t[k]
+                local v = t[slots and slots[k] or k]
                 if embed_vals and embed_vals[k] ~= nil then v = embed_vals[k] end
                 parts[i] = key_str .. " = " .. __rock_inspect_value(v, indent, path .. "." .. tostring(dk), visited, precision)
             end
@@ -2140,7 +2148,7 @@ const EPSILON: float = 0.0000001
             for _, k in ipairs(keys) do
                 local dk = (payload_names and payload_names[k]) or k
                 local key_str = type(dk) == "string" and dk or ("[" .. tostring(dk) .. "]")
-                local v = t[k]
+                local v = t[slots and slots[k] or k]
                 if embed_vals and embed_vals[k] ~= nil then v = embed_vals[k] end
                 lines[#lines + 1] = indent .. "  " .. key_str .. " = " .. __rock_inspect_value(v, indent .. "  ", path .. "." .. tostring(dk), visited, precision)
             end
@@ -2158,14 +2166,21 @@ const EPSILON: float = 0.0000001
 """
 
 @nomangle inline(lua) fn __rock_flat_enum_view(t: any, prefix: string, ty: string) -> any = """
-    local tag = t[prefix .. ".#"]
+    local mt = getmetatable(t)
+    local slots = type(mt) == "table" and mt.__rock_slots
+    local key = prefix .. ".#"
+    local tag = t[slots and slots[key] or key]
     if tag == nil then return nil end
     local flat = _G.__ROCK_ENUM_FLAT_LAYOUT[ty]
     local o = setmetatable({ __variant = tag }, __rock_box_mts[ty])
-    for i = 1, flat.tuple_width do o[i] = t[prefix .. "." .. (i - 1)] end
+    for i = 1, flat.tuple_width do
+        local key = prefix .. "." .. (i - 1)
+        o[i] = t[slots and slots[key] or key]
+    end
     for i = 1, #flat.record_fields do
         local key = flat.record_fields[i]
-        o[key] = t[prefix .. "." .. key]
+        local path = prefix .. "." .. key
+        o[key] = t[slots and slots[path] or path]
     end
     return o
 """
@@ -2173,10 +2188,12 @@ const EPSILON: float = 0.0000001
 // Returns nil when absent, so an absent embed reads as null rather than as a
 // struct assembled from stale leaves.
 @nomangle inline(lua) fn __rock_embed_view(t: any, prefix: string, ty: string, nullable: bool) -> any = """
-    if nullable and t[prefix] == nil then return nil end
+    local mt = getmetatable(t)
+    local slots = type(mt) == "table" and mt.__rock_slots
+    if nullable and t[slots and slots[prefix] or prefix] == nil then return nil end
     local decl = _G.__ROCK_TYPE_TABLE[ty]
     if not decl then return nil end
-    local o = setmetatable({}, __rock_box_mts[ty])
+    local o = { __ty = ty }
     for i = 1, #decl.fields do
         local f = decl.fields[i]
         local key = prefix .. "." .. f.name
@@ -2185,7 +2202,7 @@ const EPSILON: float = 0.0000001
         elseif f.flat then
             o[f.name] = __rock_flat_enum_view(t, key, f.type)
         else
-            o[f.name] = t[key]
+            o[f.name] = t[slots and slots[key] or key]
         end
     end
     return o
@@ -2665,7 +2682,7 @@ fn float_range(start: float, end_val: float, step: float) -> [float] {
 }
 
 // Use the explicit length for nullable elements and reserved slots.
-struct Vec<T> {
+@lua_named struct Vec<T> {
     _data: any,
     len: int,
     storage: Storage = phantom(),
@@ -3386,7 +3403,7 @@ inline(lua) fn __rock_parse_float_at_init(declared: bool) -> any = """
 @nowrite @inline inline(lua) fn string.repeat(s, count: int) -> string = "string.rep(s, count)"
 @nowrite @inline inline(js) fn string.repeat(s, count: int) -> string = "return count > 0 ? s.repeat(count) : \"\";"
 
-struct StringBuilder {}
+@lua_named struct StringBuilder {}
 @intrinsic inline(lua) fn sb_new() -> StringBuilder = """
     local new = _G.__rock_string_buffer_new
     if not new then

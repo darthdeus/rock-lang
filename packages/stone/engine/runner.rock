@@ -189,7 +189,7 @@ fn font_coverage_oversampling_require(value: float) -> float {
     return value
 }
 
-pub struct GameConfig {
+pub @lua_named struct GameConfig {
     title: string = "Stone Game",
     width: int = 1280,
     height: int = 720,

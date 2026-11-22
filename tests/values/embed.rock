@@ -146,9 +146,9 @@ fn test_inspect_flat_enum_fields() {
 
 // A nullable embed nested inside an embedded child owns a presence slot at its
 // composed path (`child.inner`), written by literals and whole-field stores alike.
-struct Leaf { v: int }
-struct Mid { embed inner: Leaf?, m: int }
-struct Top { embed child: Mid?, t: int }
+@lua_named struct Leaf { v: int }
+@lua_named struct Mid { embed inner: Leaf?, m: int }
+@lua_named struct Top { embed child: Mid?, t: int }
 
 global T: Top = Top { child: null, t: 0 }
 
@@ -219,13 +219,13 @@ enum Waitish {
     Until(() -> bool, int),
 }
 
-struct Framed {
+@lua_named struct Framed {
     handle: int,
     active: Waitish,
     last: int = -1,
 }
 
-struct EmbedOwner { embed f: Framed, tag: int }
+@lua_named struct EmbedOwner { embed f: Framed, tag: int }
 struct BoxedOwner { f: Framed, tag: int }
 struct DirectOwner { active: Waitish }
 

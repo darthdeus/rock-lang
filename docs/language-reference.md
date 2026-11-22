@@ -49,11 +49,13 @@ Whether
 arithmetic such as `0.0 * -1.0` yields `-0` depends on LuaJIT's platform, so
 do not rely on it. See [numeric edge tests](../tests/operators/numeric_edges.rock).
 
-Reading a field of a non-nil Rock value cannot fail. The compiler may omit
-physical reads whose results are unused, including nullable-child reads after
-the child's nil check. Inline Lua that attaches metatables or getters to Rock
-values is unsupported. Value copies still snapshot the used fields before
-later mutations.
+Ordinary structs use compiler-private storage on Lua. Add `@lua_named` to
+a struct declaration if inline Lua, an extern binding or native code reads
+or writes its fields by name. An opaque function that just forwards an
+argument can declare that parameter `@repr(opaque)`. Named layout preserves
+foreign table getters and setters. Inspect, typed field references and the
+typed JSON codec use declared field names for either layout. Changing a
+struct's layout requires a restart before hot reload can use the new shape.
 
 `ref T` accesses a place without copying its value; field writes go through
 to that place. A function can return a reference derived from a valid input

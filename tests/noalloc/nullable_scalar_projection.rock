@@ -1,7 +1,7 @@
 value ProjectionPoint { x: int, y: int }
 value ProjectionLabel { text: string, point: ProjectionPoint, width: int, enabled: bool, maybe: int? }
-struct ProjectionOwner { label: ProjectionLabel? = null, point: ProjectionPoint? = null }
-struct ProjectionCounter { calls: int = 0 }
+@lua_named struct ProjectionOwner { label: ProjectionLabel? = null, point: ProjectionPoint? = null }
+@lua_named struct ProjectionCounter { calls: int = 0 }
 @noalloc @nomangle fn next_owner(h: ProjectionOwner, c: ProjectionCounter) -> ProjectionOwner {
     c.calls += 1
     return h
@@ -35,8 +35,8 @@ fn nullable_projection_preserves_receiver_and_snapshots() {
 }
 
 value EmbeddedLabel { text: string, width: int }
-struct EmbeddedOwner { label: EmbeddedLabel? = null, tag: int = 5 }
-struct EmbeddedRoot { embed inner: EmbeddedOwner }
+@lua_named struct EmbeddedOwner { label: EmbeddedLabel? = null, tag: int = 5 }
+@lua_named struct EmbeddedRoot { embed inner: EmbeddedOwner }
 @noalloc @nomangle fn embedded_width(r: EmbeddedRoot) -> int { r.inner.label?.width ?? -1 }
 @test(output = "-1\n23 5")
 fn nullable_projection_through_embed() {

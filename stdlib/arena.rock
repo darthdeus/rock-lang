@@ -3,7 +3,7 @@
 // generation equals the handle's, which is always >= 0.
 // `next_generation` advances on every insertion, reused slot or fresh, so
 // `clear()` can never reissue a generation a stale handle holds.
-struct ArenaStore<T> {
+@lua_named struct ArenaStore<T> {
     _owner_scene_id: int,
     generations: [int],
     occupied: [bool],
@@ -20,7 +20,7 @@ value ArenaGenerationSnapshot {
     next_generation: int,
 }
 
-struct ArenaRegistry {
+@lua_named struct ArenaRegistry {
     stores: Map<int, any>,
     next_id: int,
     process_root: int,

@@ -1,4 +1,4 @@
-struct Box { n: int }
+@lua_named struct Box { n: int }
 @inline inline(lua) fn bump(b: Box, by: int) = "b.n = b.n + by"
 @inline inline(lua) fn twice(x: int) -> int = "return x .. x"
 @inline inline(lua) fn reassign(x: int) -> int = "x = x + 1\nreturn x"
@@ -22,8 +22,8 @@ fn splice_preserves_names_and_reassignments() {
     print(run(Box { n: 1 }, 4))
 }
 
-struct CounterBox { n: int }
-struct Holder { b: CounterBox, n: int }
+@lua_named struct CounterBox { n: int }
+@lua_named struct Holder { b: CounterBox, n: int }
 inline(lua) fn tick(h: Holder) -> int = "h.b.n = h.b.n + 10\nh.n = h.n + 1\nreturn h.n"
 @inline inline(lua) fn ignore(v: int) = ""
 @inline inline(lua) fn next_of(b: CounterBox) -> int = "return b.n + 1"
@@ -41,7 +41,7 @@ fn splice_preserves_argument_order() {
     print(run_order(Holder { b: CounterBox { n: 5 }, n: 0 }))
 }
 
-struct SetBox { n: int }
+@lua_named struct SetBox { n: int }
 struct SetHolder { b: SetBox, n: int }
 @inline inline(lua) fn set_n(b: SetBox, v: int) = "b.n = v"
 fn run_set(h: SetHolder, v: int) -> int {

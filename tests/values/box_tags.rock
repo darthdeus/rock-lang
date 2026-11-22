@@ -1,5 +1,5 @@
 // The Lua tag lives on one metatable per nominal type.
-struct BoxedRow { count: int, name: string }
+@lua_named struct BoxedRow { count: int, name: string }
 value BoxedLabel { text: string }
 enum BoxedChoice { Empty, Text(string), Count { value: int } }
 co fn boxed_counter() -> Coroutine<int> { yield 1 }

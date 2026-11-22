@@ -625,13 +625,18 @@ impl<'a> Builder<'a> {
             return Err(self.gap_here("field_get requires an owner and selector"));
         };
         // The field's own key is presence; its dotted keys hold the payload.
-        let mut leaves = vec![self.read_index(*owner, *selector, ContainerKind::Map)];
+        let kind = if self.scx.target() == bone_core::hir::FnBackend::Lua {
+            ContainerKind::Record(Some(parent))
+        } else {
+            ContainerKind::Map
+        };
+        let mut leaves = vec![self.read_index(*owner, *selector, kind)];
         for path in value_leaf_paths(shape) {
             let suffix = self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(&format!(
                 ".{path}"
             )))));
             let index = self.emit_cur(Inst::StringConcat(*selector, suffix));
-            leaves.push(self.read_index(*owner, index, ContainerKind::Map));
+            leaves.push(self.read_index(*owner, index, kind));
         }
         Ok(Some(Self::rebuild_from_leaves(shape, &leaves)))
     }

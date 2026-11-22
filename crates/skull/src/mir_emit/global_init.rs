@@ -286,9 +286,24 @@ pub(super) fn globals_directory_lua(
             .map(|leaf| lua_string(leaf))
             .collect::<Vec<_>>()
             .join(",");
+        let mut private_record = "";
+        if let Some(&ty) = ws.globals_by_name.get(&entry.logical_name) {
+            ws.type_any(None, ty, &mut |node| {
+                if let bone_semantic::hir::TypeExpr::App {
+                    ctor: bone_semantic::hir::TypeCtor::Nominal(name),
+                    ..
+                } = node
+                    && cg.uses_record_slots(name)
+                {
+                    private_record = ",private_record=true";
+                    return true;
+                }
+                false
+            });
+        }
         let _ = writeln!(
             out,
-            "{{name={},identity={},physical={{{physical}}},slots={{{}}}}},",
+            "{{name={},identity={},physical={{{physical}}},slots={{{}}}{private_record}}},",
             lua_string(&entry.name),
             lua_string(&entry.identity),
             entry.slots.join(",")

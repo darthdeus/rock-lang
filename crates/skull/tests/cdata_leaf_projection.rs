@@ -4,7 +4,7 @@ const SOURCE: &str = r#"
 nobox value Cell { x: int, y: int }
 nobox value Location { region: int, cell: Cell }
 value Motion { active: bool, at: Location, weight: float, __rock_leaf_: int = 19 }
-struct Holder { motion: Motion }
+@lua_named struct Holder { motion: Motion }
 value Pair { x: float, y: float }
 value Floating { pair: Pair, other: float }
 value FloatingPair { pair: Pair }

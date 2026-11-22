@@ -46,7 +46,7 @@ fn a_nullable_nobox_field_is_stored_as_presence_and_leaves() {
     }
     let body = function_body(&lua, "spawn");
     assert!(
-        body.contains(r#"["pos.x"]"#) && body.contains(r#"["pos.y"]"#),
+        body.contains("setmetatable({c1, c2, c0,"),
         "the nullable field did not flatten into its parent's leaves:\n{body}"
     );
     assert_eq!(run_main(&lua), "3\n-1\n9\n-1\n7");

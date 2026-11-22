@@ -37,7 +37,7 @@ pub enum GpuLoad {
     Clear(Color),
 }
 
-pub struct GpuBinding {
+pub @lua_named struct GpuBinding {
     slot: int,
     resource: SampledTexture,
     filter: TextureFilter,
@@ -256,9 +256,9 @@ fn gpu_execute_pass(p: GpuPass, traced: [GpuTracedDraw]?, to_window: bool) -> bo
 // Static arguments rather than a closure per pass. Re-raises the original
 // value after cleanup; pcall must not turn a failure into a successful submit.
 inline(lua) fn gpu_execute_gl_scoped(
-    p: GpuPass, traced: [GpuTracedDraw]?, to_window: bool, blend: BlendMode, canvas: int,
-    execute: fn(GpuPass, [GpuTracedDraw]?, bool) -> bool,
-    cleanup: fn(GpuPass, BlendMode, int, bool),
+    @repr(opaque) p: GpuPass, @repr(opaque) traced: [GpuTracedDraw]?, to_window: bool, blend: BlendMode, canvas: int,
+    @repr(opaque) execute: fn(GpuPass, [GpuTracedDraw]?, bool) -> bool,
+    @repr(opaque) cleanup: fn(GpuPass, BlendMode, int, bool),
 ) -> bool = """
     local scope = stone.stone_gl_pass_state_begin()
     if scope == 0 then error("GL semantic pass state capture failed", 0) end

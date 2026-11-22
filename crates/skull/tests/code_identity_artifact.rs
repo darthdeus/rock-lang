@@ -50,7 +50,7 @@ fn main() { ROOT = load() }
 fn typed_catalog_accessor_is_compiler_owned_and_returns_the_published_view() {
     let emit = emit_mir(
         r#"
-struct WidgetDef { value: int }
+@lua_named struct WidgetDef { value: int }
 @artifact_definition(catalog="widgets", key_param="key")
 deco init widget(key: string) {}
 @artifact_definition(catalog="empty", key_param="key")

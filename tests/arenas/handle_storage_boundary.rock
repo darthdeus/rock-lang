@@ -1,5 +1,5 @@
 struct RawItem { count: int }
-struct RawHandleRow { handle: Entity<RawItem> }
+@lua_named struct RawHandleRow { handle: Entity<RawItem> }
 
 inline(lua) fn raw_handle_field(row: any) -> any = """
     local handle = rawget(row, "handle")

@@ -1,5 +1,5 @@
-struct AbiRecord { value: int?, flag: bool? }
-struct AbiOwner { child: AbiRecord? }
+@lua_named struct AbiRecord { value: int?, flag: bool? }
+@lua_named struct AbiOwner { child: AbiRecord? }
 
 @nomangle fn record_abi_read(row: AbiRecord) -> int? { row.value }
 @nomangle fn record_abi_write(row: AbiRecord, value: int?) { row.value = value }
@@ -38,7 +38,7 @@ inline(lua) fn record_abi_host_checks() = """
     assert(writes == 1 and foreign[1] == 99)
 """
 
-struct ErasedAbiRecord { value: int? }
+@lua_named struct ErasedAbiRecord { value: int? }
 
 inline(lua) fn record_abi_edit_erased(alias: any, value: int?) = """
     rawset(alias, "value", value)
@@ -63,4 +63,43 @@ fn lua_record_abi_preserves_named_keys_through_any() {
     assert(row.value == null)
     let foreign = cast<ErasedAbiRecord>(record_abi_make_erased())
     assert(foreign.value == 13)
+}
+
+@lua_named struct AbiSharedState { value: int? }
+global ABI_SHARED_STATE: AbiSharedState = AbiSharedState { value: 7 }
+
+inline(lua) fn abi_edit_global(name: string, value: int?) = """
+    local entry = assert(__rock_global_entry(name))
+    rawset(__rock_global_get(entry), "value", value)
+"""
+
+inline(lua) fn abi_replace_global(name: string, value: int) = """
+    local entry = assert(__rock_global_entry(name))
+    __rock_global_set(entry, { [1] = 99, value = value })
+"""
+
+@test(backends = "lua")
+fn raw_global_directory_preserves_live_named_access() {
+    let alias = ABI_SHARED_STATE
+    abi_edit_global("ABI_SHARED_STATE", 19)
+    assert(alias.value == 19 && ABI_SHARED_STATE.value == 19)
+    abi_edit_global("ABI_SHARED_STATE", null)
+    assert(alias.value == null && ABI_SHARED_STATE.value == null)
+    abi_replace_global("ABI_SHARED_STATE", 23)
+    assert(ABI_SHARED_STATE.value == 23)
+}
+
+struct PrivateRecord { first: int?, second: int, third: int? }
+struct PrivateOwner { child: PrivateRecord? }
+
+@test(backends = "lua", output = "PrivateRecord {{\n  first = nil,\n  second = 8,\n  third = 9\n}}")
+fn private_record_keeps_logical_fields() {
+    let row = PrivateRecord { third: null, second: 8, first: null }
+    row.third = 9
+    let owner = PrivateOwner { child: row }
+    assert(owner.child?.second == 8)
+    let replaced = PrivateRecord { ..row, first: 7 }
+    assert(replaced.first == 7 && replaced.second == 8 && replaced.third == 9)
+    assert(row.first == null)
+    print(inspect(row))
 }

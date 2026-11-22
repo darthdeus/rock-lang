@@ -185,11 +185,22 @@ impl Emitter<'_> {
                     out.push_str("setmetatable(");
                 }
                 out.push('{');
-                for (i, (n, id)) in fields.iter().enumerate() {
+                let layout = nominal.and_then(|name| self.ctx.record_slots.get(&name));
+                let positional = layout
+                    .is_some_and(|layout| fields.iter().map(|(name, _)| name).eq(&layout.fields));
+                for (i, (name, id)) in fields.iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    write_table_key(out, n.as_str());
+                    if !positional {
+                        if let Some(slot) = layout.and_then(|layout| layout.slots.get(name)) {
+                            out.push('[');
+                            push_uint(out, *slot);
+                            out.push_str("] = ");
+                        } else {
+                            write_table_key(out, name.as_str());
+                        }
+                    }
                     self.write_opnd(out, *id);
                 }
                 out.push('}');
@@ -585,9 +596,25 @@ impl Emitter<'_> {
             ContainerKind::NativeBufferInBounds => {
                 out.push_str(".ptr");
             }
-            ContainerKind::Record(_) => {
+            ContainerKind::Record(owner) => {
+                if let Some(slot) = self.record_slot(kind, index) {
+                    out.push('[');
+                    push_uint(out, slot);
+                    out.push(']');
+                    return;
+                }
                 if let Inst::Const(Lit::Str(field)) = &self.func.insts[index] {
                     write_field_key(out, field.as_str());
+                    return;
+                }
+                if let Some(owner) = owner
+                    && self.ctx.record_slots.contains_key(&owner)
+                {
+                    out.push_str("[__rock_box_mts[");
+                    write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, owner).as_str());
+                    out.push_str("].__rock_slots[");
+                    self.write_opnd(out, index);
+                    out.push_str("]]");
                     return;
                 }
             }

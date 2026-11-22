@@ -16,7 +16,7 @@ pub enum WorldSurfaceOutputs {
     ReceiverMetadata,
 }
 
-pub struct RenderBatch {
+pub @lua_named struct RenderBatch {
     handle: RenderBatchHandle = RenderBatchHandle {},
     verts: NativeBuffer<Vertex>,
     count: int,               // physical vertices pushed since last submit

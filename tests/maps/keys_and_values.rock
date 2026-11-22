@@ -118,7 +118,7 @@ fn map_storage_accepts_column_stored_entity_handles() {
 
 value Q { x: float, y: float }
 
-struct Boxy { s: string }
+@lua_named struct Boxy { s: string }
 
 @nomangle inline(lua) fn Map<K, V>.probe(map) -> int = """
     local n = 0

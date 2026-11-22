@@ -515,6 +515,7 @@ impl<'a> Builder<'a> {
         cname: Ustr,
         value: Idx<Inst>,
     ) -> Result<Vec<(Ustr, Idx<Inst>)>, CompilerError> {
+        self.mark_record_owner(value, Some(cname));
         let mut out = Vec::new();
         for f in self.struct_field_names_required(cname)? {
             if self

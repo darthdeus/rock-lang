@@ -3,7 +3,7 @@
 // unwrap as a block tail, shadowing in nested ifs, a phantom-only generic
 // param, and generic maps with nullable-promoting helpers in scope.
 
-struct FixVec2 {
+@lua_named struct FixVec2 {
     x: int,
     y: int
 }

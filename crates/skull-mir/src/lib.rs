@@ -15,6 +15,7 @@ pub mod instance;
 pub mod intrinsics;
 pub mod lifecycle;
 pub mod lower;
+pub mod lua_interop;
 pub mod lua_nesting;
 pub mod mangle;
 pub mod mir;

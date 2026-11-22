@@ -23,7 +23,7 @@ fn unused_call_results_run() {
 }
 
 global marks: int = 1
-struct Row { value: int }
+@lua_named struct Row { value: int }
 @nomangle fn bump() -> int { marks = 2; return 7 }
 @nomangle fn probe(row: Row) -> int { marks = 1; return row.value + marks }
 @nomangle fn via_map(values: Map<string, int>) -> int { marks = 1; return values["value"] + marks }
