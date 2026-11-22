@@ -237,6 +237,14 @@ impl<'a> Builder<'a> {
     ) -> Result<Idx<Inst>, CompilerError> {
         let mut fields = Vec::new();
         self.collect_embed_slots(parent, prefix, "", cname, &mut fields)?;
+        self.materialize_embed_fields(cname, fields)
+    }
+
+    pub(crate) fn materialize_embed_fields(
+        &mut self,
+        cname: Ustr,
+        fields: Vec<(Ustr, Idx<Inst>)>,
+    ) -> Result<Idx<Inst>, CompilerError> {
         if self.is_value_struct(cname) {
             let representation = self.nominal_value_representation(cname)?;
             Ok(self.emit_cur(Inst::MakeValueStruct {
@@ -352,7 +360,10 @@ impl<'a> Builder<'a> {
         {
             // A functional-update base reads unwritten fields off another instance; the
             // general path owns that base-copy rule.
-            if name == cname && bases.into_iter().next().is_none() {
+            if name == cname
+                && bases.into_iter().next().is_none()
+                && self.sibling_defaults(name).is_none()
+            {
                 // A field group (`Ty { a + b: expr }`) shares one value expr: lower each
                 // distinct one once so it is evaluated once.
                 let mut by_value: HashMap<u32, Idx<Inst>> = HashMap::default();

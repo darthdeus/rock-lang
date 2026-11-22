@@ -468,6 +468,11 @@ impl<'a> Builder<'a> {
     }
 
     fn lower_expr_repr_unscoped(&mut self, e: Idx<Expr>) -> Result<ValueRepr, CompilerError> {
+        if let Expr::SiblingRef(field) = self.body.expr_arena[e]
+            && let Some(repr) = self.sibling_value(e, field)?
+        {
+            return Ok(repr);
+        }
         if let Expr::BinOp {
             op: BinOp::NullCoalesce,
             lhs,
@@ -1014,9 +1019,13 @@ impl<'a> Builder<'a> {
             let r = self.coerce_field_repr(r, lf.value, name, lf.name)?;
             litmap.push((lf.name, r));
         }
-        let parts = self.collect_literal_fields(name, litmap, |s, fname| {
-            s.spread_base_field_repr(&base_repr, base_boxed, name, fname, base)
-        })?;
+        let parts = self.collect_literal_fields(
+            name,
+            litmap,
+            base.is_none(),
+            |_, _, _, value| Ok(value.clone()),
+            |s, fname| s.spread_base_field_repr(&base_repr, base_boxed, name, fname, base),
+        )?;
         Ok(ValueRepr::Group {
             name,
             parts,

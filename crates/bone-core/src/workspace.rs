@@ -657,6 +657,7 @@ pub struct BodyInference {
     /// with the resolved `iter` witness skull wraps them in.
     pub implicit_iter_args: FxHashMap<Idx<Expr>, IterWitness>,
     pub struct_default_generic_slots: Vec<TyId>,
+    pub struct_default_sibling_reads: FxHashSet<Idx<Expr>>,
 
     pub ty_arena: Arena<TypeExpr>,
     pub ty_spans: ArenaMap<Idx<TypeExpr>, Span>,

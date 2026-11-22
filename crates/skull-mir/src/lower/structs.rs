@@ -1,6 +1,18 @@
 use super::*;
 use crate::monoty::MonoTy;
 
+fn map_sibling_slots(repr: &mut ValueRepr, map: &mut impl FnMut(Idx<Inst>) -> Idx<Inst>) {
+    match repr {
+        ValueRepr::Scalar(value) => *value = map(*value),
+        ValueRepr::Group { parts, present, .. } | ValueRepr::Tuple { parts, present } => {
+            *present = present.map(&mut *map);
+            for part in parts {
+                map_sibling_slots(part, map);
+            }
+        }
+    }
+}
+
 impl<'a> Builder<'a> {
     pub(crate) fn lower_exprs(
         &mut self,
@@ -91,53 +103,63 @@ impl<'a> Builder<'a> {
             }
         }
         let out = self
-            .collect_literal_fields(name, literal, |s, fname| {
-                if let Some((cname, nullable)) = s.struct_field_plan(name, fname, false)?.embed() {
-                    match base_inst {
-                        Some(bi) => {
-                            let mut slots = Vec::new();
-                            for k in s.embed_leaf_paths(cname)? {
-                                let key = crate::names::ustr(&format!("{fname}.{k}"));
-                                let v = s.read_field(bi, key);
-                                slots.push((key, v));
+            .collect_literal_fields(
+                name,
+                literal,
+                base_inst.is_none(),
+                |s, name, field, slots| s.literal_field_repr(name, field, slots),
+                |s, fname| {
+                    if let Some((cname, nullable)) =
+                        s.struct_field_plan(name, fname, false)?.embed()
+                    {
+                        match base_inst {
+                            Some(bi) => {
+                                let mut slots = Vec::new();
+                                for k in s.embed_leaf_paths(cname)? {
+                                    let key = crate::names::ustr(&format!("{fname}.{k}"));
+                                    let v = s.read_field(bi, key);
+                                    slots.push((key, v));
+                                }
+                                if nullable {
+                                    let p = s.read_field(bi, fname);
+                                    slots.push((fname, p));
+                                }
+                                Ok(slots)
                             }
-                            if nullable {
-                                let p = s.read_field(bi, fname);
-                                slots.push((fname, p));
+                            None => {
+                                let slots = s.with_struct_default(name, fname, |s, def| {
+                                    s.embed_value_leaves(nullable, cname, def)
+                                })?;
+                                Ok(Self::embed_field_slots(fname, slots))
                             }
-                            Ok(slots)
                         }
-                        None => {
-                            let slots = s.with_struct_default(name, fname, |s, def| {
-                                s.embed_value_leaves(nullable, cname, def)
-                            })?;
-                            Ok(Self::embed_field_slots(fname, slots))
-                        }
+                    } else if let Some(shape) =
+                        s.struct_field_plan(name, fname, false)?.flat_shape()
+                    {
+                        let cells = match base_inst {
+                            // A base stores the field in physical dotted slots; the default
+                            // is a boxed enum.
+                            Some(bi) => s.load_flat_cells(bi, fname, &shape),
+                            None => s.with_struct_default(name, fname, |s, def| {
+                                s.lower_flat_value(&shape, def)
+                            })?,
+                        };
+                        Ok(s.flat_literal_slots(fname, cells))
+                    } else {
+                        let v = match base_inst {
+                            Some(bi) => {
+                                let v = s.read_field(bi, fname);
+                                match s.concrete_struct_field_ty(e, fname) {
+                                    Some(ty) => s.copied_value_box(ty, v)?,
+                                    None => v,
+                                }
+                            }
+                            None => s.lower_struct_default(name, fname)?,
+                        };
+                        Ok(vec![(fname, v)])
                     }
-                } else if let Some(shape) = s.struct_field_plan(name, fname, false)?.flat_shape() {
-                    let cells = match base_inst {
-                        // A base stores the field in physical dotted slots; the default
-                        // is a boxed enum.
-                        Some(bi) => s.load_flat_cells(bi, fname, &shape),
-                        None => s.with_struct_default(name, fname, |s, def| {
-                            s.lower_flat_value(&shape, def)
-                        })?,
-                    };
-                    Ok(s.flat_literal_slots(fname, cells))
-                } else {
-                    let v = match base_inst {
-                        Some(bi) => {
-                            let v = s.read_field(bi, fname);
-                            match s.concrete_struct_field_ty(e, fname) {
-                                Some(ty) => s.copied_value_box(ty, v)?,
-                                None => v,
-                            }
-                        }
-                        None => s.lower_struct_default(name, fname)?,
-                    };
-                    Ok(vec![(fname, v)])
-                }
-            })?
+                },
+            )?
             .into_iter()
             .flatten()
             .collect();
@@ -151,15 +173,86 @@ impl<'a> Builder<'a> {
         }))
     }
 
+    pub(crate) fn sibling_defaults(&self, name: Ustr) -> Option<(&'a Body, &'a BodyInference)> {
+        let sid = self.ws.nominals.struct_id(name)?;
+        let owner = BodyOwner::StructDefaults(sid.def);
+        let inf = self.ws.inference(sid.module)?.per_fn.get(&owner)?;
+        if inf.struct_default_sibling_reads.is_empty() {
+            return None;
+        }
+        Some((self.ws.module(sid.module).bodies.get(&owner)?, inf))
+    }
+
     pub(crate) fn collect_literal_fields<T: Clone>(
         &mut self,
         name: Ustr,
-        literal: Vec<(Ustr, T)>,
+        mut literal: Vec<(Ustr, T)>,
+        use_defaults: bool,
+        sibling_repr: impl Fn(&mut Self, Ustr, Ustr, &T) -> Result<ValueRepr, CompilerError>,
         mut missing: impl FnMut(&mut Self, Ustr) -> Result<T, CompilerError>,
     ) -> Result<Vec<T>, CompilerError> {
         let Some(fields) = self.struct_field_names(name) else {
             return Ok(literal.into_iter().map(|(_, value)| value).collect());
         };
+        if use_defaults && let Some((body, inf)) = self.sibling_defaults(name) {
+            let mut pending = Vec::new();
+            let mut needed = HashSet::default();
+            for &field in &fields {
+                if literal.iter().any(|(written, _)| *written == field) {
+                    continue;
+                }
+                let Some(&root) = body.field_defaults.get(&field) else {
+                    continue;
+                };
+                let mut reads = Vec::new();
+                let mut visit = |node| {
+                    if let HirChild::Expr(e) = node
+                        && inf.struct_default_sibling_reads.contains(&e)
+                        && let Expr::SiblingRef(sibling) = body.expr_arena[e]
+                    {
+                        reads.push(sibling);
+                        needed.insert(sibling);
+                    }
+                    true
+                };
+                visit(HirChild::Expr(root));
+                body.walk_descendants(HirChild::Expr(root), &mut visit);
+                pending.push((field, root, reads));
+            }
+
+            let saved = std::mem::take(&mut self.sibling_values);
+            let result = (|| {
+                for (field, value) in &literal {
+                    if needed.contains(field) {
+                        let repr = sibling_repr(self, name, *field, value)?;
+                        self.save_sibling_value(*field, repr);
+                    }
+                }
+                while !pending.is_empty() {
+                    let Some(ready) = pending.iter().position(|(_, _, reads)| {
+                        reads
+                            .iter()
+                            .all(|name| self.sibling_values.contains_key(name))
+                    }) else {
+                        let (field, root, _) = pending[0];
+                        return Err(CompilerError::new_with_label(
+                            body.expr_spans[root],
+                            format!("cyclic defaults involving field `{field}`"),
+                        ));
+                    };
+                    let (field, _, _) = pending.remove(ready);
+                    let value = missing(self, field)?;
+                    if needed.contains(&field) {
+                        let repr = sibling_repr(self, name, field, &value)?;
+                        self.save_sibling_value(field, repr);
+                    }
+                    literal.push((field, value));
+                }
+                Ok(())
+            })();
+            self.sibling_values = saved;
+            result?;
+        }
         fields
             .into_iter()
             .map(
@@ -169,6 +262,89 @@ impl<'a> Builder<'a> {
                 },
             )
             .collect()
+    }
+
+    fn save_sibling_value(&mut self, field: Ustr, mut repr: ValueRepr) {
+        let mut cells = Vec::new();
+        map_sibling_slots(&mut repr, &mut |value| {
+            let cell = self.f.new_cell(None);
+            self.f.cells[cell].loop_binding = true;
+            self.store_cell(cell, value);
+            cells.push(cell);
+            value
+        });
+        self.sibling_values.insert(field, (repr, cells));
+    }
+
+    pub(crate) fn sibling_value(
+        &mut self,
+        expr: Idx<Expr>,
+        field: Ustr,
+    ) -> Result<Option<ValueRepr>, CompilerError> {
+        if !self
+            .inf
+            .is_some_and(|inf| inf.struct_default_sibling_reads.contains(&expr))
+        {
+            return Ok(None);
+        }
+        let (mut repr, cells) = self.sibling_values.get(&field).cloned().ok_or_else(|| {
+            self.gap_here(format!("default has no initialized sibling `{field}`"))
+        })?;
+        let mut cells = cells.into_iter();
+        map_sibling_slots(&mut repr, &mut |_| {
+            self.emit_cur(Inst::Load(cells.next().unwrap()))
+        });
+        if let (ValueRepr::Scalar(value), Some(ty)) = (&repr, self.concrete_expr_ty(expr)) {
+            return self.copied_value_repr(ty, *value).map(Some);
+        }
+        Ok(Some(repr))
+    }
+
+    fn literal_field_repr(
+        &mut self,
+        name: Ustr,
+        field: Ustr,
+        slots: &[(Ustr, Idx<Inst>)],
+    ) -> Result<ValueRepr, CompilerError> {
+        let plan = self.struct_field_plan(name, field, false)?;
+        if let Some(shape) = plan.flat_shape() {
+            return Ok(ValueRepr::Group {
+                name: shape.name,
+                parts: slots
+                    .iter()
+                    .map(|&(_, value)| ValueRepr::Scalar(value))
+                    .collect(),
+                present: None,
+            });
+        }
+        if let Some((child, nullable)) = plan.embed() {
+            let prefix = format!("{field}.");
+            let leaves = slots.iter().filter_map(|(key, value)| {
+                key.as_str()
+                    .strip_prefix(&prefix)
+                    .map(|key| (crate::names::ustr(key), *value))
+            });
+            let presence = nullable.then(|| slots.iter().find(|(key, _)| *key == field).unwrap().1);
+            if let Some(shape) = self.nobox_embed_group_shape(child)? {
+                let mut repr =
+                    Self::rebuild_from_leaves(&shape, &leaves.map(|(_, v)| v).collect::<Vec<_>>());
+                if let ValueRepr::Group { present, .. } = &mut repr {
+                    *present = presence;
+                }
+                return Ok(repr);
+            }
+            let fields = leaves.collect();
+            let materialize = |s: &mut Self| s.materialize_embed_fields(child, fields);
+            let value = match presence {
+                Some(present) => {
+                    let is_nil = self.is_nil(present);
+                    self.nil_or_join(is_nil, false, materialize)?
+                }
+                None => materialize(self)?,
+            };
+            return Ok(ValueRepr::Scalar(value));
+        }
+        Ok(ValueRepr::Scalar(slots[0].1))
     }
 
     pub(crate) fn with_leaf_views(
@@ -479,7 +655,6 @@ impl<'a> Builder<'a> {
             .unwrap_or(false)
     }
 
-    /// A default that reads a sibling field is not supported.
     pub(crate) fn lower_struct_default(
         &mut self,
         struct_name: Ustr,

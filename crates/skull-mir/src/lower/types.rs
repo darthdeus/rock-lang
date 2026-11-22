@@ -272,7 +272,7 @@ impl<'a> Builder<'a> {
                     break;
                 }
             }
-            if !has_flat {
+            if !has_flat && self.sibling_defaults(name).is_none() {
                 let base = bases.into_iter().next();
                 let base_bundle = match base {
                     Some(b) => Some(self.lower_expr_repr(b)?),

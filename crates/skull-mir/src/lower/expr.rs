@@ -307,8 +307,10 @@ impl<'a> Builder<'a> {
             Expr::Bool(x) => Ok(self.emit_cur(Inst::Const(Lit::Bool(x)))),
             Expr::String(s) => Ok(self.emit_cur(Inst::Const(Lit::Str(s)))),
 
-            // skull emits named struct keys, so `obj[name]` is identical to `obj.field`.
-            Expr::SiblingRef(name) => Ok(self.emit_cur(Inst::Const(Lit::Str(name)))),
+            Expr::SiblingRef(name) => match self.sibling_value(e, name)? {
+                Some(repr) => self.pack_maybe_absent(repr),
+                None => Ok(self.emit_cur(Inst::Const(Lit::Str(name)))),
+            },
 
             Expr::Var(b) if self.group_binds.contains_key(&raw(b)) => {
                 let r = self.lower_expr_repr(e)?.into_value();

@@ -1,10 +1,43 @@
 fn seed<T>() -> T? { return null }
 
-struct Box<T> { value: T? = seed() }
+struct Box<T> { value: T? = seed(), echo: T? = .value }
 
-@test(output = "nil nil")
+@test(output = "nil nil nil")
 fn generic_default_fixture() {
     let a: Box<int> = Box {}
     let b: Box<string> = Box {}
-    print("{a.value} {b.value}")
+    print("{a.value} {a.echo} {b.value}")
+}
+
+@test
+fn sibling_default_reads_the_explicit_value() {
+    let a: Box<int> = Box { value: 7 }
+    let b: Box<string> = Box { value: "seven" }
+    assert_eq(a.echo, 7)
+    assert_eq(b.echo, "seven")
+}
+
+global SEEDS: int = 0
+
+fn counted_seed() -> int {
+    SEEDS += 1
+    SEEDS
+}
+
+struct Dependent {
+    first: int = .second + 10,
+    second: int = counted_seed(),
+    get: () -> int = () => .first,
+}
+
+@test
+fn sibling_defaults_share_initialization_and_capture_its_value() {
+    SEEDS = 0
+    let row = Dependent {}
+    assert_eq(row.second, 1)
+    assert_eq(row.first, 11)
+    assert_eq(row.get(), 11)
+    row.first = 99
+    assert_eq(row.get(), 11)
+    assert_eq(SEEDS, 1)
 }

@@ -1165,11 +1165,13 @@ pub(crate) fn infer_expr_used(
         Expr::SiblingRef(name) => {
             let name = *name;
 
-            *gamma
+            let ty = *gamma
                 .sibling_fields
                 .last()
                 .and_then(|m| m.get(&name))
-                .ok_or_else(|| CompilerError::new_with_label(expr_span, format!("field reference `.{name}` is only valid against an expected `FieldRef<T, V>` / `ReadFieldRef<T, V>` / `WriteFieldRef<T, V>` or in a struct-field default")))?
+                .ok_or_else(|| CompilerError::new_with_label(expr_span, format!("field reference `.{name}` is only valid against an expected `FieldRef<T, V>` / `ReadFieldRef<T, V>` / `WriteFieldRef<T, V>` or in a struct-field default")))?;
+            gamma.out.struct_default_sibling_reads.insert(e);
+            ty
         }
 
         Expr::SafeNav { base, field } => {
@@ -2102,6 +2104,7 @@ pub(crate) fn check_expr(
 
                 unify(gamma, fty, v, span)?;
 
+                gamma.out.struct_default_sibling_reads.remove(&e);
                 gamma.assign_expr_type(c, e, exp_r)?;
 
                 return Ok(());

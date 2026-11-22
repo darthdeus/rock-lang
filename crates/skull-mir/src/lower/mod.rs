@@ -1374,6 +1374,7 @@ struct Builder<'a> {
     fn_name_span: Option<Span>,
     cur_span: Option<Span>,
     cur_expr: Option<Idx<Expr>>,
+    sibling_values: HashMap<Ustr, (ValueRepr, Vec<Idx<Cell>>)>,
     /// Struct defaults use their own expression arena, not `site_owner`'s.
     cur_domain: crate::site::SiteDomain,
     site_owner: Option<crate::instance::Instance>,
@@ -1468,6 +1469,7 @@ impl<'a> Builder<'a> {
             fn_name_span: None,
             cur_span: None,
             cur_expr: None,
+            sibling_values: HashMap::default(),
             cur_domain: crate::site::SiteDomain::Own,
             cur_op: crate::site::SiteOp::DirectCall,
             site_owner: None,
