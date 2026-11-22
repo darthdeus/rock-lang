@@ -212,48 +212,18 @@ impl ArtifactView {
             }
         }
 
-        let mut reachable_dirty = BTreeSet::new();
-        let mut reach_queue: VecDeque<Instance> = self
+        for i in &dirty {
+            self.realization.remove(i);
+            self.publisher_lanes.remove(i);
+            self.fn_value_targets.remove(i);
+        }
+        let seeds = self
             .roots
             .iter()
             .filter(|i| dirty.contains(*i))
-            .cloned()
-            .collect();
-        while let Some(i) = reach_queue.pop_front() {
-            if !dirty.contains(&i) || reachable_dirty.contains(&i) {
-                continue;
-            }
-            let Some(realized) = self.index.realizable.get(&i) else {
-                continue;
-            };
-            reachable_dirty.insert(i.clone());
-            if realized.kind != Realization::RockBody {
-                continue;
-            }
-            for (_, callee) in g.resolved_sites(&i) {
-                if dirty.contains(callee) {
-                    reach_queue.push_back(callee.clone());
-                }
-            }
-        }
-        for i in &dirty {
-            self.remove_instance_output(i);
-        }
-        for i in dirty.iter().filter(|i| g.instances.contains(*i)) {
-            let Some(realized) = self.index.realizable.get(i).copied() else {
-                continue;
-            };
-            if reachable_dirty.contains(i) {
-                self.install_instance_output(ws, g, req, i, realized);
-                let declared = declared_root(ws, &self.index.root_decls, i);
-                if declared || g.is_always_emitted_target(i) {
-                    self.roots.insert(i.clone());
-                    if declared {
-                        self.declared_roots.insert(i.clone());
-                    }
-                }
-            }
-        }
+            .filter_map(|i| g.instances.get(i));
+        let (rows, values) = reachable_rows(&self.index, seeds, |i| g.resolved_sites(i));
+        self.install_rows(ws, g, req, rows, values, false);
 
         let mut changed_publication_symbols: BTreeSet<String> = dirty
             .iter()
@@ -265,34 +235,27 @@ impl ArtifactView {
         self.refresh_publications_local(g, &changed_publication_symbols);
     }
 
-    fn remove_instance_output(&mut self, i: &Instance) {
-        self.roots.remove(i);
-        self.declared_roots.remove(i);
-        self.realization.remove(i);
-        self.publisher_lanes.remove(i);
-        // Dirty callers are installed again only after every dirty target is retracted.
-        self.fn_value_targets.remove(i);
-    }
-
-    fn install_instance_output(
+    fn install_rows(
         &mut self,
         ws: &Workspace,
         g: &InstanceGraph,
         req: &ArtifactRequest<'_>,
-        i: &Instance,
-        realized: Realized,
+        rows: Vec<(&Instance, Realized)>,
+        values: BTreeSet<Instance>,
+        cold: bool,
     ) {
-        self.realization.insert(i.clone(), realized);
-        for (site, callee) in g.resolved_sites(i) {
-            if site.op == skull_mir::site::SiteOp::FnValue {
-                self.fn_value_targets.insert(callee.clone());
+        self.fn_value_targets.extend(values);
+        for (instance, realized) in rows {
+            self.realization.insert(instance.clone(), realized);
+            match publisher_lanes(ws, g, req.scx, instance, realized) {
+                Ok(Some(lanes)) => {
+                    self.publisher_lanes.insert(instance.clone(), lanes);
+                }
+                Err(reason) if cold => panic!(
+                    "retained inline body {instance:?} has no concrete publisher signature: {reason:?}"
+                ),
+                _ => {}
             }
-        }
-        if self.index.always_fn_values.contains(i) {
-            self.fn_value_targets.insert(i.clone());
-        }
-        if let Ok(Some(lanes)) = publisher_lanes(ws, g, req.scx, i, realized) {
-            self.publisher_lanes.insert(i.clone(), lanes);
         }
     }
 
@@ -476,74 +439,23 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     let site_tables: FxHashMap<&Instance, &BTreeMap<Site, instance_graph::SiteRecord>> =
         g.call_sites().collect();
 
-    struct Admission<'g> {
-        admitted: FxHashSet<&'g Instance>,
-        reached: Vec<(&'g Instance, Realized)>,
-        queue: VecDeque<&'g Instance>,
-    }
-    impl<'g> Admission<'g> {
-        fn admit(&mut self, i: &'g Instance, realizable: &FxHashMap<Instance, Realized>) {
-            if !self.admitted.insert(i) {
-                return;
-            }
-            let r = realizable[i];
-            self.reached.push((i, r));
-            if r.kind == Realization::RockBody {
-                self.queue.push_back(i);
-            }
-        }
-    }
-    let mut walk = Admission {
-        admitted: FxHashSet::default(),
-        reached: Vec::new(),
-        queue: VecDeque::new(),
-    };
-    for r in g.instances.iter().filter(|i| roots.contains(*i)) {
-        walk.admit(r, &index.realizable);
-    }
-    // A value take in a global initializer or decorator has no caller instance,
-    // so the site walk cannot see it.
     index.always_fn_values = roots
         .iter()
         .filter(|r| g.is_always_emitted_fn_value(r))
         .cloned()
         .collect();
-    let mut fn_value_targets: BTreeSet<Instance> = index.always_fn_values.iter().cloned().collect();
-    while let Some(caller) = walk.queue.pop_front() {
-        let Some(sites) = site_tables.get(caller) else {
-            continue;
-        };
-        for (site, record) in sites.iter() {
-            let SiteOutcome::Resolved(callee) = &record.outcome else {
-                continue;
-            };
-            if !index.realizable.contains_key(callee) {
-                continue;
-            }
-            if site.op == skull_mir::site::SiteOp::FnValue {
-                fn_value_targets.insert(callee.clone());
-            }
-            walk.admit(callee, &index.realizable);
-        }
-    }
-    let mut reached = walk.reached;
-    reached.sort_unstable_by(|a, b| a.0.cmp(b.0));
-    let realization: BTreeMap<Instance, Realized> =
-        reached.iter().map(|(i, r)| ((*i).clone(), *r)).collect();
-    drop(site_tables);
-
-    let publisher_lanes = realization
-        .iter()
-        .filter_map(|(i, &r)| {
-            publisher_lanes(ws, g, req.scx, i, r)
-                .unwrap_or_else(|reason| {
-                    panic!(
-                        "retained inline body {i:?} has no concrete publisher signature: {reason:?}"
-                    )
+    let seeds = g.instances.iter().filter(|i| roots.contains(*i));
+    let (rows, values) = reachable_rows(&index, seeds, |i| {
+        site_tables.get(i).copied().into_iter().flat_map(|sites| {
+            sites
+                .iter()
+                .filter_map(|(site, record)| match &record.outcome {
+                    SiteOutcome::Resolved(callee) => Some((site, callee)),
+                    _ => None,
                 })
-                .map(|width| (i.clone(), width))
         })
-        .collect();
+    });
+    drop(site_tables);
 
     for (instance, symbol) in req
         .roots
@@ -561,13 +473,55 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         })
         .collect();
 
-    ArtifactView {
-        publisher_lanes,
+    let mut view = ArtifactView {
+        publisher_lanes: BTreeMap::new(),
         publications,
         roots,
         declared_roots,
-        fn_value_targets,
-        realization,
+        fn_value_targets: BTreeSet::new(),
+        realization: BTreeMap::new(),
         index,
+    };
+    view.install_rows(ws, g, req, rows, values, true);
+    view
+}
+
+fn reachable_rows<'g, Sites>(
+    index: &ArtifactIndex,
+    seeds: impl IntoIterator<Item = &'g Instance>,
+    sites: impl Fn(&'g Instance) -> Sites,
+) -> (Vec<(&'g Instance, Realized)>, BTreeSet<Instance>)
+where
+    Sites: IntoIterator<Item = (&'g Site, &'g Instance)>,
+{
+    let mut reached = FxHashSet::default();
+    let mut rows = Vec::new();
+    let mut follow = VecDeque::new();
+    let mut values = BTreeSet::new();
+    let mut add = |instance, follow: &mut VecDeque<_>| {
+        let Some(realized) = index.realizable.get(instance).copied() else {
+            return false;
+        };
+        if reached.insert(instance) {
+            rows.push((instance, realized));
+            if realized.kind == Realization::RockBody {
+                follow.push_back(instance);
+            }
+        }
+        true
+    };
+    for root in seeds {
+        if add(root, &mut follow) && index.always_fn_values.contains(root) {
+            values.insert(root.clone());
+        }
     }
+    while let Some(caller) = follow.pop_front() {
+        for (site, callee) in sites(caller) {
+            if add(callee, &mut follow) && site.op == skull_mir::site::SiteOp::FnValue {
+                values.insert(callee.clone());
+            }
+        }
+    }
+    rows.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    (rows, values)
 }

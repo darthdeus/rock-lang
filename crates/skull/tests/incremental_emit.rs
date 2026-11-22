@@ -23,6 +23,38 @@ fn check_edit(build: fn(&str) -> Workspace, before: &str, after: &str, edited: &
 }
 
 #[test]
+fn editing_a_shadowed_backend_body_does_not_publish_its_function_values() {
+    let src = r#"
+fn other() -> int { 4 }
+fn probe() -> int { 3 }
+inline(lua) fn probe() -> int = "return 7"
+fn main() { print(probe()) }
+"#;
+    let before = ws_with_stdlib(src);
+    let (_, mut cache) = emit_full_of(&before, "initial emit");
+    let after = ws_with_stdlib(&src.replace("{ 3 }", "{ let f: () -> int = other; f() }"));
+    let edited = [after
+        .modules
+        .iter()
+        .find_map(|module| {
+            module.functions.iter().find_map(|(id, function)| {
+                let owner = BodyOwner::Function(id);
+                (crate::common::name_matches(function.name, "probe")
+                    && module.bodies.contains_key(&owner))
+                .then_some((module.id, owner))
+            })
+        })
+        .expect("Rock body of the backend family")];
+    let updated = emit_incremental(&after, &mut cache, &edited).unwrap();
+    let (fresh, fresh_cache) = emit_full_of(&after, "fresh emit");
+    assert_eq!(
+        cache.lua_view().fn_value_targets,
+        fresh_cache.lua_view().fn_value_targets
+    );
+    assert_eq!(updated.lua, fresh.lua);
+}
+
+#[test]
 fn scalar_constant_edits_refresh_full_incremental_and_overlay_emission() {
     let v1 = "const BASE: float = 1.5\nconst ALIAS: float = BASE\n@nomangle fn choose() -> float { ALIAS }";
     let v2 = v1.replace("1.5", "-0.0");
