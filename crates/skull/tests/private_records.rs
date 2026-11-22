@@ -64,3 +64,46 @@ print(holder_report())
         "a nil nil true nil|b 5 3 false 5"
     );
 }
+
+// A flat enum inside an inline value keeps one slot per payload leaf; a
+// named leaf costs a string constant and a hash lookup on every trace.
+#[test]
+fn a_flat_enum_inside_an_inline_value_reads_its_leaves_by_slot() {
+    let lua = emit_module(
+        r#"
+enum Target { Nobody, Mob(int, int), Spot(int) }
+nobox value Lock { target: Target, weight: int }
+struct Brain { mode: int, lock: Lock? = null }
+fn aim(b: Brain, a: int, c: int) { b.lock = Lock { target: Target::Mob(a, c), weight: a + c } }
+fn describe(b: Brain) -> string {
+    if let lock = b.lock {
+        return match lock.target {
+            Target::Nobody => "nobody {lock.weight}",
+            Target::Mob(a, c) => "mob {a} {c} {lock.weight}",
+            Target::Spot(s) => "spot {s} {lock.weight}",
+        }
+    }
+    return "none"
+}
+@nomangle fn brain_report() -> string {
+    let b = Brain { mode: 1 }
+    let before = describe(b)
+    aim(b, 4, 5)
+    let after = describe(b)
+    b.lock = null
+    "{before}|{after}|{describe(b)}"
+}
+"#,
+    );
+    for name in ["aim", "describe"] {
+        let body = function_body(&lua, name);
+        assert!(
+            !body.contains("lock.target"),
+            "{name} names a leaf:\n{body}"
+        );
+    }
+    assert_eq!(
+        run_luajit(&format!("{lua}\nprint(brain_report())\n")),
+        "none|mob 4 5 9|none"
+    );
+}

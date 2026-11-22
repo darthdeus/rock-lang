@@ -1,6 +1,6 @@
 use bone_core::hir::{FnBackend, StructDef};
 use rustc_hash::FxHashMap;
-use skull_mir::lower::struct_field_plan;
+use skull_mir::lower::{nobox_leaf_paths, struct_field_plan};
 use ustr::Ustr;
 
 use super::{CodegenCtx, ContainerKind, Emitter, Idx, Inst, Lit, Workspace, write_lua_string};
@@ -51,6 +51,18 @@ fn record_fields(
         let plan =
             struct_field_plan(ws, FnBackend::Lua, def.name, field.name, !prefix.is_empty()).ok()?;
         if let Some((name, nullable)) = plan.embed() {
+            if let Some(leaves) = nobox_leaf_paths(ws, name) {
+                let field = key(field.name);
+                out.extend(
+                    leaves
+                        .iter()
+                        .map(|leaf| Ustr::from(&format!("{field}.{leaf}"))),
+                );
+                if nullable {
+                    out.push(field);
+                }
+                continue;
+            }
             let id = ws.nominals.struct_id(name)?;
             let child = &ws.module(id.module).structs[id.def];
             record_fields(ws, child, &format!("{}.", key(field.name)), out, visiting)?;

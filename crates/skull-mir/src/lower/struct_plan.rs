@@ -82,6 +82,17 @@ impl StructFieldPlan {
     }
 }
 
+/// The keys a table parent stores an inline `nobox` child under, relative to
+/// the field: the same leaves embed readers and writers address.
+pub fn nobox_leaf_paths(ws: &Workspace, name: Ustr) -> Option<Vec<Ustr>> {
+    if !super::shape::is_nobox_nominal(ws, name) {
+        return None;
+    }
+    Some(super::value_leaf_paths(
+        &super::shape::value_shape_of_nominal(ws, name)?,
+    ))
+}
+
 /// A native primitive projection aliases the original nested bytes. Hex paths
 /// keep dots injective; avoid the entire declared-field prefix namespace.
 pub fn cdata_leaf_alias(ws: &Workspace, owner: Ustr, path: &str) -> Ustr {
