@@ -87,11 +87,6 @@ pub @pure fn iv(x: int) -> IVec2 {
 
 pub @inline
 @pure fn iv(x: int, y: int) -> IVec2 {
-    return ivec2(x, y)
-}
-
-pub @inline
-@pure fn ivec2(x: int, y: int) -> IVec2 {
     return IVec2 { x: x, y: y }
 }
 
