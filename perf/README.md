@@ -165,8 +165,10 @@ exits already have per-snapshot counters. The executable code area starts
 at a fixed address and the VM fails if the mapping is unavailable. FFI type
 names and upvalue alias hints use name content and stack slots respectively.
 Table identity keys keep pointer equality and share a hash bucket per type.
-The VM advertises a different build ID so Stone's stock hot-counter
-offsets cannot tune its retries.
+The counter hook installs Stone's root churn guard using the measurement
+VM's native counter API. It checks that the guard stayed enabled when the
+measurement ends. The VM uses a distinct build ID to protect the stock
+hot-counter offsets.
 
 The fixed-work hook boots with the JIT off, collects the Lua heap and
 enables the JIT on frame three. For counter comparisons it keeps automatic

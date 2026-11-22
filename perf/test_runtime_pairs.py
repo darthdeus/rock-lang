@@ -2,8 +2,10 @@
 from argparse import Namespace
 import hashlib
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -83,6 +85,15 @@ class RuntimePairTests(unittest.TestCase):
                         measure(args, Path("base"), {"PERF_MEASURE_FRAMES": "600"}, "trial")
             self.assertEqual(run.call_args.kwargs["env"]["PERF_MEASURE_FRAMES"], "200")
 
+    @unittest.skipUnless(os.getenv("ROCK_TEST_DETERMINISTIC_LUAJIT"), "requires deterministic VM")
+    def test_measurement_vm_can_arm_and_confirm_root_blacklisting(self):
+        fixture = Path(__file__).with_name("test_measurement_churn.lua")
+        subprocess.run([os.environ["ROCK_TEST_DETERMINISTIC_LUAJIT"], fixture,
+                        fixture.with_name("measurement-churn.lua")],
+                       env=os.environ | {"ROCK_PERF_DETERMINISTIC": "1",
+                                         "PERF_FIXED_WORK": "0", "ROCK_PERF_CAPTURE_SITES": "0"},
+                       check=True)
+
     def test_counters_default_to_the_deterministic_vm_and_fixed_work(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -117,7 +128,8 @@ class RuntimePairTests(unittest.TestCase):
             with patch("sys.argv", args), patch.dict("os.environ", {}, clear=True):
                 with patch("runtime_pairs.measure", return_value=row) as measure:
                     main()
-            hook = "\n" + Path(__file__).with_name("measurement.lua").read_text()
+            hook = "\n" + "\n".join(Path(__file__).with_name(name).read_text()
+                                     for name in ("measurement.lua", "measurement-churn.lua"))
             self.assertEqual(measure.call_count, 12)
             for call in measure.call_args_list:
                 env = call.args[2]

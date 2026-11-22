@@ -352,7 +352,47 @@ index 7638e6fe..5949268d 100644
 +#endif
 +
  /* -- Penalties and blacklisting ------------------------------------------ */
-@@ -478,2 +495,14 @@ static void penalty_pc(jit_State *J, GCproto *pt, BCIns *pc, TraceError e)
+@@ -469,3 +486,39 @@ static void blacklist_pc(GCproto *pt, BCIns *pc)
+ }
+
++#ifdef ROCK_PERF_DETERMINISTIC
++/* Query a direct root abort: -1 invalid, 0 ineligible, 1 penalized, 2 blacklisted. */
++LUA_API int luaJIT_rock_churn(lua_State *L, uintptr_t proto, uint32_t pos, int arm)
++{
++  global_State *g = G(L);
++  jit_State *J = G2J(g);
++  GCproto *pt;
++  BCIns *pc;
++  PerfHotCount *slot;
++  BCOp op, current;
++  if (!(g->hookmask & HOOK_VMEVENT) || J->state != LJ_TRACE_ERR || !J->cur.traceno)
++    return -1;
++  op = bc_op(J->cur.startins);
++  /* A recording can start at a root and abort as a side trace. */
++  if (J->parent || J->exitno ||
++      (op != BC_LOOP && op != BC_FORL && op != BC_ITERL && op != BC_FUNCF && op != BC_ITERN))
++    return 0;
++  if (gcrefu(J->cur.startpt) != proto)
++    return -1;
++  pt = gco2pt(gcref(J->cur.startpt));
++  if (pos >= pt->sizebc || (pc = proto_bc(pt) + pos) != mref(J->cur.startpc, BCIns))
++    return -1;
++  current = bc_op(*pc);
++  if (current == (op == BC_ITERN ? BC_ITERC : op + BC_ILOOP - BC_LOOP))
++    return 2;
++  slot = &proto_hot(pt)[pos];
++  if (*pc != J->cur.startins || slot->penalty < PENALTY_MIN || slot->count != slot->penalty)
++    return -1;
++  if (arm) {
++    slot->penalty = PENALTY_MAX;
++    slot->count = 1;
++  }
++  return 1;
++}
++#endif
++
+ /* Penalize a bytecode instruction. */
+@@ -478,2 +531,14 @@ static void penalty_pc(jit_State *J, GCproto *pt, BCIns *pc, TraceError e)
  {
 +#ifdef ROCK_PERF_DETERMINISTIC
 +  PerfHotCount *slot = &proto_hot(pt)[proto_bcpos(pt, pc)];
@@ -367,18 +407,18 @@ index 7638e6fe..5949268d 100644
 +  slot->penalty = (uint16_t)val;
 +#else
    uint32_t i, val = PENALTY_MIN;
-@@ -497,3 +526,4 @@ setpenalty:
+@@ -497,3 +562,4 @@ setpenalty:
    J->penalty[i].reason = e;
 -  hotcount_set(J2GG(J), pc+1, val);
 +#endif
 +  hotcount_set(J2GG(J), pt, pc+1, val);
  }
-@@ -700,3 +730,3 @@ static int trace_abort(jit_State *J)
+@@ -700,3 +766,3 @@ static int trace_abort(jit_State *J)
        if (e == LJ_TRERR_RETRY)
 -	hotcount_set(J2GG(J), startpc+1, 1);  /* Immediate retry. */
 +	hotcount_set(J2GG(J), gco2pt(gcref(J->cur.startpt)), startpc+1, 1);  /* Immediate retry. */
        else
-@@ -905,3 +935,3 @@ void LJ_FASTCALL lj_trace_hot(jit_State *J, const BCIns *pc)
+@@ -905,3 +971,3 @@ void LJ_FASTCALL lj_trace_hot(jit_State *J, const BCIns *pc)
    /* Reset hotcount. */
 -  hotcount_set(J2GG(J), pc, J->param[JIT_P_hotloop]*HOTCOUNT_LOOP);
 +  hotcount_set(J2GG(J), curr_proto(J->L), pc, J->param[JIT_P_hotloop]*HOTCOUNT_LOOP);

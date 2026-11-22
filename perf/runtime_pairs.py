@@ -271,6 +271,8 @@ def main():
         plan["instruction_probe_sha256"] = hashlib.sha256(INSTRUCTION_PROBE.encode()).hexdigest()
     if args.fixed_work or args.capture_sites:
         hook = Path(__file__).with_name("measurement.lua").read_text()
+        if not args.timing:
+            hook += "\n" + Path(__file__).with_name("measurement-churn.lua").read_text()
         plan.update(fixed_work=args.fixed_work, capture_sites=args.capture_sites,
                     measurement_hook_sha256=hashlib.sha256(hook.encode()).hexdigest())
     if calibration and (not calibration["aa"] or calibration["plan"] != plan
