@@ -277,6 +277,14 @@ fn signature_help_cases() {
             Some(1),
         ),
         (
+            "a comma inside an array does not advance the call parameter",
+            "fn show(values: [int], color: int) {}\nfn main() {\n    show([1, 2], 3)\n}\n"
+                .to_string(),
+            Position::new(2, 13),
+            "fn show(values: [int], color: int)",
+            Some(0),
+        ),
+        (
             "param defaults render as optional",
             "fn plot(x: int, y: int = 0, label: string = \"pt\") {\n}\nfn main() {\n  plot(1)\n}\n"
                 .to_string(),

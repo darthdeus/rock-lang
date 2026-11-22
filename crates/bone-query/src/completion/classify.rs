@@ -3,7 +3,7 @@
 use bone_semantic::prelude::{InferenceResult, ModuleId, Workspace};
 
 use crate::backend::{ExpectedArg, expected_for_anchor, fn_unique_return_ty_in_scope};
-use crate::cursor_context::{CursorAst, Record};
+use crate::cursor_context::{CallArgument, CursorAst, Record};
 
 /// A leading `.` before the identifier under the cursor (a key-path `.field`).
 pub(crate) fn leading_dot(src: &str, offset: usize) -> bool {
@@ -235,11 +235,7 @@ pub(crate) enum Context<'a> {
         receiver: usize,
         path: Option<&'a [String]>,
     },
-    FieldRef {
-        callee: &'a str,
-        index: usize,
-        receiver: Option<usize>,
-    },
+    FieldRef(&'a CallArgument),
     Record(&'a Record),
     ModulePath,
     Enum(&'a str),
@@ -251,7 +247,7 @@ pub(crate) struct CompletionCx {
     pub(crate) ast: Option<crate::cursor_context::CursorAst>,
     /// The receiver's end offset and optional path for lookup when inference fails.
     member: Option<(usize, Option<Vec<String>>)>,
-    pub(crate) arg_call: Option<(String, u32, Option<usize>)>,
+    pub(crate) arg_call: Option<CallArgument>,
     record: Option<Record>,
     qualified: Option<String>,
     pub(crate) decorator: bool,
@@ -262,7 +258,6 @@ pub(crate) struct CompletionCx {
     pub(crate) expr_position: bool,
     pub(crate) after_yield: bool,
     pub(crate) param_type: Option<(String, String)>,
-    pub(crate) named_arg: Option<crate::cursor_context::NamedArgSlot>,
     pub(crate) coroutine_generic: bool,
     pub(crate) pattern_scrutinee: Option<usize>,
     pub(crate) for_in: bool,
@@ -277,7 +272,7 @@ pub(crate) fn classify(src: &str, offset: usize) -> CompletionCx {
     let arg_call = if has_field_value {
         None
     } else {
-        cx.and_then(|c| c.call_arg())
+        cx.and_then(CursorAst::call_argument)
     };
     let expr_position = !cx.is_some_and(|c| c.is_type_position());
     CompletionCx {
@@ -293,11 +288,6 @@ pub(crate) fn classify(src: &str, offset: usize) -> CompletionCx {
             None
         } else {
             cx.and_then(|c| c.param_type())
-        },
-        named_arg: if has_field_value {
-            None
-        } else {
-            cx.and_then(|c| c.named_arg_slot())
         },
         coroutine_generic: cx.is_some_and(|c| c.coroutine_first_generic_arg()),
         pattern_scrutinee: cx.and_then(CursorAst::match_pattern_scrutinee),
@@ -317,13 +307,7 @@ impl CompletionCx {
                     receiver: *receiver,
                     path: path.as_deref(),
                 }),
-            self.arg_call
-                .as_ref()
-                .map(|(callee, index, receiver)| Context::FieldRef {
-                    callee,
-                    index: *index as usize,
-                    receiver: *receiver,
-                }),
+            self.arg_call.as_ref().map(Context::FieldRef),
             self.record
                 .as_ref()
                 .filter(|r| matches!(r, Record::Variant { .. }))
@@ -347,20 +331,16 @@ impl CompletionCx {
         inf: &'a InferenceResult,
         offset: usize,
     ) -> Option<ExpectedArg<'a>> {
-        if let Some((callee, idx, _recv)) = self.arg_call.as_ref() {
-            let recv_ty = self.ast.as_ref().and_then(|cx| {
-                cx.call_receiver().and_then(|a| match a {
-                    crate::cursor_context::ReceiverAnchor::ChainCall(name) => {
-                        let frag = crate::modules_scope::fragment(ws, ws.module(mid).file)?;
-                        fn_unique_return_ty_in_scope(ws, &name, frag)
-                    }
-                    crate::cursor_context::ReceiverAnchor::End(e) => e
-                        .checked_sub(1)
-                        .and_then(|last| bone_semantic::query::type_at(ws, mid, inf, last))
-                        .map(|ta| ta.ty),
-                })
+        if let Some(call) = &self.arg_call {
+            let recv_ty = call.receiver.as_ref().and_then(|receiver| {
+                if let Some(name) = receiver.return_from {
+                    let frag = crate::modules_scope::fragment(ws, ws.module(mid).file)?;
+                    return fn_unique_return_ty_in_scope(ws, name.as_str(), frag);
+                }
+                let end = receiver.end.checked_sub(1)?;
+                bone_semantic::query::type_at(ws, mid, inf, end).map(|at| at.ty)
             });
-            return ExpectedArg::for_call(ws, mid, inf, offset, callee, *idx as usize, recv_ty);
+            return ExpectedArg::for_call(ws, mid, inf, offset, &call.callee, call.index, recv_ty);
         }
         if let Some((sname, fname, is_lambda)) = self.field_value.as_ref() {
             // Inside a lambda assigned to a function-typed field the body returns the

@@ -12,8 +12,7 @@ use bone_semantic::prelude::{ModuleId, TyId, Workspace, is_field_ref_former, is_
 use ustr::Ustr;
 
 use crate::backend::{
-    ExpectedArg, analyze_variant, bind_generic, expected_for_anchor, preceding_arg_starts,
-    user_module_for_path,
+    ExpectedArg, analyze_variant, bind_generic, expected_for_anchor, user_module_for_path,
 };
 use crate::completion::match_policy::admit;
 use crate::query::clean_match;
@@ -132,21 +131,14 @@ fn fieldref_slot_owner(
 fn sibling_owner_bind(
     ws: &Workspace,
     path: &str,
-    src: &str,
-    offset: usize,
-    arg_idx: usize,
+    call: &crate::cursor_context::CallArgument,
     recv_offset: usize,
     f: &bone_semantic::hir::Function,
     gname: Ustr,
 ) -> Option<Ustr> {
     let mid = user_module_for_path(ws, path)?;
     let inf = ws.inference(mid)?;
-    let starts = preceding_arg_starts(src, offset);
-    for (j, &aoff) in starts
-        .iter()
-        .enumerate()
-        .take(arg_idx.saturating_sub(recv_offset))
-    {
+    for (j, &aoff) in call.preceding.iter().enumerate() {
         let Some(pty) = f.param_decls.get(j + recv_offset).map(|p| p.ty) else {
             continue;
         };
@@ -165,31 +157,30 @@ fn sibling_owner_bind(
 pub(crate) fn field_ref_candidates(
     ws: &Workspace,
     path: &str,
-    src: &str,
-    offset: usize,
-    callee: &str,
-    arg_idx: usize,
+    call: &crate::cursor_context::CallArgument,
     prefix: &str,
     lead_dot: bool,
-    recv_end: Option<usize>,
 ) -> Option<Vec<Cand>> {
-    let name = Ustr::from(callee);
+    let name = Ustr::from(call.callee.as_str());
     let frag = crate::modules_scope::fragment(ws, Ustr::from(path))?;
-    let (recv_struct, recv_elem) = recv_end
-        .and_then(|e| {
+    let (recv_struct, recv_elem) = call
+        .receiver
+        .as_ref()
+        .and_then(|recv| {
             let mid = user_module_for_path(ws, path)?;
-            let m = crate::query::members_of_receiver_expr(ws, mid, e)?;
+            let m = crate::query::members_of_receiver_expr(ws, mid, recv.end)?;
             Some((Some(m.owner), m.sole_arg))
         })
         .unwrap_or((None, None));
-    let recv_offset = usize::from(recv_end.is_some());
+    let recv_offset = usize::from(call.receiver.is_some());
 
     let (fields, v) =
         crate::modules_scope::admitted_overloads(ws, frag, name).find_map(|(_, _, f)| {
             let (recv_var, recv_owner) = receiver_owner_binding(ws, f, recv_struct, recv_elem);
-            let (owner, v) = fieldref_slot_owner(ws, f, arg_idx, recv_var, recv_owner, |gname| {
-                sibling_owner_bind(ws, path, src, offset, arg_idx, recv_offset, f, gname)
-            })?;
+            let (owner, v) =
+                fieldref_slot_owner(ws, f, call.index, recv_var, recv_owner, |gname| {
+                    sibling_owner_bind(ws, path, call, recv_offset, f, gname)
+                })?;
             let fields = fields_of_type(ws, owner, v);
             (!fields.is_empty()).then_some((fields, v))
         })?;

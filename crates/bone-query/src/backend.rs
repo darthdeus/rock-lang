@@ -1731,16 +1731,7 @@ impl BoneWorkspace {
         let inf = ws.inference(mid);
         let (sigs, call_span) =
             crate::query::signature_help(ws, mid, inf, offset, Some(&proj.texts))?;
-        let call_start = call_span.offset_range().0;
-        let paren_start = active_call_paren_start(src, call_start, offset);
-        // Count from the call's own `(`: a receiver that is itself a call
-        // (`get_screen().rect_outline(|)`) has an earlier paren pair.
-        let mut active = paren_start.map_or(0, |p| active_param(src, p, offset));
-        // A dot-call's receiver fills param 0, but the written list holds only the
-        // trailing args.
-        if paren_start.is_some_and(|p| call_is_ufcs_dot_syntax(src, call_start, p)) {
-            active += 1;
-        }
+        let active = crate::cursor_context::active_parameter(src, call_span, offset);
         Some(SignatureHelp {
             signatures: sigs
                 .into_iter()
@@ -2295,65 +2286,6 @@ fn line_indent_at(src: &str, pos: usize) -> String {
         .collect()
 }
 
-fn active_call_paren_start(src: &str, call_start: usize, offset: usize) -> Option<usize> {
-    let b = src.as_bytes();
-    let end = offset.min(b.len());
-    let start = call_start.min(end);
-    let mut depth = 0i32;
-    let mut active: Option<usize> = None;
-    let mut in_str = false;
-    for (i, &c) in b[start..end].iter().enumerate() {
-        match c {
-            b'"' => in_str = !in_str,
-            b'(' if !in_str => {
-                if depth == 0 {
-                    active = Some(start + i);
-                }
-                depth += 1;
-            }
-            b')' if !in_str => {
-                depth -= 1;
-                if depth == 0 {
-                    active = None;
-                }
-            }
-            _ => {}
-        }
-    }
-    active
-}
-
-fn active_param(src: &str, paren_start: usize, offset: usize) -> u32 {
-    let end = offset.min(src.len());
-    let start = paren_start.min(end);
-    let mut depth = 0i32;
-    let mut arg = 0u32;
-    let mut in_str = false;
-    for &b in &src.as_bytes()[start..end] {
-        match b {
-            b'"' => in_str = !in_str,
-            b'(' if !in_str => depth += 1,
-            b')' if !in_str => depth -= 1,
-            b',' if !in_str && depth == 1 => arg += 1,
-            _ => {}
-        }
-    }
-    arg
-}
-
-fn call_is_ufcs_dot_syntax(src: &str, call_start: usize, paren_start: usize) -> bool {
-    let b = src.as_bytes();
-    let start = call_start.min(b.len());
-    let mut j = paren_start.min(b.len()).max(start);
-    while j > start && (b[j - 1].is_ascii_alphanumeric() || b[j - 1] == b'_') {
-        j -= 1;
-    }
-    while j > start && (b[j - 1] == b' ' || b[j - 1] == b'\t') {
-        j -= 1;
-    }
-    j > start && b[j - 1] == b'.'
-}
-
 pub(crate) fn callee_slot_is_field_of_in_scope(
     ws: &Workspace,
     frag: &bone_core::modules::FragmentScope,
@@ -2633,55 +2565,6 @@ pub(crate) fn fn_unique_return_ty_in_scope(
         }
     }
     ret
-}
-
-pub(crate) fn preceding_arg_starts(src: &str, offset: usize) -> Vec<usize> {
-    let b = src.as_bytes();
-    let end = offset.min(b.len());
-    let mut i = end;
-    let (mut p, mut br, mut bc) = (0i32, 0i32, 0i32);
-    while i > 0 {
-        match b[i - 1] {
-            b')' => p += 1,
-            b'(' if p > 0 => p -= 1,
-            b'(' => break,
-            b']' => br += 1,
-            b'[' if br > 0 => br -= 1,
-            b'[' => return Vec::new(),
-            b'}' => bc += 1,
-            b'{' if bc > 0 => bc -= 1,
-            b'{' => return Vec::new(),
-            b';' if p == 0 && br == 0 && bc == 0 => return Vec::new(),
-            _ => {}
-        }
-        i -= 1;
-    }
-    if i == 0 {
-        return Vec::new();
-    }
-    let mut starts = Vec::new();
-    let (mut p, mut br, mut bc) = (0i32, 0i32, 0i32);
-    let mut at_start = true;
-    let mut j = i;
-    while j < end {
-        let c = b[j];
-        if at_start && !c.is_ascii_whitespace() {
-            starts.push(j);
-            at_start = false;
-        }
-        match c {
-            b'(' => p += 1,
-            b')' if p > 0 => p -= 1,
-            b'[' => br += 1,
-            b']' if br > 0 => br -= 1,
-            b'{' => bc += 1,
-            b'}' if bc > 0 => bc -= 1,
-            b',' if p == 0 && br == 0 && bc == 0 => at_start = true,
-            _ => {}
-        }
-        j += 1;
-    }
-    starts
 }
 
 pub(crate) fn bind_generic(

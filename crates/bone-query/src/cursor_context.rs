@@ -1,9 +1,53 @@
-use rock_tokenizer::TokenKind;
+use rock_tokenizer::{TokenKind, Tokenizer};
 use skull_parser::Idx;
 use skull_parser::ast::{
     BlockData, CallSyntax, ExprData, ExprKind, IfLetClause, ItemKind, Path, Pattern, StatementKind,
 };
 use ustr::Ustr;
+
+pub(crate) fn active_parameter(src: &str, call: rock_core::Span, offset: usize) -> u32 {
+    use TokenKind::*;
+
+    let (start, end) = call.offset_range();
+    let Some(text) = src.get(start..end) else {
+        return 0;
+    };
+    let mut tokenizer = Tokenizer::new(text, call.file);
+    let mut depth = 0usize;
+    let mut param = None;
+    let mut previous = None;
+    let mut before_previous = None;
+    while let Ok(Some(token)) = tokenizer.next_token() {
+        if start + token.span.offset_range().0 >= offset {
+            break;
+        }
+        match token.kind {
+            Newline | Comment(_) => continue,
+            OpenParen | OpenSquare | OpenCurly => {
+                if depth == 0 && token.kind == OpenParen {
+                    param = Some(u32::from(matches!(
+                        before_previous,
+                        Some(Dot | QuestionDot)
+                    )));
+                }
+                depth += 1;
+            }
+            CloseParen | CloseSquare | CloseCurly => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    param = None;
+                }
+            }
+            Comma if depth == 1 => {
+                param = param.map(|param| param + 1);
+            }
+            _ => {}
+        }
+        before_previous = previous;
+        previous = Some(token.kind);
+    }
+    param.unwrap_or(0)
+}
 
 pub(crate) struct CursorAst {
     ast: skull_parser::Ast,
@@ -46,21 +90,23 @@ fn matching_brace(b: &[u8], open: usize) -> Option<usize> {
     None
 }
 
-/// Locate the UFCS receiver even if its trailing arguments fail to parse.
-pub(crate) enum ReceiverAnchor {
-    /// `type_at` on its last byte resolves it, surviving a broken trailing arg.
-    End(usize),
-    /// The receiver is itself a call (`a.b().m(|`): its type is this
-    /// callee's unique return type, resolved structurally (no inference).
-    ChainCall(String),
+pub(crate) struct CallArgument {
+    pub callee: String,
+    pub index: usize,
+    pub receiver: Option<CallReceiver>,
+    pub preceding: Vec<usize>,
+    pub named: Option<NamedArgSlot>,
 }
 
+pub(crate) struct CallReceiver {
+    pub end: usize,
+    pub return_from: Option<Ustr>,
+}
+
+#[derive(Default)]
 pub(crate) struct NamedArgSlot {
-    pub callee: String,
     pub positional: usize,
-    pub named: Vec<String>,
-    /// Probe offsets inside each `..spread` operand before the cursor; their
-    /// struct fields count as already supplied.
+    pub named: Vec<Ustr>,
     pub spread_probes: Vec<usize>,
 }
 
@@ -529,22 +575,47 @@ impl CursorAst {
         }
     }
 
-    pub(crate) fn call_arg(&self) -> Option<(String, u32, Option<usize>)> {
-        let (call, _cursor_arg, pos) = self.enclosing_arg_call()?;
-        let ExprKind::FunctionCall { func, .. } = &self.expr(call).kind else {
+    pub(crate) fn call_argument(&self) -> Option<CallArgument> {
+        let (call, current, position) = self.enclosing_arg_call()?;
+        let ExprKind::FunctionCall { func, args, .. } = &self.expr(call).kind else {
             return None;
         };
-        match &self.expr(*func).kind {
-            ExprKind::Ident(id) => Some((id.name.to_string(), pos as u32, None)),
-            ExprKind::Path(path) => {
-                Some((path.segments.last()?.name.to_string(), pos as u32, None))
-            }
+        let (callee, receiver) = match &self.expr(*func).kind {
+            ExprKind::Ident(id) => (id.name, None),
+            ExprKind::Path(path) => (path.segments.last()?.name, None),
             ExprKind::FieldAccess(recv, method) | ExprKind::SafeNavigation(recv, method) => {
-                let recv_end = self.expr(*recv).span.offset_range().1;
-                Some((method.name.to_string(), pos as u32 + 1, Some(recv_end)))
+                (method.name, Some(self.call_receiver(*recv)))
             }
-            _ => None,
-        }
+            _ => return None,
+        };
+        let preceding = args[..position]
+            .iter()
+            .map(|arg| self.expr(arg.value).span.offset_range().0)
+            .collect();
+        let named = receiver.is_none().then(|| {
+            let mut named = NamedArgSlot::default();
+            for arg in args.iter() {
+                let (start, end) = self.expr(arg.value).span.offset_range();
+                if current == Some(arg.value) || (current.is_none() && end > self.probe) {
+                    continue;
+                }
+                if arg.is_spread {
+                    named.spread_probes.push(end.saturating_sub(1).max(start));
+                } else if let Some(label) = &arg.name {
+                    named.named.push(label.name);
+                } else {
+                    named.positional += 1;
+                }
+            }
+            named
+        });
+        Some(CallArgument {
+            callee: callee.to_string(),
+            index: position + usize::from(receiver.is_some()),
+            receiver,
+            preceding,
+            named,
+        })
     }
 
     fn enclosing_arg_call(&self) -> Option<(Idx<ExprData>, Option<Idx<ExprData>>, usize)> {
@@ -590,46 +661,6 @@ impl CursorAst {
             }
         }
         None
-    }
-
-    pub(crate) fn named_arg_slot(&self) -> Option<NamedArgSlot> {
-        let (call, cursor_arg, _pos) = self.enclosing_arg_call()?;
-        let ExprKind::FunctionCall { func, args, .. } = &self.expr(call).kind else {
-            return None;
-        };
-        let callee = match &self.expr(*func).kind {
-            ExprKind::Ident(id) => id.name.to_string(),
-            ExprKind::Path(path) => path.segments.last()?.name.to_string(),
-            _ => return None,
-        };
-        let mut positional = 0usize;
-        let mut named: Vec<String> = Vec::new();
-        let mut spread_probes: Vec<usize> = Vec::new();
-        for a in args.iter() {
-            if cursor_arg == Some(a.value) {
-                continue;
-            }
-            // Without a cursor node only args ending before the probe are supplied;
-            // with one, every other arg is present.
-            if cursor_arg.is_none() && self.expr(a.value).span.offset_range().1 > self.probe {
-                continue;
-            }
-            if a.is_spread {
-                let (s, e) = self.expr(a.value).span.offset_range();
-                spread_probes.push(e.saturating_sub(1).max(s));
-                continue;
-            }
-            match &a.name {
-                Some(n) => named.push(n.name.to_string()),
-                None => positional += 1,
-            }
-        }
-        Some(NamedArgSlot {
-            callee,
-            positional,
-            named,
-            spread_probes,
-        })
     }
 
     /// Positive evidence only: no containing type node means expression.
@@ -787,37 +818,23 @@ impl CursorAst {
         Some(segs)
     }
 
-    /// Matches `call_arg`'s Some-with-receiver cases exactly.
-    pub(crate) fn call_receiver(&self) -> Option<ReceiverAnchor> {
-        self.call_arg()?.2?;
-        let chain = &self.chain;
-        for &node in chain.iter() {
-            let ExprKind::FunctionCall { func, syntax, .. } = &self.expr(node).kind else {
-                continue;
-            };
-            if !is_paren_call(syntax) {
-                continue;
+    fn call_receiver(&self, receiver: Idx<ExprData>) -> CallReceiver {
+        let expr = self.expr(receiver);
+        let return_from = match &expr.kind {
+            ExprKind::FunctionCall { func, syntax, .. } if is_paren_call(syntax) => {
+                match &self.expr(*func).kind {
+                    ExprKind::Ident(id)
+                    | ExprKind::FieldAccess(_, id)
+                    | ExprKind::SafeNavigation(_, id) => Some(id.name),
+                    _ => None,
+                }
             }
-            let (ExprKind::FieldAccess(recv, _) | ExprKind::SafeNavigation(recv, _)) =
-                &self.expr(*func).kind
-            else {
-                continue;
-            };
-            let r = self.expr(*recv);
-            return Some(match &r.kind {
-                ExprKind::FunctionCall {
-                    func: rf, syntax, ..
-                } if is_paren_call(syntax) => match &self.expr(*rf).kind {
-                    ExprKind::Ident(id) => ReceiverAnchor::ChainCall(id.name.to_string()),
-                    ExprKind::FieldAccess(_, m) | ExprKind::SafeNavigation(_, m) => {
-                        ReceiverAnchor::ChainCall(m.name.to_string())
-                    }
-                    _ => ReceiverAnchor::End(r.span.offset_range().1),
-                },
-                _ => ReceiverAnchor::End(r.span.offset_range().1),
-            });
+            _ => None,
+        };
+        CallReceiver {
+            end: expr.span.offset_range().1,
+            return_from,
         }
-        None
     }
 }
 
@@ -843,7 +860,7 @@ mod gaps {
         let (_, _, cx) = cx(
             "fn apply(n: int, f: (int) -> int) -> int { return f(n) }\nfn t() {\n  apply(3, (x$0: int) => x * x)\n}\n",
         );
-        assert_eq!(cx.call_arg(), None);
+        assert!(cx.call_argument().is_none());
     }
 
     #[test]

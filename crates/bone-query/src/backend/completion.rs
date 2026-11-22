@@ -181,26 +181,20 @@ fn contextual_completions(
                 open_paren_follows(rq.src, rq.offset),
                 false,
             ),
-            Context::FieldRef {
-                callee,
-                index,
-                receiver,
-            } => {
+            Context::FieldRef(call) => {
                 let lead_dot = leading_dot(rq.src, rq.offset);
                 let ws = session.workspace();
                 let Some(frag) = crate::modules_scope::fragment(ws, file) else {
                     continue;
                 };
                 if !lead_dot
-                    && callee_slot_is_field_of_in_scope(ws, frag, callee, index) == Some(false)
+                    && callee_slot_is_field_of_in_scope(ws, frag, &call.callee, call.index)
+                        == Some(false)
                 {
                     continue;
                 }
                 let candidates = rq.speculate(session, |ws| {
-                    field_ref_candidates(
-                        ws, rq.path, rq.src, rq.offset, callee, index, &rq.prefix, lead_dot,
-                        receiver,
-                    )
+                    field_ref_candidates(ws, rq.path, call, &rq.prefix, lead_dot)
                 });
                 (candidates, false, false)
             }
@@ -275,7 +269,7 @@ fn member_candidates_at(
     let arg_slot = cx
         .arg_call
         .as_ref()
-        .map(|(callee, idx, _)| (callee.as_str(), *idx as usize));
+        .map(|call| (call.callee.as_str(), call.index));
     let mut resolved = path.is_some();
     for named in [false, true] {
         if named && path.is_none() {
@@ -824,7 +818,10 @@ fn push_entity_synth(g: &GeneralCx, rq: &Request, cx: &CompletionCx, sink: &mut 
 }
 
 fn push_named_args(g: &GeneralCx, rq: &Request, cx: &CompletionCx, sink: &mut Sink) {
-    let Some(nargs) = cx.named_arg.as_ref() else {
+    let Some(call) = &cx.arg_call else {
+        return;
+    };
+    let Some(nargs) = &call.named else {
         return;
     };
     let spread_covered: std::collections::HashSet<Ustr> = nargs
@@ -833,14 +830,11 @@ fn push_named_args(g: &GeneralCx, rq: &Request, cx: &CompletionCx, sink: &mut Si
         .flat_map(|&p| crate::query::struct_field_names_at(g.ws, g.mid, g.inf, p))
         .collect();
     let q = rq.prefix.as_bytes();
-    for (i, (pname, pty)) in callee_param_names_in_scope(g.ws, &nargs.callee, g.frag)
+    for (i, (pname, pty)) in callee_param_names_in_scope(g.ws, &call.callee, g.frag)
         .into_iter()
         .enumerate()
     {
-        if i < nargs.positional
-            || nargs.named.iter().any(|n| n.as_str() == pname.as_str())
-            || spread_covered.contains(&pname)
-        {
+        if i < nargs.positional || nargs.named.contains(&pname) || spread_covered.contains(&pname) {
             continue;
         }
         if !q.is_empty() && !admit(pname.as_str().as_bytes(), q) {
