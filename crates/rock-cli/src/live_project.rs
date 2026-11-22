@@ -22,7 +22,6 @@ pub enum LiveUpdate {
 
 pub(crate) struct LiveProjectSnapshot {
     comptime_inputs: bone_semantic::inference::ComptimeInputs,
-    aliases: bone_incremental::session::NsAliases,
     sources: SourceFiles,
     previous_contents: Vec<(usize, String)>,
 }
@@ -54,14 +53,7 @@ pub(crate) fn project_sources(dir: &str, include_tests: bool) -> Result<SourceFi
 
 impl LiveProject {
     pub fn init(dir: &str, include_tests: bool) -> Result<Self> {
-        Self::init_from_sources(dir, include_tests, project_sources(dir, include_tests)?)
-    }
-
-    pub(crate) fn init_from_sources(
-        dir: &str,
-        include_tests: bool,
-        sources: SourceFiles,
-    ) -> Result<Self> {
+        let sources = project_sources(dir, include_tests)?;
         let mut project = Self {
             session: new_session(dir, &sources)?,
             dir: dir.to_string(),
@@ -83,7 +75,6 @@ impl LiveProject {
     fn snapshot(&self, edits: &[Edit]) -> LiveProjectSnapshot {
         LiveProjectSnapshot {
             comptime_inputs: self.session.ws.comptime_inputs.clone(),
-            aliases: self.session.aliases.clone(),
             sources: self.sources.clone(),
             previous_contents: edits
                 .iter()
@@ -107,7 +98,10 @@ impl LiveProject {
         self.session = bone_incremental::session::Session::new(
             self.session.warm.clone(),
             crate::bone_backend::session_files(&self.sources),
-            &snapshot.aliases,
+            self.sources
+                .ns_aliases
+                .as_ref()
+                .unwrap_or(&Default::default()),
         )
         .map_err(|e| {
             anyhow::anyhow!(
@@ -378,11 +372,7 @@ fn new_session(dir: &str, sources: &SourceFiles) -> Result<bone_incremental::ses
         !sources.files.is_empty(),
         "bone: project has no .rock files"
     );
-    crate::bone_backend::bone_session_for_emission(
-        crate::bone_backend::session_files(sources),
-        Path::new(dir),
-    )
-    .map_err(|error| {
+    crate::bone_backend::bone_session_for_emission(sources, Path::new(dir)).map_err(|error| {
         anyhow::anyhow!(
             "{}",
             crate::skull_backend::render_project_err(sources, &error)
@@ -393,6 +383,24 @@ fn new_session(dir: &str, sources: &SourceFiles) -> Result<bone_incremental::ses
 #[cfg(test)]
 mod tests {
     use super::{LiveProject, LiveUpdate};
+
+    #[test]
+    fn a_nested_manifest_does_not_replace_the_selecting_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("stick.toml"),
+            "[package]\nname = \"app\"\ntype = \"bin\"\n",
+        )
+        .unwrap();
+        let nested = root.join("src");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(nested.join("stick.toml"), "invalid manifest\n").unwrap();
+        std::fs::write(nested.join("main.rock"), "fn main() {}\n").unwrap();
+
+        LiveProject::init(root.to_str().unwrap(), false)
+            .expect("the manifest that selected the sources supplies their package facts");
+    }
 
     #[test]
     fn malformed_manifest_keeps_the_last_good_session_and_allows_recovery() {

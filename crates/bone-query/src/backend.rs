@@ -576,17 +576,22 @@ impl BoneWorkspace {
 
     fn batch_load_for_file(&mut self, file_path: &str) {
         let root = Self::root_for(file_path);
-        let inputs = Self::project_sources(file_path)
-            .map_err(|cause| format!("Cannot load project sources for `{file_path}`: {cause}"))
-            .and_then(|files| {
-                let graph = rock_host::program_inputs::package_graph(&root)
-                    .map_err(|error| error.message)?;
+        use rock_host::compilation_units::{load_file, load_project};
+
+        let sources = if root.join("stick.toml").exists() {
+            load_project(&root)
+        } else {
+            load_file(Path::new(file_path))
+        };
+        let inputs = sources
+            .map_err(|cause| format!("Cannot load project sources for `{file_path}`: source loading failed: {cause:#}"))
+            .and_then(|project| {
                 let warm = self.stdlib().clone().map_err(|error| error.message)?;
                 let policy = bone_lints::ActionLayerPolicy::load(&root)
                     .map_err(|error| error.to_string())?;
-                Ok((files, graph, warm, policy))
+                Ok((project, warm, policy))
             });
-        let (files, graph, warm, policy) = match inputs {
+        let (project, warm, policy) = match inputs {
             Ok(inputs) => inputs,
             Err(message) => {
                 log::error!("bone LSP: {message}");
@@ -597,17 +602,27 @@ impl BoneWorkspace {
         };
         self.source_load_errors.remove(&root);
         self.loaded_roots.insert(root.clone());
+        let files: Vec<_> = project
+            .sources
+            .files
+            .iter()
+            .map(|source| {
+                let mut file = SessionFile::from_source(&source.borrow());
+                file.path = canonicalize_lenient(&file.path);
+                file
+            })
+            .collect();
         let file_texts: Vec<(String, String)> = files
             .iter()
             .map(|f| (f.path.clone(), f.text.clone()))
             .collect();
-        let aliases = rock_host::program_inputs::ns_aliases(graph.as_ref());
+        let aliases = project.sources.ns_aliases.unwrap_or_default();
         match Session::new(warm, files, &aliases) {
             Ok(session) => {
                 let mut project = BoneProject::new(
                     &root,
                     session,
-                    graph,
+                    project.graph,
                     self.lint_options
                         .clone()
                         .with_action_policy(policy.as_ref()),
@@ -645,22 +660,6 @@ impl BoneWorkspace {
                 }
             }
         }
-    }
-
-    fn project_sources(file_path: &str) -> Result<Vec<SessionFile>, String> {
-        let sources = match Self::stick_root(file_path) {
-            Some(root) => rock_host::compilation_units::load_sources_for_project(&root),
-            None => rock_host::compilation_units::load_sources_for_file(file_path),
-        }
-        .map_err(|e| format!("source loading failed: {e:#}"))?;
-        let mut out = Vec::new();
-        for f in &sources.files {
-            let f = f.borrow();
-            let mut file = SessionFile::from_source(&f);
-            file.path = canonicalize_lenient(&file.path);
-            out.push(file);
-        }
-        Ok(out)
     }
 
     fn source_load_diagnostic(&self, path: &str) -> Option<Diagnostic> {

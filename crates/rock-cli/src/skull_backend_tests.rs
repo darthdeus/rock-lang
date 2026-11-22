@@ -150,30 +150,27 @@ impl ProjectFixture {
     }
 }
 
-fn session_file(path: &str, text: &str) -> bone_incremental::session::SessionFile {
-    bone_incremental::session::SessionFile {
-        path: path.to_string(),
-        text: text.to_string(),
-        package: Some(skull_parser::PackageTag {
-            id: 1,
-            self_name: "@/<backend-test>".to_string(),
-            identity_storage: skull_parser::IdentityStorage::Exempt,
-            root: String::new(),
-        }),
-        global_policy: skull_parser::GlobalPolicy::Any,
-    }
-}
-
-fn files(src: &str) -> Vec<bone_incremental::session::SessionFile> {
-    vec![session_file("main.rock", src)]
+fn session(src: &str) -> bone_incremental::session::Session {
+    let mut source = rock_core::source_file_from_path_and_contents(
+        "main.rock".to_string(),
+        "main.rock".to_string(),
+        src.to_string(),
+    );
+    source.package = Some(skull_parser::PackageTag {
+        id: 1,
+        self_name: "@/<backend-test>".to_string(),
+        identity_storage: skull_parser::IdentityStorage::Exempt,
+        root: String::new(),
+    });
+    crate::bone_backend::bone_session(&rock_core::SourceFiles::from_single_file(source))
+        .expect("session")
 }
 
 #[cfg(test)]
 mod overlay_runtime_tests {
 
-    use super::files;
+    use super::session;
     use super::{ExecOutcome, exec_lua, normalize_stdout};
-    use crate::bone_backend::bone_session;
 
     use super::overlay_test_support::{SYS_STUB, run_parts, stub_for};
 
@@ -195,7 +192,7 @@ mod overlay_runtime_tests {
 
     impl Live {
         fn boot(v0: &str) -> Self {
-            let session = bone_session(files(v0)).expect("session v0");
+            let session = session(v0);
             let mid = skull::user_module_id(session.workspace()).unwrap();
             let (full, cache) =
                 skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
@@ -564,7 +561,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
     }
 
     fn assert_co_fn_rejected(src: &str, needle: &str) {
-        let session = bone_session(files(src)).expect("session");
+        let session = session(src);
         let mid = skull::user_module_id(session.workspace()).unwrap();
         match skull::mir_emit::emit_full(session.workspace(), mid) {
             Err(e) => assert!(

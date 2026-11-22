@@ -338,8 +338,7 @@ pub(crate) fn lsp_survey(
     // Discover the whole compilation unit (project + stick.toml deps) and warm a
     // Session (for stats + tier ground-truth) + a BoneWorkspace (for LSP timing).
     let sources = rock_host::compilation_units::load_sources_for_project(dir)?;
-    let files = crate::bone_backend::session_files(&sources);
-    let mut session = crate::bone_backend::bone_session(files)
+    let mut session = crate::bone_backend::bone_session(&sources)
         .map_err(|e| anyhow::anyhow!("bone session warm failed: {}", e.message))?;
 
     let (mut mods, mut fns) = collect_stats(&session, &proj_marker)?;

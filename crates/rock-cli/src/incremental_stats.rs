@@ -131,7 +131,7 @@ pub(crate) fn incremental_stats(
 
     // Use the live compiler's source selection so every ranked candidate is editable.
     let sources = crate::live_project::project_sources(&dir_str, false)?;
-    let session = crate::bone_backend::bone_session(crate::bone_backend::session_files(&sources))
+    let session = crate::bone_backend::bone_session(&sources)
         .map_err(|e| anyhow::anyhow!("bone session warm failed: {}", e.message))?;
     let (_mods, fns) = collect_stats(&session, &proj_marker)?;
     drop(session);

@@ -110,7 +110,7 @@ pub(crate) fn check_test_modules(
     mut modules: skull_parser::stdlib::ModuleSet,
 ) -> Result<Workspace, Vec<CompilerError>> {
     let (ws, errors) = skull::pipeline::check_test_modules(&mut modules, |modules| {
-        crate::bone_backend::aliases_for_modules(modules.iter())
+        crate::bone_backend::aliases_for_modules(modules.iter(), None)
     })?;
     if errors.is_empty() {
         Ok(ws)

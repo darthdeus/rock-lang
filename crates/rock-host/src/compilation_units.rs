@@ -7,6 +7,11 @@ use crate::source_files::SourceFilesExt;
 use crate::stick::StickConfig;
 use crate::stick::graph::{PackageGraph, PackageNode};
 
+pub struct ProjectSources {
+    pub sources: SourceFiles,
+    pub graph: Option<PackageGraph>,
+}
+
 pub fn load_sources(path: &Path) -> Result<SourceFiles> {
     if path.is_dir() {
         load_sources_for_project(path)
@@ -16,27 +21,34 @@ pub fn load_sources(path: &Path) -> Result<SourceFiles> {
 }
 
 pub fn load_sources_for_file(file_path: impl AsRef<Path>) -> Result<SourceFiles> {
-    let path = file_path.as_ref();
+    Ok(load_file(file_path.as_ref())?.sources)
+}
+
+pub fn load_file(path: &Path) -> Result<ProjectSources> {
     match StickConfig::find_from_dir(path.parent().unwrap_or(path))? {
         Some((manifest_path, config)) => {
             let manifest_dir =
                 fs_err::canonicalize(manifest_path.parent().unwrap_or(&manifest_path))?;
             load_package_sources(&manifest_dir, &manifest_dir, &config)
         }
-        None => SourceFiles::from_single_path(path),
+        None => load_standalone_file(path),
     }
 }
 
 /// The root package loads only the files under `project_dir`, which may be a
 /// subdirectory of its manifest root; dependencies always load whole.
 pub fn load_sources_for_project(project_dir: &Path) -> Result<SourceFiles> {
+    Ok(load_project(project_dir)?.sources)
+}
+
+pub fn load_project(project_dir: &Path) -> Result<ProjectSources> {
     if let Some((manifest_path, config)) = StickConfig::find_from_dir(project_dir)? {
         let manifest_dir = manifest_path.parent().unwrap_or(&manifest_path);
         return load_package_sources(manifest_dir, project_dir, &config);
     }
     let rock_files = crate::project::find_rock_files_at_path(project_dir)?;
     match rock_files.as_slice() {
-        [file] => SourceFiles::from_single_path(file),
+        [file] => load_standalone_file(Path::new(file)),
         [] => Err(anyhow::anyhow!(
             "No .rock files found in directory: {}",
             project_dir.display()
@@ -48,13 +60,20 @@ pub fn load_sources_for_project(project_dir: &Path) -> Result<SourceFiles> {
     }
 }
 
+fn load_standalone_file(file: &Path) -> Result<ProjectSources> {
+    Ok(ProjectSources {
+        sources: SourceFiles::from_single_path(file)?,
+        graph: None,
+    })
+}
+
 /// Dependencies load before the root package because global initializers are
 /// module-load effects: a library must be ready before its consumer's.
 fn load_package_sources(
     manifest_dir: &Path,
     root_dir: &Path,
     config: &StickConfig,
-) -> Result<SourceFiles> {
+) -> Result<ProjectSources> {
     let graph = PackageGraph::build_with_channel(
         manifest_dir,
         config,
@@ -86,7 +105,7 @@ fn load_package_sources(
             files.push(file);
         }
     }
-    Ok(SourceFiles {
+    let sources = SourceFiles {
         files,
         package_roots: graph
             .packages()
@@ -94,6 +113,10 @@ fn load_package_sources(
             .map(|node| (node.id.0, node.root.clone()))
             .collect(),
         ns_aliases: Some(graph.ns_aliases()),
+    };
+    Ok(ProjectSources {
+        sources,
+        graph: Some(graph),
     })
 }
 

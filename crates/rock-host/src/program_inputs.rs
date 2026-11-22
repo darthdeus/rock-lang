@@ -41,19 +41,13 @@ pub fn ns_aliases_for_selected_sources<'a>(
     sources: impl IntoIterator<Item = (&'a str, Option<&'a PackageTag>)>,
     selecting_graph: Option<&NsAliases>,
 ) -> Result<NsAliases, CompilerError> {
-    let mut root = None;
-    for (file, package) in sources {
-        let Some(package) = package else { continue };
-        if package.id == 0 && root.is_none() {
-            root = Some(file);
-        }
+    if let Some(aliases) = selecting_graph {
+        return Ok(aliases.clone());
     }
-    let Some(root) = root else {
-        return Ok(selecting_graph.cloned().unwrap_or_default());
-    };
-    match selecting_graph {
-        Some(aliases) => Ok(aliases.clone()),
-        None => ns_aliases_for_root_file(Path::new(root)),
+    let mut sources = sources.into_iter();
+    match sources.find(|(_, package)| package.is_some_and(|tag| tag.id == 0)) {
+        Some((file, _)) => ns_aliases_for_root_file(Path::new(file)),
+        None => Ok(NsAliases::default()),
     }
 }
 

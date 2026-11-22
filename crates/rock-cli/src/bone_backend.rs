@@ -65,19 +65,29 @@ pub(crate) fn render_errs(sources: &SourceFiles, errs: &[CompilerError]) -> Stri
 
 pub(crate) fn aliases_for_modules<'a>(
     modules: impl IntoIterator<Item = &'a skull_parser::Ast>,
+    aliases: Option<&bone_core::modules::NsAliases>,
 ) -> std::result::Result<bone_core::modules::NsAliases, CompilerError> {
-    rock_host::program_inputs::ns_aliases_for_sources(
+    rock_host::program_inputs::ns_aliases_for_selected_sources(
         modules
             .into_iter()
             .map(|m| (m.file.as_str(), m.package.as_ref())),
+        aliases,
     )
 }
 
 pub fn check_modules(
     modules: &mut skull_parser::stdlib::ModuleSet,
 ) -> std::result::Result<bone_semantic::inference::Workspace, Vec<CompilerError>> {
-    let (ws, errs) =
-        skull::pipeline::check_modules(modules, |modules| aliases_for_modules(modules.iter()))?;
+    check_modules_with_sources(modules, None)
+}
+
+pub(crate) fn check_modules_with_sources(
+    modules: &mut skull_parser::stdlib::ModuleSet,
+    sources: Option<&SourceFiles>,
+) -> std::result::Result<bone_semantic::inference::Workspace, Vec<CompilerError>> {
+    let (ws, errs) = skull::pipeline::check_modules(modules, |modules| {
+        aliases_for_modules(modules.iter(), sources.and_then(|s| s.ns_aliases.as_ref()))
+    })?;
     if !errs.is_empty() {
         return Err(errs);
     }
@@ -91,15 +101,16 @@ pub fn check_with_stdlib(
 }
 
 pub(crate) fn bone_session(
-    files: Vec<bone_incremental::session::SessionFile>,
+    sources: &SourceFiles,
 ) -> std::result::Result<bone_incremental::session::Session, CompilerError> {
-    let aliases = rock_host::program_inputs::ns_aliases_for_sources(
-        files.iter().map(|f| (f.path.as_str(), f.package.as_ref())),
-    )?;
     let stdlib = skull_parser::stdlib::cached()
         .as_ref()
         .map_err(Clone::clone)?;
-    bone_incremental::session::Session::new(stdlib.clone(), files, &aliases)
+    bone_incremental::session::Session::new(
+        stdlib.clone(),
+        session_files(sources),
+        sources.ns_aliases.as_ref().unwrap_or(&Default::default()),
+    )
 }
 
 pub(crate) fn session_files(sources: &SourceFiles) -> Vec<bone_incremental::session::SessionFile> {
@@ -111,10 +122,10 @@ pub(crate) fn session_files(sources: &SourceFiles) -> Vec<bone_incremental::sess
 }
 
 pub(crate) fn bone_session_for_emission(
-    files: Vec<bone_incremental::session::SessionFile>,
+    sources: &SourceFiles,
     anchor: &std::path::Path,
 ) -> std::result::Result<bone_incremental::session::Session, CompilerError> {
-    let mut session = bone_session(files)?;
+    let mut session = bone_session(sources)?;
     let inputs = crate::comptime::inputs_for_entry_path(anchor)
         .and_then(|inputs| {
             crate::comptime::resolve_checked_inputs(&session.ws, inputs, |file| {
@@ -250,7 +261,7 @@ pub(crate) fn workspace_frontend_timed(
         let t_assemble = Instant::now();
         let mut modules = skull::pipeline::with_stdlib(user_modules)?;
         times.stdlib_assemble = t_assemble.elapsed();
-        let aliases = aliases_for_modules(modules.iter())?;
+        let aliases = aliases_for_modules(modules.iter(), sources.ns_aliases.as_ref())?;
 
         let t_call = Instant::now();
         times.semantic_pass_called = true;
