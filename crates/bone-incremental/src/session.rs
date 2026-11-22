@@ -253,7 +253,6 @@ pub struct UserFile {
     global_policy: GlobalPolicy,
     /// Recovery keeps the partial tree queryable while diagnostics retain its syntax errors.
     syntax_errors: Vec<CompilerError>,
-    scope_hash: u64,
     pub contribution: FragmentContribution,
 }
 
@@ -316,88 +315,84 @@ fn reject_macro_name_collisions(modules: &ModuleSet) -> Result<(), CompilerError
         .map_or(Ok(()), Err)
 }
 
-fn scope_hash(contribution: &FragmentContribution) -> u64 {
-    use std::hash::{Hash, Hasher};
-
-    let mut h = rustc_hash::FxHasher::default();
-    if let Some(header) = &contribution.header {
-        header
-            .path
-            .iter()
-            .map(|ident| ident.name.as_str())
-            .collect::<Vec<_>>()
-            .hash(&mut h);
-        hash_visibility(header.vis.as_ref(), &mut h);
-    }
-    scope_items(&contribution.items, 0, &mut h);
-    h.finish()
+fn same_scope(left: &FragmentContribution, right: &FragmentContribution) -> bool {
+    let header_matches = match (&left.header, &right.header) {
+        (Some(a), Some(b)) => a.vis == b.vis && same_names(&a.path, &b.path),
+        (None, None) => true,
+        _ => false,
+    };
+    header_matches && same_scope_items(&left.items, &right.items)
 }
 
-/// Signatures, fields and bodies are left out: an edit to them keeps every
-/// DefKey and stays on the interface path.
-fn scope_items(
-    items: &[bone_semantic::semantic_passes::ScopeItem],
-    depth: usize,
-    h: &mut rustc_hash::FxHasher,
-) {
+fn same_names(left: &[skull_parser::Ident], right: &[skull_parser::Ident]) -> bool {
+    left.iter()
+        .map(|ident| ident.name)
+        .eq(right.iter().map(|ident| ident.name))
+}
+
+fn same_scope_items(
+    left: &[bone_semantic::semantic_passes::ScopeItem],
+    right: &[bone_semantic::semantic_passes::ScopeItem],
+) -> bool {
     use bone_semantic::semantic_passes::ScopeItem;
-    use std::hash::Hash;
 
-    for item in items {
-        match item {
-            ScopeItem::Module {
-                name, vis, items, ..
-            } => {
-                (depth, "mod", name.as_str()).hash(h);
-                hash_visibility(vis.as_ref(), h);
-                scope_items(items, depth + 1, h);
-            }
-            ScopeItem::Use(decl) => {
-                (depth, "use").hash(h);
-                hash_visibility(decl.vis.as_ref(), h);
-                hash_use_paths(decl, h);
-            }
-            ScopeItem::Def {
-                name, kind, vis, ..
-            } => {
-                (depth, *kind, name.as_str()).hash(h);
-                hash_visibility(vis.as_ref(), h);
-            }
-        }
-    }
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| match (left, right) {
+                (
+                    ScopeItem::Module {
+                        name: a,
+                        vis: va,
+                        items: ia,
+                        ..
+                    },
+                    ScopeItem::Module {
+                        name: b,
+                        vis: vb,
+                        items: ib,
+                        ..
+                    },
+                ) => a == b && va == vb && same_scope_items(ia, ib),
+                (
+                    ScopeItem::Def {
+                        name: a,
+                        kind: ka,
+                        vis: va,
+                        ..
+                    },
+                    ScopeItem::Def {
+                        name: b,
+                        kind: kb,
+                        vis: vb,
+                        ..
+                    },
+                ) => (a, ka, va) == (b, kb, vb),
+                (ScopeItem::Use(a), ScopeItem::Use(b)) => same_use(a, b),
+                _ => false,
+            })
 }
 
-fn hash_use_paths(decl: &skull_parser::UseDecl, h: &mut rustc_hash::FxHasher) {
+fn same_use(left: &skull_parser::UseDecl, right: &skull_parser::UseDecl) -> bool {
     use skull_parser::UseSuffix;
-    use std::hash::Hash;
 
-    (decl.from_root, decl.paths().len()).hash(h);
-    for path in decl.paths() {
-        (
-            path.parent,
-            path.segments.len(),
-            std::mem::discriminant(&path.suffix),
-        )
-            .hash(h);
-        for part in &path.segments {
-            part.name.as_str().hash(h);
-        }
-        if let UseSuffix::Bind(alias) | UseSuffix::Operator(alias) = &path.suffix {
-            alias.as_ref().map(|a| a.name.as_str()).hash(h);
-        }
-    }
-}
-
-fn hash_visibility(vis: Option<&skull_parser::Visibility>, h: &mut rustc_hash::FxHasher) {
-    use skull_parser::Visibility;
-    use std::hash::Hash;
-
-    match vis {
-        None => 0u8.hash(h),
-        Some(Visibility::Private) => 1u8.hash(h),
-        Some(Visibility::Pub) => 2u8.hash(h),
-        Some(Visibility::PubPackage) => 4u8.hash(h),
-    }
+    let name = |alias: &Option<skull_parser::Ident>| alias.as_ref().map(|ident| ident.name);
+    left.from_root == right.from_root
+        && left.vis == right.vis
+        && left.paths().len() == right.paths().len()
+        && left.paths().iter().zip(right.paths()).all(|(a, b)| {
+            a.parent == b.parent
+                && same_names(&a.segments, &b.segments)
+                && match (&a.suffix, &b.suffix) {
+                    (UseSuffix::Bind(a), UseSuffix::Bind(b))
+                    | (UseSuffix::Operator(a), UseSuffix::Operator(b)) => name(a) == name(b),
+                    (UseSuffix::Glob, UseSuffix::Glob) | (UseSuffix::Group, UseSuffix::Group) => {
+                        true
+                    }
+                    _ => false,
+                }
+        })
 }
 
 fn item_prints(a: &Ast, text: &str) -> Vec<ItemPrint> {
@@ -627,7 +622,6 @@ impl Session {
             let prints = item_prints(&module, &text);
             let macros = macro_defs(&module);
             let contribution = contribute(&module);
-            let scope = scope_hash(&contribution);
 
             session.files.insert(
                 path.clone(),
@@ -639,7 +633,6 @@ impl Session {
                     package,
                     global_policy,
                     syntax_errors: module.recovery_errors.clone(),
-                    scope_hash: scope,
                     contribution,
                 },
             );
@@ -783,9 +776,8 @@ impl Session {
         } else {
             contribute(&module)
         };
-        let scope_hash = scope_hash(&contribution);
         let diff = old.filter(|_| !module.items.is_empty()).map(|old| {
-            if old.scope_hash != scope_hash {
+            if !same_scope(&old.contribution, &contribution) {
                 FileDiff::Scope
             } else {
                 classify(&old.item_prints, &new_prints)
@@ -806,7 +798,6 @@ impl Session {
             package: module.package.clone(),
             global_policy: module.global_policy,
             syntax_errors: module.recovery_errors.clone(),
-            scope_hash,
             contribution,
         };
         self.apply_file(path, Some(next), |s| match diff {
@@ -933,7 +924,6 @@ impl Session {
     ) {
         for contribution in user_contributions {
             if let Some(user_file) = self.files.get_mut(contribution.file.as_str()) {
-                user_file.scope_hash = scope_hash(&contribution);
                 user_file.contribution = contribution;
             }
         }
@@ -1033,11 +1023,10 @@ impl Session {
             }
         }
         to_relower.extend(self.modules_reading(&delta, mid));
-        // Modules with interface errors re-lower so a reappearing type clears them.
-        for m in self.ws.user_modules(&self.warm_mids) {
-            if m.id != mid && !m.interface_errors.is_empty() {
-                to_relower.insert(m.id);
-            }
+        if !only_functions || !changed_types.is_empty() || !delta.is_empty() {
+            to_relower.extend(self.ws.user_modules(&self.warm_mids).filter_map(|module| {
+                (module.id != mid && !module.interface_errors.is_empty()).then_some(module.id)
+            }));
         }
 
         let mut edited = module;
@@ -1481,7 +1470,6 @@ impl Session {
             package: old.package.clone(),
             global_policy: old.global_policy,
             syntax_errors: Vec::new(),
-            scope_hash: old.scope_hash,
             contribution: old.contribution.clone(),
         };
         self.apply_file(path, Some(next), |s| {

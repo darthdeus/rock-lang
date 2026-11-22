@@ -118,6 +118,39 @@ fn a_held_file_refuses_different_facts() {
 }
 
 #[test]
+fn callable_only_edits_leave_unrelated_interface_errors_in_place() {
+    let broken = "fn broken(x: Missing) {}\nfn valid() -> int { 7 }\n";
+    let before = "fn callable(x: int) -> int { 1 }\n";
+    let after = before.replace("x: int", "x: string");
+    let mut session = common::with_warm(
+        vec![],
+        vec![v1("broken.rock", broken), v1("callable.rock", before)],
+    );
+    assert!(
+        session
+            .diagnostics()
+            .iter()
+            .any(|error| error.message.contains("Missing"))
+    );
+    let update = session.update_file("callable.rock", &after).unwrap();
+    assert_eq!(
+        update.tier,
+        bone_incremental::session::UpdateTier::Interface
+    );
+    assert!(
+        update
+            .relowered
+            .iter()
+            .all(|(mid, _)| { session.workspace().module(*mid).file.as_str() != "broken.rock" }),
+        "{update:?}"
+    );
+    session
+        .update_file("callable.rock", &format!("{after}\nstruct Missing {{}}"))
+        .unwrap();
+    assert!(session.diagnostics().is_empty());
+}
+
+#[test]
 fn globals_none_policy_survives_initial_and_incremental_parses() {
     for (name, invalid, valid, edit) in [
         (
