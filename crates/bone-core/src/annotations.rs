@@ -104,11 +104,6 @@ fn validate_one(
         no_args(anno)
     };
     match name.as_str() {
-        "deprecated" => check(
-            FnItem,
-            args.is_empty() || positional(1, string),
-            "`@deprecated` takes an optional replacement message string",
-        ),
         "test" => {
             at(anno, pos, FnItem)?;
             test_args(anno)
@@ -420,43 +415,24 @@ mod tests {
     use super::parse_test_backends;
 
     #[test]
-    fn deprecated_accepts_only_an_optional_positional_string_on_functions() {
+    fn deprecated_is_an_unknown_annotation() {
         use super::*;
-        use crate::hir::AnnoArg;
         use skull_parser::Ident;
 
         let span = Span::new(Ustr::from("<annotation>"), (0, 0), (0, 0), (0, 0));
-        let ident = |name: &str| Ident {
-            name: Ustr::from(name),
-            span,
-        };
-        let message = AnnoValue::String(Ustr::from("use fresh"));
-        let arg = |name: Option<&str>, value: &AnnoValue| AnnoArg {
-            name: name.map(ident),
-            value: value.clone(),
-        };
-        let valid = |pos, args: Vec<AnnoArg>| {
-            let annotation = Annotation {
-                name: ident("deprecated"),
+        let annotation = Annotation {
+            name: Ident {
+                name: Ustr::from("deprecated"),
                 span,
-                args,
-                resolved_name: None,
-                resolved_ident_list: None,
-            };
-            validate_annotations(pos, &[annotation], &FxHashSet::default()).is_ok()
+            },
+            span,
+            args: vec![],
+            resolved_name: None,
+            resolved_ident_list: None,
         };
-        assert!(valid(AnnoPos::FnItem, vec![]));
-        assert!(valid(AnnoPos::FnItem, vec![arg(None, &message)]));
-        assert!(!valid(
-            AnnoPos::FnItem,
-            vec![arg(Some("message"), &message)]
-        ));
-        assert!(!valid(AnnoPos::FnItem, vec![arg(None, &AnnoValue::Int(1))]));
-        assert!(!valid(
-            AnnoPos::FnItem,
-            vec![arg(None, &message), arg(None, &message)]
-        ));
-        assert!(!valid(AnnoPos::Param, vec![]));
+        let error = validate_annotations(AnnoPos::FnItem, &[annotation], &FxHashSet::default())
+            .unwrap_err();
+        assert!(format!("{error:?}").contains("unknown annotation `@deprecated`"));
     }
 
     #[test]

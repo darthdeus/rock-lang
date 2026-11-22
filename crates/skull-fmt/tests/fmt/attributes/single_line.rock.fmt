@@ -11,5 +11,5 @@
 
 //- long_attribute_breaking
 // Very long attributes should break appropriately
-@deprecated("This function is deprecated and will be removed in version 2.0, please use the new_function instead")
+@description("This function is deprecated and will be removed in version 2.0, please use the new_function instead")
 fn old_function() -> int { return 0 }

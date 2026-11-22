@@ -6,10 +6,6 @@ use bone_core::prelude::*;
 use bone_core::workspace::{BodyInference, BoundNext, BoundTree};
 use rock_core::errors::CompilerErrorLevel;
 
-mod call_lints;
-pub use call_lints::DEPRECATED;
-use call_lints::deprecated_calls_in_body;
-
 fn unused_vars_in_body_with_metadata(
     body: &Body,
     variants: &FxHashSet<Ustr>,
@@ -135,7 +131,6 @@ pub const KNOWN_LINTS: &[&str] = &[
     UNUSED_PURE_EXPR,
     TRANSMUTE_OF_NULLABLE,
     TASK_NULL_ABANDON,
-    DEPRECATED,
     RAW_INPUT_MIGRATION,
     RAW_INPUT_CLASSIFICATION,
     ACTION_CALLERS,
@@ -649,9 +644,6 @@ fn inference_body_findings(
     if sel.enabled(TASK_NULL_ABANDON) {
         let found = task_null_abandon_in_body(ws, bi, body);
         out.extend(found);
-    }
-    if sel.enabled(DEPRECATED) {
-        out.extend(deprecated_calls_in_body(ws, bi, body));
     }
     out
 }

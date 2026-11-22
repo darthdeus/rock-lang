@@ -12,7 +12,6 @@ mod action_layer_boundaries;
 mod action_layer_raw_input;
 mod action_policy;
 mod catalog;
-mod deprecated;
 mod incremental_cache;
 mod task_null_abandon;
 mod transmute_of_nullable;
