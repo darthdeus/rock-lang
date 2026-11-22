@@ -1,4 +1,4 @@
-use crate::hir::{BinOp, BindingInfo, Callee, Expr, InterpPart, Pattern, Statement};
+use crate::hir::{BinOp, BindingInfo, Callee, Expr, Pattern, Statement};
 use crate::hir_walk::HirChild;
 use crate::prelude::*;
 
@@ -341,16 +341,6 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
                 self.branch(rhs, &entry, &mut out);
                 out.merge(entry);
                 *flow = out;
-            }
-            Expr::InterpolatedString(parts) => {
-                for part in parts {
-                    if let InterpPart::Value { expr, spec } = self.body.interp_part_arena[part] {
-                        self.expr(expr, flow);
-                        if let Some(value) = spec.and_then(|s| s.precision_expr) {
-                            self.expr(value, flow);
-                        }
-                    }
-                }
             }
             Expr::Return(value) => {
                 if let Some(value) = value {

@@ -363,3 +363,14 @@ fn main() {
 //! expect: cannot retain a reference into relocatable Vec or Map storage; pass the element directly to a `ref
 value Position { x: int }
 fn first(positions: [Position]) -> ref Position { return positions[0] }
+
+//=== TEST CASE: frame_ref_in_dynamic_width_after_yield_Generic ===
+//! expect: frame borrow is used after a coroutine suspension
+value Cell { width: int }
+co fn tick() -> Coroutine<int> {
+    let cell = Cell { width: 4 }
+    let borrowed: ref Cell = cell
+    yield 1
+    print("{3:{borrowed.width}d}")
+}
+fn main() {}
