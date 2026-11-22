@@ -1,3 +1,11 @@
+//=== PROLOGUE: optional_reference ===
+value Cell { v: int, w: int }
+
+fn maybe(c: ref Cell, ok: bool) -> (ref Cell)? {
+    if ok { return c }
+    return null
+}
+
 //=== TEST CASE: bound_callback_nullable_nobox_return ===
 //! expect: a function returning a `nobox` value cannot be used as one returning a nullable value
 // A stored function returning a nobox value has a fixed leaf return ABI.
@@ -247,13 +255,7 @@ fn main() {
 
 //=== TEST CASE: whole_read_of_a_nullable_flat_ref_result ===
 //! expect: returns a nullable `ref` to a flat-stored `Cell`; bind it with `let` and check it for null before reading it
-value Cell { v: int, w: int }
-
-fn maybe(c: ref Cell, ok: bool) -> (ref Cell)? {
-    if ok { return c }
-    return null
-}
-
+//--- USE: optional_reference ---
 fn same(c: ref Cell) -> bool {
     return maybe(c, true) == Cell { v: 3, w: 4 }
 }
@@ -265,13 +267,7 @@ fn main() {
 
 //=== TEST CASE: whole_read_of_a_nullable_flat_ref_binding ===
 //! expect: a nullable `ref` to a flat-stored container element can be compared with null
-value Cell { v: int, w: int }
-
-fn maybe(c: ref Cell, ok: bool) -> (ref Cell)? {
-    if ok { return c }
-    return null
-}
-
+//--- USE: optional_reference ---
 fn read_through(c: ref Cell) -> bool {
     let m = maybe(c, true)
     return m == Cell { v: 3, w: 4 }

@@ -1,3 +1,8 @@
+//=== PROLOGUE: resume_driver ===
+fn main() {
+    let c = gen()
+    let _ = c.resume()
+}
 //=== TEST CASE: lambda_body_type_error_Generic ===
 // the lambda body is type-checked: an ordering op on a bool body must fail
 //! expect: ordering operators require numeric operands, got bool
@@ -147,10 +152,7 @@ co fn gen() -> Coroutine<int> {
     let f = () => yield 5
     f()
 }
-fn main() {
-    let c = gen()
-    let _ = c.resume()
-}
+//--- USE: resume_driver ---
 
 //=== TEST CASE: bare_yield_in_lambda_Generic ===
 //! expect: yield is only allowed in a coroutine (co fn)
@@ -159,10 +161,7 @@ co fn gen() -> Coroutine<int> {
     f()
     yield 1
 }
-fn main() {
-    let c = gen()
-    let _ = c.resume()
-}
+//--- USE: resume_driver ---
 
 //=== TEST CASE: yield_in_lambda_passed_to_map_Generic ===
 //! expect: yield is only allowed in a coroutine (co fn)
@@ -171,7 +170,4 @@ co fn gen() -> Coroutine<int> {
     let _ys = xs.map(x => yield x)
     yield 0
 }
-fn main() {
-    let c = gen()
-    let _ = c.resume()
-}
+//--- USE: resume_driver ---

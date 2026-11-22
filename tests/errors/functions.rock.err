@@ -1,3 +1,6 @@
+//=== PROLOGUE: callable_factory ===
+fn mk() -> fn() -> int { return () => 1 }
+
 //=== TEST CASE: plain_fn_without_a_body ===
 // Only `extern fn` may omit a body; any other bodyless fn is rejected rather
 // than becoming an extern C declaration that fails at run time.
@@ -51,8 +54,7 @@ fn main() {
 // A generic `==` instantiated with a fn type is rejected at the call site.
 //! expect: Cannot compare fn values: `same` compares a generic parameter with `==`/`!=`, but it is
 fn same<T>(a: T, b: T) -> bool { return a == b }
-fn mk() -> fn() -> int { return () => 1 }
-
+//--- USE: callable_factory ---
 fn main() {
     if same(mk(), mk()) { print("same") }   // ERROR: fn identity via generic
 }
@@ -60,8 +62,7 @@ fn main() {
 //=== TEST CASE: generic_neq_fn_arg_Generic ===
 //! expect: Cannot compare fn values: `diff` compares a generic parameter with `==`/`!=`, but it is
 fn diff<T>(a: T, b: T) -> bool { return a != b }
-fn mk() -> fn() -> int { return () => 1 }
-
+//--- USE: callable_factory ---
 fn main() {
     if diff(mk(), mk()) { print("diff") }   // ERROR: fn identity via generic
 }
@@ -78,8 +79,7 @@ fn main() {
 //=== TEST CASE: generic_eq_annotated_both_alias_Generic ===
 //! expect: Cannot compare fn values: `same` compares a generic parameter with `==`/`!=`, but it is
 fn same<T>(a: T, b: T) -> bool { let x: T = a; let y: T = b; return x == y }
-fn mk() -> fn() -> int { return () => 1 }
-
+//--- USE: callable_factory ---
 fn main() {
     if same(mk(), mk()) { print("same") }   // ERROR: annotated aliases stay T-typed
 }
@@ -88,8 +88,7 @@ fn main() {
 // Unannotated aliases infer as `T`, so the comparison is still on `T`.
 //! expect: Cannot compare fn values: `same` compares a generic parameter with `==`/`!=`, but it is
 fn same<T>(a: T, b: T) -> bool { let x = a; let y = b; return x == y }
-fn mk() -> fn() -> int { return () => 1 }
-
+//--- USE: callable_factory ---
 fn main() {
     if same(mk(), mk()) { print("same") }   // ERROR: aliases are still T-typed
 }
@@ -98,8 +97,7 @@ fn main() {
 //! expect: Cannot compare fn values: `same` compares a generic parameter with `==`/`!=`, but it is
 fn mk_t<T>(x: T) -> T { return x }
 fn same<T>(a: T, b: T) -> bool { return mk_t(a) == mk_t(b) }
-fn mk() -> fn() -> int { return () => 1 }
-
+//--- USE: callable_factory ---
 fn main() {
     if same(mk(), mk()) { print("same") }   // ERROR: call operands infer as T
 }
@@ -110,8 +108,7 @@ fn main() {
 fn same<T>(a: T, b: T) -> bool { return a == b }
 fn mid<U>(a: U, b: U) -> bool { return same(a, b) }
 fn outer<V>(a: V, b: V) -> bool { return mid(a, b) }
-fn mk() -> fn() -> int { return () => 1 }
-
+//--- USE: callable_factory ---
 fn main() {
     if outer(mk(), mk()) { print("same") }   // ERROR: fn identity three levels down
 }
@@ -123,8 +120,7 @@ fn ping<T>(a: T, b: T, n: int) -> bool {
     return pong(a, b, n - 1)
 }
 fn pong<T>(a: T, b: T, n: int) -> bool { return ping(a, b, n) }
-fn mk() -> fn() -> int { return () => 1 }
-
+//--- USE: callable_factory ---
 fn main() {
     if pong(mk(), mk(), 2) { print("same") }   // ERROR: compared through a cycle
 }

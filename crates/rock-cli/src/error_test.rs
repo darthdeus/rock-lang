@@ -46,8 +46,27 @@ impl ErrorTest {
 
 fn parse_error_test_cases(content: &str) -> Result<Vec<ErrorTestCase>> {
     let mut test_cases = Vec::new();
+    let mut prologues = rustc_hash::FxHashMap::default();
     let mut lines = content.lines().peekable();
     while let Some(line) = lines.next() {
+        if let Some(name) = line
+            .trim()
+            .strip_prefix("//=== PROLOGUE: ")
+            .and_then(|header| header.strip_suffix(" ==="))
+        {
+            let mut source = String::new();
+            while let Some(line) = lines.next_if(|line| !line.trim_start().starts_with("//===")) {
+                source.push_str(line);
+                source.push('\n');
+            }
+            if name.is_empty()
+                || source.trim().is_empty()
+                || prologues.insert(name, source).is_some()
+            {
+                return Err(anyhow!("Invalid or duplicate fixture prologue: {name}"));
+            }
+            continue;
+        }
         let Some(header) = line
             .trim()
             .strip_prefix("//=== TEST CASE:")
@@ -74,6 +93,14 @@ fn parse_error_test_cases(content: &str) -> Result<Vec<ErrorTestCase>> {
                 // Once explicit files are present, text before the first header
                 // belongs to the fixture, not to any source file.
                 code.clear();
+            } else if let Some(name) = trimmed
+                .strip_prefix("//--- USE: ")
+                .and_then(|header| header.strip_suffix(" ---"))
+            {
+                let source = prologues
+                    .get(name)
+                    .ok_or_else(|| anyhow!("Unknown fixture prologue: {name}"))?;
+                code.push_str(source);
             } else {
                 code.push_str(line);
                 code.push('\n');
@@ -393,6 +420,29 @@ fn implicit() { missing() }",
             cases[1].files,
             [("test.rock".into(), "fn implicit() { missing() }".into())]
         );
+    }
+
+    #[test]
+    fn fixture_prologues_preserve_whitespace_and_require_a_definition() {
+        let source = "//=== PROLOGUE: shared ===
+fn setup() {
+    marker()
+}
+//=== TEST CASE: implicit_UndefinedSymbol ===
+//--- USE: shared ---
+
+fn main() { setup() }";
+        let cases = parse_error_test_cases(source).unwrap();
+        assert_eq!(
+            cases[0].files,
+            [(
+                "test.rock".into(),
+                "fn setup() {\n    marker()\n}\n\nfn main() { setup() }".into()
+            )]
+        );
+        let unknown = source.replace("USE: shared", "USE: missing");
+        let error = parse_error_test_cases(&unknown).unwrap_err();
+        assert_eq!(error.to_string(), "Unknown fixture prologue: missing");
     }
 
     #[test]

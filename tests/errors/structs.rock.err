@@ -1,3 +1,17 @@
+//=== PROLOGUE: unused_driver ===
+fn main() {
+    print("unused")
+}
+
+//=== PROLOGUE: embedded_point ===
+struct Pt { x: int, y: int }
+struct Holder { embed p: Pt, tag: int }
+
+//=== PROLOGUE: unreachable_driver ===
+fn main() {
+    print("unreachable")
+}
+
 //=== TEST CASE: unknown_type_still_errors_Generic ===
 //! expect: `Nope` did not resolve to any definition
 fn f(p: Nope) -> int {
@@ -84,9 +98,7 @@ fn f() -> Shape {
 
 //=== TEST CASE: embed_whole_value_binding_Generic ===
 //! expect: `p` is an `embed` field: it has no independently storable value
-struct Pt { x: int, y: int }
-struct Holder { embed p: Pt, tag: int }
-
+//--- USE: embedded_point ---
 fn main() {
     let h = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
     let q = h.p   // ERROR: binds the whole embedded field
@@ -95,9 +107,7 @@ fn main() {
 
 //=== TEST CASE: embed_whole_value_return_Generic ===
 //! expect: `p` is an `embed` field: it has no independently storable value
-struct Pt { x: int, y: int }
-struct Holder { embed p: Pt, tag: int }
-
+//--- USE: embedded_point ---
 fn leak(h: Holder) -> Pt {
     return h.p   // ERROR: returns the whole embedded field
 }
@@ -109,9 +119,7 @@ fn main() {
 
 //=== TEST CASE: embed_closure_capture_Generic ===
 //! expect: `p` is an `embed` field: it has no independently storable value
-struct Pt { x: int, y: int }
-struct Holder { embed p: Pt, tag: int }
-
+//--- USE: embedded_point ---
 fn main() {
     let h = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
     let f = () => h.p   // ERROR: captures the whole embedded field
@@ -120,9 +128,7 @@ fn main() {
 
 //=== TEST CASE: embed_collection_element_Generic ===
 //! expect: `p` is an `embed` field: it has no independently storable value
-struct Pt { x: int, y: int }
-struct Holder { embed p: Pt, tag: int }
-
+//--- USE: embedded_point ---
 fn main() {
     let h = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
     let xs = [h.p]   // ERROR: an embedded field cannot be a collection element
@@ -131,9 +137,7 @@ fn main() {
 
 //=== TEST CASE: embed_any_boundary_Generic ===
 //! expect: `p` is an `embed` field: it has no independently storable value
-struct Pt { x: int, y: int }
-struct Holder { embed p: Pt, tag: int }
-
+//--- USE: embedded_point ---
 fn main() {
     let h = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
     let a: any = h.p   // ERROR: erasing an embedded field materializes it
@@ -144,9 +148,7 @@ fn main() {
 //! expect: `p` is an `embed` field: it has no independently storable value
 // A `@nomangle` / `extern` / inline callee receives a BOX, so it is not a
 // scalar-ABI consumer even though the syntax looks like the legal call form.
-struct Pt { x: int, y: int }
-struct Holder { embed p: Pt, tag: int }
-
+//--- USE: embedded_point ---
 @nomangle inline(lua) fn sink_pt(p: Pt) -> int = """
     return p.x
 """
@@ -160,9 +162,7 @@ fn main() {
 // `.p` may satisfy a write-only selector, but a readable one hands out the
 // whole value.
 //! expect: a readable selector would hand out the whole value
-struct Pt { x: int, y: int }
-struct Holder { embed p: Pt, tag: int }
-
+//--- USE: embedded_point ---
 fn read_slot(f: ReadFieldRef<Holder, Pt>) {}
 
 fn main() {
@@ -171,9 +171,7 @@ fn main() {
 
 //=== TEST CASE: embed_full_field_ref_Generic ===
 //! expect: a readable selector would hand out the whole value
-struct Pt { x: int, y: int }
-struct Holder { embed p: Pt, tag: int }
-
+//--- USE: embedded_point ---
 fn rw_slot(f: FieldRef<Holder, Pt>) {}
 
 fn main() {
@@ -254,27 +252,18 @@ fn main() {
 //! expect: cannot `embed` field `next`: the embed graph is cyclic, so the layout has no finite size
 struct Node { embed next: Node, v: int }
 
-fn main() {
-    print("unreachable")
-}
-
+//--- USE: unreachable_driver ---
 //=== TEST CASE: embed_mutual_cycle_Generic ===
 //! expect: cannot `embed` field `b`: the embed graph is cyclic, so the layout has no finite size
 struct A { embed b: B, v: int }
 struct B { embed a: A, w: int }
 
-fn main() {
-    print("unreachable")
-}
-
+//--- USE: unreachable_driver ---
 //=== TEST CASE: direct_self_RecursiveValue ===
 //! expect: recursive value type: Node -> Node; use a reference or handle
 value Node { v: int, next: Node }
 
-fn main() {
-    print("unreachable")
-}
-
+//--- USE: unreachable_driver ---
 //=== TEST CASE: nullable_self_read_only_RecursiveValue ===
 //! expect: recursive value type: Chain -> Chain
 value Chain { n: int, next: Chain?, xs: [int] }
@@ -290,64 +279,43 @@ fn main() {
 value A { b: B? }
 value B { a: A }
 
-fn main() {
-    print("unused")
-}
-
+//--- USE: unused_driver ---
 //=== TEST CASE: three_type_cycle_RecursiveValue ===
 //! expect: recursive value type: P -> Q -> R -> P; use a reference or handle
 value P { q: Q }
 value Q { r: R? }
 value R { p: P? }
 
-fn main() {
-    print("unused")
-}
-
+//--- USE: unused_driver ---
 //=== TEST CASE: generic_instantiation_RecursiveValue ===
 //! expect: recursive value type: Node -> Box<Node> -> Node; use a reference or handle
 value Box<T> { t: T }
 value Node { v: int, child: Box<Node>? }
 
-fn main() {
-    print("unused")
-}
-
+//--- USE: unused_driver ---
 //=== TEST CASE: nested_generic_instantiation_RecursiveValue ===
 //! expect: recursive value type: Node -> Pair<int, Wrap<Node>> -> Node
 value Wrap<T> { inner: T? }
 value Pair<A, B> { a: A, b: B }
 value Node { p: Pair<int, Wrap<Node>> }
 
-fn main() {
-    print("unused")
-}
-
+//--- USE: unused_driver ---
 //=== TEST CASE: generic_self_RecursiveValue ===
 //! expect: recursive value type: Tree -> Tree
 value Tree<T> { v: T, left: Tree<T>? }
 
-fn main() {
-    print("unused")
-}
-
+//--- USE: unused_driver ---
 //=== TEST CASE: tuple_field_RecursiveValue ===
 //! expect: recursive value type: Node -> Node
 value Node { v: int, pair: (int, Node)? }
 
-fn main() {
-    print("unused")
-}
-
+//--- USE: unused_driver ---
 //=== TEST CASE: newtype_RecursiveValue ===
 //! expect: recursive value type: Node -> NodeId -> Node
 newtype NodeId(Node)
 value Node { v: int, parent: NodeId? }
 
-fn main() {
-    print("unused")
-}
-
+//--- USE: unused_driver ---
 //=== TEST CASE: struct_field_fn_Generic ===
 //! expect: Reserved field name `__fn` in struct `Sneaky`: `__fn`, `__ty`, and `__variant` are runtime marker keys
 struct Sneaky {

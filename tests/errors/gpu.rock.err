@@ -1,3 +1,20 @@
+//=== PROLOGUE: shader_pair ===
+value AV { p: Vec2 }
+value UV { m: Mat4 }
+value Vary { position: Vec4 }
+
+@shader(vertex)
+fn vtx(@attr a: AV, @uniform u: UV) -> Vary {
+    return Vary { position: u.m * Vec4 { x: a.p.x, y: a.p.y, z: 0.0, w: 1.0 } }
+}
+
+@shader(fragment)
+fn frg(vary: Vary) -> Vec4 { return Vec4 { x: 1.0, y: 0.0, z: 1.0, w: 1.0 } }
+
+//=== PROLOGUE: mode_states ===
+struct RoomState { n: int }
+struct MenuState { label: string }
+
 //=== TEST CASE: gpu_only_without_intrinsic_Generic ===
 //! expect: `@gpu_only` marks an `@intrinsic` fn that only GPU backends map
 @gpu_only fn bogus() -> int {
@@ -102,36 +119,14 @@ fn main() {
 
 //=== TEST CASE: arg_not_a_fn_reference_Generic ===
 //! expect: `rock_shader` argument must be a direct reference to a top-level `@shader(vertex)` fn
-value AV { p: Vec2 }
-value UV { m: Mat4 }
-value Vary { position: Vec4 }
-
-@shader(vertex)
-fn vtx(@attr a: AV, @uniform u: UV) -> Vary {
-    return Vary { position: u.m * Vec4 { x: a.p.x, y: a.p.y, z: 0.0, w: 1.0 } }
-}
-
-@shader(fragment)
-fn frg(vary: Vary) -> Vec4 { return Vec4 { x: 1.0, y: 0.0, z: 1.0, w: 1.0 } }
-
+//--- USE: shader_pair ---
 fn main() {
     let _ = rock_shader(3, frg)
 }
 
 //=== TEST CASE: arg_is_a_local_not_direct_reference_Generic ===
 //! expect: `rock_shader` argument must be a direct reference to a top-level `@shader(vertex)` fn
-value AV { p: Vec2 }
-value UV { m: Mat4 }
-value Vary { position: Vec4 }
-
-@shader(vertex)
-fn vtx(@attr a: AV, @uniform u: UV) -> Vary {
-    return Vary { position: u.m * Vec4 { x: a.p.x, y: a.p.y, z: 0.0, w: 1.0 } }
-}
-
-@shader(fragment)
-fn frg(vary: Vary) -> Vec4 { return Vec4 { x: 1.0, y: 0.0, z: 1.0, w: 1.0 } }
-
+//--- USE: shader_pair ---
 fn main() {
     let f = vtx
     let _ = rock_shader(f, frg)
@@ -154,18 +149,7 @@ fn main() {
 
 //=== TEST CASE: swapped_vertex_and_fragment_Generic ===
 //! expect: `rock_shader` expects a `@shader(vertex)` fn here, but `frg` is `@shader(fragment)`
-value AV { p: Vec2 }
-value UV { m: Mat4 }
-value Vary { position: Vec4 }
-
-@shader(vertex)
-fn vtx(@attr a: AV, @uniform u: UV) -> Vary {
-    return Vary { position: u.m * Vec4 { x: a.p.x, y: a.p.y, z: 0.0, w: 1.0 } }
-}
-
-@shader(fragment)
-fn frg(vary: Vary) -> Vec4 { return Vec4 { x: 1.0, y: 0.0, z: 1.0, w: 1.0 } }
-
+//--- USE: shader_pair ---
 fn main() {
     let _ = rock_shader(frg, vtx)
 }
@@ -195,18 +179,7 @@ fn main() {
 
 //=== TEST CASE: three_args_rejected_Generic ===
 //! expect: No overload for `rock_shader` with argument types
-value AV { p: Vec2 }
-value UV { m: Mat4 }
-value Vary { position: Vec4 }
-
-@shader(vertex)
-fn vtx(@attr a: AV, @uniform u: UV) -> Vary {
-    return Vary { position: u.m * Vec4 { x: a.p.x, y: a.p.y, z: 0.0, w: 1.0 } }
-}
-
-@shader(fragment)
-fn frg(vary: Vary) -> Vec4 { return Vec4 { x: 1.0, y: 0.0, z: 1.0, w: 1.0 } }
-
+//--- USE: shader_pair ---
 fn main() {
     let _ = rock_shader(vtx, frg, frg)
 }
@@ -366,9 +339,7 @@ fn main() {
 
 //=== TEST CASE: scene_handle_of_wrong_root_type_Generic ===
 //! expect: type mismatch: expected `MenuState`, found `RoomState`
-struct RoomState { n: int }
-struct MenuState { label: string }
-
+//--- USE: mode_states ---
 fn main() {
     let room: Scene<RoomState>? = scene_create((b) => {
         let r: RoomState? = RoomState { n: 1 }
@@ -380,9 +351,7 @@ fn main() {
 
 //=== TEST CASE: scene_root_used_as_other_root_Generic ===
 //! expect: type mismatch: expected `MenuState`, found `RoomState`
-struct RoomState { n: int }
-struct MenuState { label: string }
-
+//--- USE: mode_states ---
 fn main() {
     let room: Scene<RoomState>? = scene_create((b) => {
         let r: RoomState? = RoomState { n: 1 }
@@ -409,9 +378,7 @@ fn main() {
 
 //=== TEST CASE: scene_create_root_type_mismatch_Generic ===
 //! expect: type mismatch: expected `RoomState`, found `MenuState`
-struct RoomState { n: int }
-struct MenuState { label: string }
-
+//--- USE: mode_states ---
 fn main() {
     let room: Scene<RoomState>? = scene_create((b) => {
         let m: MenuState? = MenuState { label: "x" }

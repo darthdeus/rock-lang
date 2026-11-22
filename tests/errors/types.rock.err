@@ -1,3 +1,14 @@
+//=== PROLOGUE: bad_call_driver ===
+fn main() {
+    bad_func()
+}
+
+//=== PROLOGUE: default_type_parameter ===
+struct P<T, U = int> {
+    a: T,
+    b: U,
+}
+
 //=== TEST CASE: struct_to_struct_mismatch_MismatchedType ===
 //! expect: type mismatch: expected `Point`, found `Color`
 struct Point { x: int, y: int }
@@ -7,10 +18,7 @@ fn bad_func(p: Point = Color { r: 255, g: 0, b: 0 }) {
     print("This should not compile")
 }
 
-fn main() {
-    bad_func()
-}
-
+//--- USE: bad_call_driver ---
 //=== TEST CASE: null_to_non_nullable_NullAssignmentToNonNullable ===
 //! expect: type mismatch: expected `Point`, found `null?`
 struct Point { x: int, y: int }
@@ -19,10 +27,7 @@ fn bad_func(p: Point = null) {
     print("This should not compile")
 }
 
-fn main() {
-    bad_func()
-}
-
+//--- USE: bad_call_driver ---
 //=== TEST CASE: function_type_default_mismatch_Generic ===
 //! expect: type mismatch: expected `int`, found `string`
 fn dummy_int() -> int {
@@ -37,10 +42,7 @@ fn bad_func(f: fn() -> int = dummy_string) {
     print(f())
 }
 
-fn main() {
-    bad_func()
-}
-
+//--- USE: bad_call_driver ---
 //=== TEST CASE: array_element_mismatch_MismatchedType ===
 //! expect: type mismatch: expected `int`, found `string`
 fn main() {
@@ -232,22 +234,14 @@ fn main() {
 
 //=== TEST CASE: too_few_args_bare_Generic ===
 //! expect: Generic type `P` requires at least 1 type argument(s)
-struct P<T, U = int> {
-    a: T,
-    b: U,
-}
-
+//--- USE: default_type_parameter ---
 fn main() {
     let p: P = P { a: 1, b: 2 }
 }
 
 //=== TEST CASE: too_many_args_Generic ===
 //! expect: Generic type `P` expects 1 to 2 type argument(s), found 3
-struct P<T, U = int> {
-    a: T,
-    b: U,
-}
-
+//--- USE: default_type_parameter ---
 fn main() {
     let p: P<int, int, int> = P { a: 1, b: 2 }
 }

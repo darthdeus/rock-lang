@@ -1,3 +1,17 @@
+//=== PROLOGUE: nullable_global ===
+struct G { f: int? }
+global g: G = G { f: 1 }
+fn evil() -> int { g.f = null; return 0 }
+
+//=== PROLOGUE: test_driver ===
+fn main() { test() }
+
+//=== PROLOGUE: refinement_probe ===
+fn bad(x: Payload?) -> int {
+    if !is_null(x) { return x.n }
+    return 0
+}
+
 //=== TEST CASE: nullable_null_to_int_Generic ===
 //! expect: type mismatch: expected `int`, found `null?`
 fn f() -> int {
@@ -22,8 +36,7 @@ fn test() {
     let result = f.x  // ERROR: Cannot use '.' to access field 'x' on nullable type
 }
 
-fn main() { test() }
-
+//--- USE: test_driver ---
 //=== TEST CASE: nullable_field_nested_Generic ===
 //! expect: cannot access field `value` on non-struct type Inner?
 struct Inner { value: int }
@@ -34,8 +47,7 @@ fn test() {
     let result = o.inner.value  // ERROR: Cannot use '.' to access field 'value' on nullable type
 }
 
-fn main() { test() }
-
+//--- USE: test_driver ---
 //=== TEST CASE: divergence_refinement_of_global_unsound_Generic ===
 //! expect: cannot access field `x` on non-struct type GFoo?
 // A non-`@pure` call may reassign a global, so it drops the global's
@@ -80,8 +92,7 @@ fn test() {
     t.0 = 99  // ERROR: Cannot assign through tuple index on nullable type
 }
 
-fn main() { test() }
-
+//--- USE: test_driver ---
 //=== TEST CASE: nullable_tuple_index_read_Generic ===
 //! expect: cannot index a non-tuple type (int, int)?
 fn maybe_tup() -> (int, int)? { (1, 2) }
@@ -103,8 +114,7 @@ fn test() {
     let v: V2 = make()  // ERROR: Type mismatch: found V2?, expected V2
 }
 
-fn main() { test() }
-
+//--- USE: test_driver ---
 //=== TEST CASE: nullable_value_call_as_arg_Generic ===
 //! expect: type mismatch: expected `V2`, found `V2?`
 value V2 { x: int, y: int }
@@ -116,8 +126,7 @@ fn test() {
     let r = use_v(make())  // ERROR: Type mismatch: found V2?, expected V2
 }
 
-fn main() { test() }
-
+//--- USE: test_driver ---
 //=== TEST CASE: nullable_value_field_unsafe_access_Generic ===
 //! expect: cannot access field `x` on non-struct type V2?
 value V2 { x: int, y: int }
@@ -128,8 +137,7 @@ fn test() {
     let r = make().x  // ERROR: Cannot use '.' to access field 'x' on nullable type
 }
 
-fn main() { test() }
-
+//--- USE: test_driver ---
 //=== TEST CASE: nested_guard_revokes_captured_local_Generic ===
 //! expect: S?
 value S { f: int? }
@@ -169,10 +177,7 @@ fn bad(h: H?) -> int {
 
 //=== TEST CASE: call_in_index_in_cond_Generic ===
 //! expect: got (int?, int)
-struct G { f: int? }
-global g: G = G { f: 1 }
-fn evil() -> int { g.f = null; return 0 }
-
+//--- USE: nullable_global ---
 fn bad(xs: [int]) -> int {
     if g.f != null && xs[evil()] == 0 { return g.f + 1 }
     return 0
@@ -180,10 +185,7 @@ fn bad(xs: [int]) -> int {
 
 //=== TEST CASE: call_in_interpolation_in_cond_Generic ===
 //! expect: got (int?, int)
-struct G { f: int? }
-global g: G = G { f: 1 }
-fn evil() -> int { g.f = null; return 0 }
-
+//--- USE: nullable_global ---
 fn bad() -> int {
     if g.f != null && "{evil()}" == "0" { return g.f + 1 }
     return 0
@@ -191,10 +193,7 @@ fn bad() -> int {
 
 //=== TEST CASE: call_in_cast_in_cond_Generic ===
 //! expect: got (int?, int)
-struct G { f: int? }
-global g: G = G { f: 1 }
-fn evil() -> int { g.f = null; return 0 }
-
+//--- USE: nullable_global ---
 fn bad() -> int {
     if g.f != null && (evil() as float) == 0.0 { return g.f + 1 }
     return 0
@@ -202,10 +201,7 @@ fn bad() -> int {
 
 //=== TEST CASE: call_in_match_in_cond_Generic ===
 //! expect: got (int?, int)
-struct G { f: int? }
-global g: G = G { f: 1 }
-fn evil() -> int { g.f = null; return 0 }
-
+//--- USE: nullable_global ---
 fn bad() -> int {
     if g.f != null && (match evil() { 0 => true, _ => false }) { return g.f + 1 }
     return 0
@@ -260,20 +256,12 @@ fn bad() -> int {
 //! expect: cannot access field `n` on non-struct type Payload?
 struct Payload { n: int }
 fn is_null(_value: Payload?) -> bool { false }
-fn bad(x: Payload?) -> int {
-    if !is_null(x) { return x.n }
-    return 0
-}
-
+//--- USE: refinement_probe ---
 //=== TEST CASE: pure_same_name_predicate_does_not_prove_nonnull_Generic ===
 //! expect: cannot access field `n` on non-struct type Payload?
 struct Payload { n: int }
 @pure fn is_null(_value: Payload?) -> bool { false }
-fn bad(x: Payload?) -> int {
-    if !is_null(x) { return x.n }
-    return 0
-}
-
+//--- USE: refinement_probe ---
 //=== TEST CASE: same_name_call_can_invalidate_a_path_Generic ===
 //! expect: got (int?, int)
 struct State { value: int? }

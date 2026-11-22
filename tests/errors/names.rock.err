@@ -1,3 +1,8 @@
+//=== PROLOGUE: print_driver ===
+fn main() {
+    print("hi")
+}
+
 //=== TEST CASE: same_signature_uncalled_DuplicateSymbol ===
 //! expect: duplicate definition of `t()`: already defined at test.rock:1
 @test(output = "1") fn t() { print(1) }
@@ -281,10 +286,7 @@ fn main() { let a = bar(1) let b = bar_int() }
 
 //=== TEST CASE: misplaced_mod_header_rejects ===
 //! expect: `mod path;` is a file header and must be the file's first item
-fn main() {
-    print("hi")
-}
-
+//--- USE: print_driver ---
 mod combat;
 
 //=== TEST CASE: second_mod_header_rejects ===
@@ -292,18 +294,12 @@ mod combat;
 mod combat;
 mod casting;
 
-fn main() {
-    print("hi")
-}
-
+//--- USE: print_driver ---
 //=== TEST CASE: use_as_underscore_rejects ===
 //! expect: `use ... as _` has no activation semantics in modules-v1
 use stone::engine as _;
 
-fn main() {
-    print("hi")
-}
-
+//--- USE: print_driver ---
 //=== TEST CASE: private_set_on_item_rejects ===
 //! expect: `private(set)` applies to stored struct fields, not to items
 private(set) fn main() {
@@ -318,10 +314,7 @@ macro emit_use() {
 
 emit_use()
 
-fn main() {
-    print("hi")
-}
-
+//--- USE: print_driver ---
 //=== TEST CASE: unterminated_single_quoted_string ===
 //! expect: unterminated string literal
 fn main() {

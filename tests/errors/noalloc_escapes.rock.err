@@ -1,3 +1,9 @@
+//=== PROLOGUE: binding_variants ===
+enum Binding {
+    Key { scan: string, ctrl: bool },
+    Mouse(int),
+}
+
 //=== TEST CASE: whole_struct_escape_Generic ===
 //! expect: boxes `Box`
 struct Box { w: int, h: int }
@@ -41,11 +47,7 @@ nobox value Event {
 
 //=== TEST CASE: escape_enum_into_vec_Generic ===
 //! expect: boxes `Binding`
-enum Binding {
-    Key { scan: string, ctrl: bool },
-    Mouse(int),
-}
-
+//--- USE: binding_variants ---
 struct Slot { binding: Binding }
 
 @noalloc fn copy(slots: [Slot]) -> [Binding] {
@@ -56,11 +58,7 @@ struct Slot { binding: Binding }
 
 //=== TEST CASE: match_enum_pair_Generic ===
 //! expect: boxes `Binding`
-enum Binding {
-    Key { scan: string, ctrl: bool },
-    Mouse(int),
-}
-
+//--- USE: binding_variants ---
 @noalloc fn retain_first(a: Binding, b: Binding) -> [Binding] {
     return match (a, b) { (first, _) => [first] }
 }
