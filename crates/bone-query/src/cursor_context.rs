@@ -131,16 +131,7 @@ fn enum_path_names(path: &Path) -> Option<(&skull_parser::ast::Ident, &skull_par
 }
 
 fn is_paren_call(syntax: &CallSyntax) -> bool {
-    matches!(
-        syntax,
-        CallSyntax::Normal
-            | CallSyntax::At
-            | CallSyntax::Macro
-            | CallSyntax::MethodMacro
-            | CallSyntax::AtMacro
-            | CallSyntax::AtMethodMacro
-            | CallSyntax::TypeArgs
-    )
+    matches!(syntax, CallSyntax::Normal | CallSyntax::At)
 }
 
 impl CursorAst {

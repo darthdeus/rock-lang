@@ -1390,37 +1390,11 @@ impl<'a> Printer<'a> {
                 syntax,
                 generic_args,
             } => match syntax {
-                CallSyntax::At | CallSyntax::AtMacro | CallSyntax::AtMethodMacro => {
-                    self.at_call(*func, generic_args, args, syntax, data.span)
-                }
+                CallSyntax::At => self.at_call(*func, generic_args, args, data.span),
                 CallSyntax::NoParens => Doc::concat([
                     self.expr(*func),
                     Doc::text(" "),
                     Doc::join(Doc::text(" "), args.iter().map(|a| self.expr(a.value))),
-                ]),
-                CallSyntax::Macro => Doc::concat([
-                    self.expr(*func),
-                    Doc::text("!"),
-                    self.call_args(args, data.span),
-                ]),
-                CallSyntax::MethodMacro if !args.is_empty() => {
-                    let method = self.ast.e(func).span;
-                    let own_span = data
-                        .span
-                        .with_line_range((method.line_range().0, data.span.line_range().1))
-                        .with_col_range((method.col_range().0, data.span.col_range().1))
-                        .with_offset_range((method.offset_range().0, data.span.offset_range().1));
-                    Doc::concat([
-                        self.receiver(args[0].value),
-                        Doc::text("."),
-                        self.expr(*func),
-                        Doc::text("!"),
-                        self.call_args(&args[1..], own_span),
-                    ])
-                }
-                CallSyntax::TypeArgs => Doc::concat([
-                    self.expr(*func),
-                    inline_comma_list("<", ">", args.iter().map(|a| self.expr(a.value))),
                 ]),
                 _ if !generic_args.is_empty() => {
                     self.generic_call(*func, generic_args, args, data.span)
@@ -1635,7 +1609,6 @@ impl<'a> Printer<'a> {
         func: Idx<ExprData>,
         generic_args: &[Idx<TypeExprData>],
         args: &[FunctionCallArg],
-        syntax: &CallSyntax,
         span: Span,
     ) -> Doc {
         let Some((lam, others)) = args.split_last() else {
@@ -1646,11 +1619,7 @@ impl<'a> Printer<'a> {
         };
         let body = *body;
         let f = self.ast.e(&func).span;
-        let written_args = match syntax {
-            CallSyntax::AtMethodMacro if !others.is_empty() => &others[1..],
-            _ => others,
-        };
-        let head_span = match written_args.last() {
+        let head_span = match others.last() {
             None => f,
             Some(last) => {
                 let last = self.ast.e(&last.value).span;
@@ -1666,24 +1635,12 @@ impl<'a> Printer<'a> {
                 )
             }
         };
-        let head = match syntax {
-            CallSyntax::AtMethodMacro if !others.is_empty() => Doc::concat([
-                self.receiver(others[0].value),
-                Doc::text("."),
-                self.expr(func),
-                Doc::text("!"),
-                self.call_args(written_args, head_span),
-            ]),
-            CallSyntax::AtMacro => Doc::concat([
-                self.expr(func),
-                Doc::text("!"),
-                self.call_args(written_args, head_span),
-            ]),
-            _ if !generic_args.is_empty() => {
-                self.generic_call(func, generic_args, others, head_span)
-            }
-            _ if others.is_empty() => self.expr(func),
-            _ => self.call(func, others, head_span),
+        let head = if !generic_args.is_empty() {
+            self.generic_call(func, generic_args, others, head_span)
+        } else if others.is_empty() {
+            self.expr(func)
+        } else {
+            self.call(func, others, head_span)
         };
         let rhs_expr = if self.block_has_braces(body) {
             None

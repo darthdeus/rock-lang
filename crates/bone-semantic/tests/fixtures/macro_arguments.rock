@@ -22,15 +22,3 @@ fn use_it() -> string {
     s
 }
 
-//- generic_ty_arg_via_sigil
-value Box1<T> { v: T }
-macro wrap(Name: ident, Elem: ty) {
-    struct Name { v: Elem }
-}
-wrap!(BoxHolder, Box1<int>)
-fn use_it() -> int {
-    let h = BoxHolder { v: Box1 { v: 9 } }
-    let inner = h.v.v
-        //^ int
-    inner
-}

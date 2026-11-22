@@ -30,27 +30,6 @@ fn f() {
     x = -y
 }
 
-//- macro_call_bang_is_kept
-fn f() {
-    let a = m!(1, 2)
-    let a = m!()
-    let b = x.m!(a)
-    let b = x.m!()
-    let b = x.y.m!(a, 2)
-    let b = f(1).m!(a)
-    let c = x.m!(a).n!(b).k!()
-    let c = x.m!(a).n(b).k!()
-    let c = x.n(b).m!(a)
-    let d = m!(Foo<int>, [int], (int, string), int?)
-    let d = m!(Map<int, Box<int>>)
-    let e = x.m!(Map<int, string>)
-    let e = x.m!([Box<int>])
-    let f = m!(n!(1), x.k!(2))
-    let f = m!(x.n!(Foo<int>))
-    let g = m!(...rest)
-    let h = x.m!(a) + n!(b)
-}
-
 //- comment_after_a_dollar_call_stays_on_the_statement
 fn f() {
     assert $ g(x) // why
@@ -106,22 +85,6 @@ fn f() {
     print(1)
 }
 
-//- at_form_keeps_the_macro_sigil
-fn f() {
-    m!(1) @ print(1)
-    m!() @ x
-    m!(Pair<int, int>, [int]) @ {
-        print(1)
-        print(2)
-    }
-    o.m!(1) @ print(1)
-    o.m!() @ x
-    o.m!(Pair<int, int>) @ {
-        print(1)
-        print(2)
-    }
-}
-
 //- at_form_keeps_explicit_generic_arguments
 fn f() {
     g<int>(1) @ print(1)
@@ -166,9 +129,9 @@ macro sum_of(x: expr, rest: expr...) -> int {
 }
 
 //- call_splat_in_a_macro_call
-macro fwd(rest: ...expr) -> int { sum_of!(...rest) }
+macro fwd(rest: ...expr) -> int { sum_of(...rest) }
 //=== EXPECTED ===
-macro fwd(rest: expr...) -> int { sum_of!(...rest) }
+macro fwd(rest: expr...) -> int { sum_of(...rest) }
 
 //- call_splat_after_an_argument
 fn f(xs: ...int) {

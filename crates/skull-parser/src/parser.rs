@@ -872,126 +872,15 @@ impl<'a> Parser<'a> {
 
     fn parse_top_level_invocation(&mut self) -> PResult<ItemKind> {
         let name = self.expect_ident()?;
-        let sigil = self.eat(TokenKind::Bang);
+        if self.kind() == TokenKind::Bang {
+            return Err(self.err("bang-sigil macro calls are not supported"));
+        }
         self.expect(TokenKind::OpenParen)?;
-        let args = self.parse_comma_list(TokenKind::CloseParen, |p| p.parse_macro_arg(sigil))?;
-        self.expect(TokenKind::CloseParen)?;
-        Ok(ItemKind::MacroInvocation { name, args, sigil })
-    }
-
-    fn parse_sigil_call(
-        &mut self,
-        func: Idx<ExprData>,
-        receiver: Option<Idx<ExprData>>,
-    ) -> PResult<Idx<ExprData>> {
-        let start = self.ast.exprs[receiver.unwrap_or(func)].span;
-        self.expect(TokenKind::OpenParen)?;
-        self.delimiter_depth += 1;
-        let mut args = self.parse_comma_list(TokenKind::CloseParen, |p| {
-            let is_splat = p.eat(TokenKind::TripleDot);
-            Ok(FunctionCallArg {
-                is_splat,
-                ..FunctionCallArg::positional(p.parse_macro_arg(true)?)
-            })
+        let args = self.parse_comma_list(TokenKind::CloseParen, |p| {
+            p.with_allow_literals(true, |p| p.parse_expr(0))
         })?;
-        self.delimiter_depth -= 1;
         self.expect(TokenKind::CloseParen)?;
-        let syntax = if let Some(receiver) = receiver {
-            args.insert(0, FunctionCallArg::positional(receiver));
-            CallSyntax::MethodMacro
-        } else {
-            CallSyntax::Macro
-        };
-        Ok(self.ast.expr(
-            self.span_from(start),
-            ExprKind::FunctionCall {
-                func,
-                generic_args: Vec::new(),
-                args,
-                syntax,
-            },
-        ))
-    }
-
-    fn parse_macro_arg(&mut self, sigil: bool) -> PResult<Idx<ExprData>> {
-        if !sigil {
-            return self.with_allow_literals(true, |p| p.parse_expr(0));
-        }
-        // A type-shaped parse must end at an argument boundary; otherwise
-        // `(a < b)` can be mistaken for a generic.
-        let saved = self.pos;
-        if let Ok(e) = self.parse_sigil_type_arg() {
-            if matches!(
-                self.kind(),
-                TokenKind::Comma
-                    | TokenKind::CloseParen
-                    | TokenKind::CloseSquare
-                    | TokenKind::GreaterThan
-                    | TokenKind::RightShift
-            ) {
-                return Ok(e);
-            }
-        }
-        self.pos = saved;
-        self.with_allow_literals(true, |p| p.parse_expr(0))
-    }
-
-    fn parse_sigil_type_arg(&mut self) -> PResult<Idx<ExprData>> {
-        let start = self.span();
-        let mut e = self.parse_sigil_atom()?;
-        while self.kind() == TokenKind::QuestionMark {
-            self.advance();
-            let span = self.span_from(start);
-            e = self.ast.expr(span, ExprKind::QuestionMark(e));
-        }
-        Ok(e)
-    }
-
-    fn parse_sigil_atom(&mut self) -> PResult<Idx<ExprData>> {
-        let start = self.span();
-        match self.kind() {
-            TokenKind::Ident(name) if self.peek_kind() == TokenKind::LessThan => {
-                self.advance(); // name
-                self.advance(); // `<`
-                let func = self
-                    .ast
-                    .expr(start, ExprKind::Ident(Ident { span: start, name }));
-                let args = self.parse_bare_comma_list(TokenKind::GreaterThan, |p| {
-                    p.parse_macro_arg(true).map(FunctionCallArg::positional)
-                })?;
-                self.expect_generic_close()?;
-                let span = self.span_from(start);
-                Ok(self.ast.expr(
-                    span,
-                    ExprKind::FunctionCall {
-                        func,
-                        generic_args: Vec::new(),
-                        args,
-                        syntax: CallSyntax::TypeArgs,
-                    },
-                ))
-            }
-            open @ (TokenKind::OpenSquare | TokenKind::OpenParen) => {
-                self.advance();
-                let close = if open == TokenKind::OpenSquare {
-                    TokenKind::CloseSquare
-                } else {
-                    TokenKind::CloseParen
-                };
-                let elems = self.parse_bare_comma_list(close, |p| p.parse_macro_arg(true))?;
-                self.expect(close)?;
-                let span = self.span_from(start);
-                let kind = if open == TokenKind::OpenSquare {
-                    ExprKind::ArrayLiteral(elems)
-                } else if elems.len() == 1 {
-                    ExprKind::Paren(elems[0])
-                } else {
-                    ExprKind::Tuple(elems)
-                };
-                Ok(self.ast.expr(span, kind))
-            }
-            _ => self.with_allow_literals(true, |p| p.parse_expr(26)),
-        }
+        Ok(ItemKind::MacroInvocation { name, args })
     }
 
     fn parse_extern_specifier(&mut self) -> PResult<FunctionBody> {
@@ -2272,20 +2161,7 @@ impl<'a> Parser<'a> {
             }
 
             if op == TokenKind::Bang && self.peek_kind() == TokenKind::OpenParen {
-                let callee = match &self.ast.exprs[left].kind {
-                    ExprKind::Ident(_) => Some((left, None)),
-                    ExprKind::FieldAccess(receiver, method) => {
-                        let receiver = *receiver;
-                        let func = self.ast.expr(method.span, ExprKind::Ident(method.clone()));
-                        Some((func, Some(receiver)))
-                    }
-                    _ => None,
-                };
-                if let Some((func, receiver)) = callee {
-                    self.advance(); // `!`
-                    left = self.parse_sigil_call(func, receiver)?;
-                    continue;
-                }
+                return Err(self.err("bang-sigil macro calls are not supported"));
             }
 
             if op == TokenKind::LessThan
@@ -2609,11 +2485,7 @@ impl<'a> Parser<'a> {
             let new_span = self.node_span(left, body_span);
             if let ExprKind::FunctionCall { args, syntax, .. } = &mut self.ast.exprs[left].kind {
                 args.push(lambda_arg);
-                *syntax = match syntax {
-                    CallSyntax::Macro => CallSyntax::AtMacro,
-                    CallSyntax::MethodMacro => CallSyntax::AtMethodMacro,
-                    _ => CallSyntax::At,
-                };
+                *syntax = CallSyntax::At;
             }
             self.ast.exprs[left].span = new_span;
             Ok(left)

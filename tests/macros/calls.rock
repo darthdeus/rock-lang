@@ -1,0 +1,235 @@
+macro emit_zero(Name: ident) {
+    fn Name() -> int { return 0 }
+}
+
+emit_zero(zero_a)
+emit_zero(zero_b,)  // trailing comma
+
+macro decl3(A: ident, B: ident, C: ident) {
+    fn A() -> int { return 1 }
+    fn B() -> int { return 2 }
+    fn C() -> int { return 3 }
+}
+
+decl3(
+    multiline_a,  // first arg on its own line
+    multiline_b,  // trailing comment after comma
+    multiline_c   // last arg, no trailing comma
+)
+
+macro answer() { 42 }
+
+@test
+fn test_arg_list_edges() {
+    assert(zero_a() == 0, "no trailing comma")
+    assert(zero_b() == 0, "trailing comma")
+    assert(multiline_a() == 1, "multi-line arg 1")
+    assert(multiline_b() == 2, "multi-line arg 2")
+    assert(multiline_c() == 3, "multi-line arg 3")
+    assert(answer() == 42, "macro call with zero args")
+}
+
+// === Mixed `ty` + `expr` fragments in one macro call ===
+
+macro decl_with_init(Name: ident, Elem: ty, init: expr) {
+    struct Name { v: Elem = init }
+}
+
+decl_with_init(MixA, int, 7)
+decl_with_init(MixB, string, "hi")
+
+@test
+fn test_mixed_ty_expr_args() {
+    let a = MixA { }
+    let b = MixB { }
+    assert(a.v == 7, "ty=int, expr=7")
+    assert(b.v == "hi", "ty=string, expr=\"hi\"")
+}
+
+// === Nested macro calls and macro calls in other expressions ===
+
+macro doubl(x: expr) { x * 2 }
+macro tripl(x: expr) { x * 3 }
+
+fn add(x: int, y: int) -> int { return x + y }
+
+@test
+fn test_nested_macro_calls() {
+    assert(doubl(tripl(5)) == 30, "doubl(tripl(5)) == 30")
+    assert(doubl(doubl(doubl(1))) == 8, "triple-nested macro")
+    let xs = [1, 2, 3]
+    assert(doubl(xs.len()) == 6, "macro arg accepts a method chain")
+    assert(add(doubl(3), tripl(2)) == 12, "macro call as regular fn arg")
+    let ys = [doubl(1), doubl(2), doubl(3)]
+    assert(ys[0] + ys[1] + ys[2] == 12, "macro calls inside array literal")
+}
+
+// === UFCS macro ===
+
+macro inc(x: expr) -> int { x + 1 }
+
+macro macro_lerp(a: expr, b: expr, t: expr) {
+    a + (b - a) * t
+}
+
+@test
+fn test_ufcs_macro() {
+    assert((((1).inc()).inc()).inc() == 4, "chained UFCS macro increments")
+    assert((10).macro_lerp(20, 1) == 20, "x.macro_lerp(b, t) == macro_lerp(x, b, t)")
+    assert(((2 + 3)).inc() == 6, "(complex).inc() applies to whole expression")
+}
+
+// Macro params are fragment kinds, so the receiver's type is irrelevant.
+macro tagged(x: expr, label: expr) -> string {
+    "{label}: {x}"
+}
+
+@test
+fn test_ufcs_macro_receiver_types() {
+    assert((42).tagged("answer") == "answer: 42", "int receiver")
+    assert("hello".tagged("greeting") == "greeting: hello", "string receiver")
+    assert(true.tagged("flag") == "flag: true", "bool receiver")
+    assert(inc(10).tagged("res") == "res: 11", "macro result feeds UFCS macro receiver")
+}
+
+// `Container: ident` substitutes into the StructLiteral name slot, which
+// only accepts Ident-shaped types; inference picks the type arg.
+struct Box4<T> { v: T }
+
+macro store_in(receiver: expr, Container: ident) {
+    Container { v: receiver }
+}
+
+@test
+fn test_ufcs_with_ident_type_arg() {
+    let r = (5).store_in(Box4)
+    assert(r.v == 5, "x.store_in(Box4) == store_in(x, Box4)")
+}
+
+// === Block expression as macro arg (falls through to parse_expr) ===
+
+macro pick(x: expr) { x }
+
+@test
+fn test_block_expr_as_macro_arg() {
+    assert(pick({ let y = 7; y + 1 }) == 8, "single-line block arg")
+    let r = pick({
+        let x = 7
+        let y = 3
+        x + y
+    })
+    assert(r == 10, "multi-line block arg")
+}
+
+// === Parenthesized comparison ===
+
+@test
+fn test_paren_comparison_in_macro_arg() {
+    let a = 3
+    let b = 7
+    let r = pick((a < b))
+    assert(r == true, "paren-wrapped comparison stays an expression")
+}
+
+// === Hygiene through prefix and UFCS macro ===
+
+macro with_local(x: expr) {
+    let __hyg_witness = x + 100
+    __hyg_witness
+}
+
+@test
+fn test_hygiene_through_macro() {
+    let __hyg_witness = 1
+    assert(with_local(5) == 105, "macro local renamed")
+    assert(__hyg_witness == 1, "outer local untouched after macro call")
+    assert((5).with_local() == 105, "UFCS macro expansion renames macro body local")
+    assert(__hyg_witness == 1, "outer local untouched after UFCS macro")
+}
+
+// === Ordinary function calls ===
+
+fn plain_fn(x: int) -> int { return x + 100 }
+
+@test
+fn test_regular_fn_calls() {
+    assert(plain_fn(5) == 105, "regular function call")
+    assert((5).plain_fn() == 105, "UFCS function call")
+}
+
+// === Expansion produces a struct literal ===
+
+macro pair_struct(a: expr, b: expr) {
+    Pair3 { left: a, right: b }
+}
+
+struct Pair3 { left: int, right: int }
+
+@test
+fn test_macro_returns_struct_literal() {
+    let p = pair_struct(3, 4)
+    assert(p.left == 3 && p.right == 4, "macro expansion produces struct literal")
+}
+
+// === Item emission through macro ===
+
+macro emit_noop_fn(Name: ident) {
+    fn Name() { }
+}
+
+emit_noop_fn(noop_a)
+
+// Binder and recursive call in the emitted body must agree after splice.
+macro mk_factorial(Name: ident) {
+    fn Name(n: int) -> int {
+        if n <= 1 { return 1 }
+        return n * Name(n - 1)
+    }
+}
+
+mk_factorial(my_fact)
+
+@test
+fn test_macro_emitted_fns() {
+    noop_a()
+    assert(my_fact(5) == 120, "5! via macro-emitted self-recursive fn")
+    assert(my_fact(0) == 1, "0! base case")
+}
+
+// === A macro body emitting another macro call (resolved on re-expansion) ===
+
+macro outer_quad(v: expr) {
+    doubl(doubl(v))
+}
+
+@test
+fn test_macro_emits_macro_call() {
+    assert(outer_quad(5) == 20, "outer_quad expansion runs doubl twice")
+}
+
+// === Variadic dispatch and splat forwarding ===
+
+macro sum_of() -> int { 0 }
+macro sum_of(x: expr, rest: ...expr) -> int { x + sum_of(...rest) }
+
+macro fwd_two(a: expr, b: expr) -> int {
+    sum_of(a, b)
+}
+
+@test
+fn test_variadic_macro() {
+    assert(sum_of(10, 20, 30) == 60, "variadic macro composes")
+    assert(sum_of(7) == 7, "variadic macro with single arg")
+    assert(fwd_two(10, 20) == 30, "fixed-shape forwarder into variadic works")
+}
+
+macro fwd_sugar_splat(rest: ...expr) -> int { sum_of(...rest) }
+macro fwd_two_layer(rest: ...expr) -> int { fwd_sugar_splat(...rest) }
+
+@test
+fn test_splat_passthrough() {
+    assert(fwd_sugar_splat(1, 2, 3) == 6, "sugar passthrough")
+    assert(fwd_two_layer(1, 2, 3, 4) == 10, "two-layer splat passthrough")
+    assert(fwd_sugar_splat() == 0, "empty rest dispatches to 0-arg overload")
+}
+

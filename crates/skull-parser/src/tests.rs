@@ -97,6 +97,11 @@ fn malformed_source_is_rejected_with_its_diagnostic() {
         ("private(set) fn f() {}", "fields"),
         ("pub(super) fn f() {}", "unknown visibility qualifier"),
         ("pub(in a) fn f() {}", "unknown visibility qualifier"),
+        (
+            "fn f() { foo!(1) }",
+            "bang-sigil macro calls are not supported",
+        ),
+        ("foo!(1)", "bang-sigil macro calls are not supported"),
         ("fn f<T: >() {}", ""),
         ("fn f<T = >() {}", ""),
         (

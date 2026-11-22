@@ -81,7 +81,7 @@ holder(pkg)
 
 macro generic_holder(Type: ty) { value GenericHolder { item: Type } }
 
-generic_holder!(pkg::Payload)
+generic_holder(pkg::Payload)
 
 macro typed_cell() -> pkg::Cell<int> { pkg::Cell { value: 5 } }
 

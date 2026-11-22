@@ -26,18 +26,6 @@ pub enum CallSyntax {
     At,
     /// Semantically `Normal`, but preserves the no-parens spelling.
     NoParens,
-    /// Sigil macro call `name!(args)`. Resolves like `Normal`; kept so the
-    /// formatter re-emits the `!` that enables type-shaped arg parsing.
-    Macro,
-    /// `recv.name!(args)` parses as `name(recv, args)`.
-    MethodMacro,
-    /// `name!(args) @ rhs`: a `Macro` call that took a trailing `@` lambda.
-    AtMacro,
-    /// `recv.name!(args) @ rhs`: a `MethodMacro` call that took a trailing `@`
-    /// lambda.
-    AtMethodMacro,
-    /// `Name<A, B>` parses as a call so its type can be recovered.
-    TypeArgs,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -746,13 +734,11 @@ pub enum ItemKind {
     /// `mod x { .. }`; reopening a module adds a fragment.
     Module(ModBlock),
     Use(UseDecl),
-    /// A top-level macro invocation `name(args)` / `name!(args)` (sigil enables
-    /// type-shaped args). Expansion replaces it with the macro's spliced items
+    /// A top-level macro invocation. Expansion replaces it with the macro's spliced items
     /// (item-macro) or drops it; it never survives into a cooked module.
     MacroInvocation {
         name: Ident,
         args: Vec<Idx<ExprData>>,
-        sigil: bool,
     },
 }
 
