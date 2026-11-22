@@ -49,11 +49,6 @@ impl ModuleSet {
         }
     }
 
-    /// A set of modules all owned, with no shared prefix.
-    pub fn owned(modules: Vec<Ast>) -> Self {
-        Self::new(Arc::from([]), modules)
-    }
-
     /// The shared prefix (empty once [`Self::make_owned`] ran).
     pub fn shared(&self) -> &Arc<[Ast]> {
         &self.shared
@@ -64,22 +59,9 @@ impl ModuleSet {
         &self.owned
     }
 
-    /// Append an owned module.
-    pub fn push(&mut self, module: Ast) {
-        self.owned.push(module);
-    }
-
     /// Every module, the shared prefix first.
     pub fn iter(&self) -> std::iter::Chain<std::slice::Iter<'_, Ast>, std::slice::Iter<'_, Ast>> {
         self.shared.iter().chain(&self.owned)
-    }
-
-    pub fn len(&self) -> usize {
-        self.shared.len() + self.owned.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 
     /// Every module as one owned slice, copying the shared prefix in on the
@@ -87,7 +69,7 @@ impl ModuleSet {
     pub fn make_owned(&mut self) -> &mut [Ast] {
         if !self.shared.is_empty() {
             use rayon::prelude::*;
-            let mut all = Vec::with_capacity(self.len());
+            let mut all = Vec::with_capacity(self.shared.len() + self.owned.len());
             self.shared.par_iter().cloned().collect_into_vec(&mut all);
             all.append(&mut self.owned);
             self.owned = all;
@@ -105,15 +87,6 @@ impl ModuleSet {
     pub fn into_vec(mut self) -> Vec<Ast> {
         self.make_owned();
         self.owned
-    }
-}
-
-impl<'a> IntoIterator for &'a ModuleSet {
-    type Item = &'a Ast;
-    type IntoIter = std::iter::Chain<std::slice::Iter<'a, Ast>, std::slice::Iter<'a, Ast>>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter()
     }
 }
 
