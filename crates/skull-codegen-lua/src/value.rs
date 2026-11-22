@@ -186,13 +186,28 @@ impl Emitter<'_> {
                 }
                 out.push('{');
                 let layout = nominal.and_then(|name| self.ctx.record_slots.get(&name));
-                let positional = layout
-                    .is_some_and(|layout| fields.iter().map(|(name, _)| name).eq(&layout.fields));
-                for (i, (name, id)) in fields.iter().enumerate() {
-                    if i > 0 {
-                        out.push_str(", ");
+                if let Some((slots, named)) =
+                    layout.and_then(|layout| self.slot_order(layout, fields))
+                {
+                    for (i, id) in slots.into_iter().enumerate() {
+                        if i > 0 {
+                            out.push_str(", ");
+                        }
+                        match id {
+                            Some(id) => self.write_opnd(out, id),
+                            None => out.push_str("nil"),
+                        }
                     }
-                    if !positional {
+                    for (name, id) in named {
+                        out.push_str(", ");
+                        write_table_key(out, name.as_str());
+                        self.write_opnd(out, *id);
+                    }
+                } else {
+                    for (i, (name, id)) in fields.iter().enumerate() {
+                        if i > 0 {
+                            out.push_str(", ");
+                        }
                         if let Some(slot) = layout.and_then(|layout| layout.slots.get(name)) {
                             out.push('[');
                             push_uint(out, *slot);
@@ -200,8 +215,8 @@ impl Emitter<'_> {
                         } else {
                             write_table_key(out, name.as_str());
                         }
+                        self.write_opnd(out, *id);
                     }
-                    self.write_opnd(out, *id);
                 }
                 out.push('}');
                 if let Some(name) = nominal {

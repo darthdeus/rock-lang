@@ -92,6 +92,36 @@ impl CodegenCtx {
 }
 
 impl Emitter<'_> {
+    /// A record literal's operands by slot, `None` where the literal leaves a
+    /// slot absent, then the fields that have no slot. Positional entries keep
+    /// every slot in the table's array part; keyed ones would land in its hash
+    /// part. `None` when reordering would swap two operands that can fail.
+    pub(super) fn slot_order<'f>(
+        &self,
+        layout: &RecordLayout,
+        fields: &'f [(Ustr, Idx<Inst>)],
+    ) -> Option<(Vec<Option<Idx<Inst>>>, Vec<&'f (Ustr, Idx<Inst>)>)> {
+        let mut slots = vec![None; layout.fields.len()];
+        let mut named = Vec::new();
+        let mut last = 0;
+        let mut in_order = true;
+        for field in fields {
+            let Some(&slot) = layout.slots.get(&field.0) else {
+                named.push(field);
+                last = usize::MAX;
+                continue;
+            };
+            let slot = slot as usize;
+            if slots[slot - 1].replace(field.1).is_some() {
+                return None;
+            }
+            in_order &= slot > last;
+            last = slot;
+        }
+        let effects = fields.iter().filter(|(_, id)| self.folds_effect(*id));
+        (in_order || effects.count() <= 1).then_some((slots, named))
+    }
+
     pub(super) fn record_slot(&self, kind: ContainerKind, index: Idx<Inst>) -> Option<u32> {
         let ContainerKind::Record(Some(owner)) = kind else {
             return None;

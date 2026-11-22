@@ -27,3 +27,40 @@ print('ok')
         "ok"
     );
 }
+
+// Keyed constructor entries land in a Lua table's hash part, where every slot
+// read costs a hash lookup and two trace constants instead of an array load.
+#[test]
+fn a_record_literal_with_absent_embedded_leaves_fills_every_slot_in_order() {
+    let lua = emit_module(
+        r#"
+struct Spot { x: int, y: int }
+struct Nav { embed from: Spot?, embed next: Spot?, decision: int }
+struct Holder { name: string, embed nav: Nav?, flag: bool, extra: int? }
+fn make_bare(name: string) -> Holder {
+    Holder { name, nav: null, flag: true, extra: null }
+}
+fn make_full(name: string, x: int) -> Holder {
+    Holder { name, nav: Nav { from: null, next: Spot { x, y: 2 }, decision: 3 }, flag: false, extra: x }
+}
+fn describe(h: Holder) -> string {
+    "{h.name} {h.nav?.next?.x} {h.nav?.decision} {h.flag} {h.extra}"
+}
+@nomangle fn holder_report() -> string {
+    "{describe(make_bare("a"))}|{describe(make_full("b", 5))}"
+}
+"#,
+    );
+    for name in ["make_bare", "make_full"] {
+        let body = function_body(&lua, name);
+        assert!(!body.contains("[1] ="), "{name} keys its slots:\n{body}");
+    }
+    assert_eq!(
+        run_luajit(&format!(
+            r#"{lua}
+print(holder_report())
+"#
+        )),
+        "a nil nil true nil|b 5 3 false 5"
+    );
+}
