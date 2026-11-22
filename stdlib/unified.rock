@@ -1645,9 +1645,21 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
 """
 
 @intrinsic @relocates inline(lua) fn __vec_data_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
-    table.sort(vec, function(a, b)
-        return key_fn(a) < key_fn(b)
-    end)
+    local outer = __rock_sort_key
+    __rock_sort_key = key_fn
+    table.sort(vec, __rock_sort_by_key)
+    __rock_sort_key = outer
+"""
+
+// One shared comparator, so a sort allocates no closure (FNEW also aborts
+// traces). A sort inside a key function can raise and be caught before the key
+// returns, leaving its own key installed; re-installing ours after each key
+// call keeps the rest of this sort on the right key.
+@nomangle inline(lua) fn __rock_sort_by_key(a: any, b: any) -> bool = """
+    local key = __rock_sort_key
+    local ka, kb = key(a), key(b)
+    __rock_sort_key = key
+    return ka < kb
 """
 
 // `len` is passed in: a nullable field's column holds real nils, and `#` on a

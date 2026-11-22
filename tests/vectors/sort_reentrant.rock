@@ -1,0 +1,32 @@
+// A key function may sort, and an error raised inside that inner sort may be
+// caught before the key returns. The outer sort must keep its own key.
+
+@test
+fn sort_keeps_its_key_after_a_caught_inner_sort_error() {
+    let values = [5, 3, 1, 4, 2]
+    let caught = 0
+    values.sort((x: int) => {
+        let inner = [2, 1]
+        let trace = protected_run(() => {
+            inner.sort((y: int) => {
+                if y > 0 { error("inner key failed") }
+                return y
+            })
+        })
+        if trace != null { caught += 1 }
+        return x
+    })
+    assert_eq(values, [1, 2, 3, 4, 5])
+    assert(caught > 0)
+}
+
+@test
+fn sort_keeps_its_key_after_a_completed_inner_sort() {
+    let values = [3, 1, 2]
+    values.sort((x: int) => {
+        let inner = [x, -x]
+        inner.sort((y: int) => y)
+        return inner[1]
+    })
+    assert_eq(values, [1, 2, 3])
+}
