@@ -387,6 +387,8 @@ if not _G.__ROCK_NB_OFFHEAP_CYCLE_HARD then _G.__ROCK_NB_OFFHEAP_CYCLE_HARD = 10
 -- between two such bursts (seconds of os.clock): at most an eighth of the
 -- program's time while the guard is engaged.
 local __rock_nb_step_seconds, __rock_nb_step_interval = 0.0005, 0.004
+-- Windows LuaJIT may not expose the CRT allocator through its default namespace.
+local __rock_nb_crt = ffi.os == "Windows" and ffi.load("ucrtbase") or ffi.C
 local __rock_nb_elems = {}
 -- ffi.gc keeps a callback alive until its buffers are finalized. Weak values
 -- let unused sizes disappear without making their buffers reachable.
@@ -397,7 +399,7 @@ local function __rock_nb_finalizer(stats, bytes)
   return function(dead)
     stats.live_bytes = stats.live_bytes - bytes
     stats.live_count = stats.live_count - 1
-    ffi.C.free(dead)
+    __rock_nb_crt.free(dead)
   end
 end
 function __rock_nb_alloc(ctype, n)
@@ -433,7 +435,7 @@ function __rock_nb_alloc(ctype, n)
       end
     end
   end
-  local raw = ffi.C.calloc(n, e.size)
+  local raw = __rock_nb_crt.calloc(n, e.size)
   if raw == nil then error("not enough memory", 2) end
   local finalize = __rock_nb_finalizers[bytes]
   if not finalize then
