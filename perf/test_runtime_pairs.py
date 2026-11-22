@@ -9,7 +9,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from runtime_pairs import INSTRUCTION_PROBE, instructions_per_frame, main, measure, summarize
+from runtime_pairs import INSTRUCTION_PROBE, instructions_per_frame, main, measure, samples, summarize
 
 
 def pairs(deltas, work=1):
@@ -45,6 +45,57 @@ class RuntimePairTests(unittest.TestCase):
             report["measurement"]["completed_frames"] = 10
             with self.assertRaisesRegex(ValueError, "incomplete"):
                 instructions_per_frame(report, path)
+
+    def test_late_window_uses_only_the_frames_covered_by_the_allocator(self):
+        report = {
+            "run": dict.fromkeys(("drawable", "sections", "seed", "bloom", "fx_off",
+                                  "present_sync", "gpu_scopes")) | {"jit": "on test"},
+            "scenario": {"name": "idle", "phase": "steady", "warmup_frames": 20,
+                         "scene": "test", "complete": True},
+            "measurement": {"termination": "window_complete", "completed_frames": 8},
+            "stalls": {"window": {"start_frame": 30}},
+            "memory": {"gc_window": {
+                "valid": True, "start_frame": 32, "measured_frames": 3,
+                "allocation_calls": 5, "reallocation_calls": 2,
+                "allocation_split": {"available": True, **{
+                    lane: {"request_bytes": size}
+                    for lane, size in (("mutator", 50), ("jit_internal", 20), ("gc", 10))
+                }},
+                "jit_trace": {"available": True, "aborts": 4, "compiles": 3, "flushes": 0},
+            }},
+            "frame_records": {"columns": ["frame", "frame_ms", "thread_cpu_ms", "present_ms"],
+                              "rows": [[i, i, i, i] for i in range(30, 38)]},
+            "section_window": {"sections": []},
+            "graphics": dict.fromkeys(("draw_calls", "stream_upload_bytes", "retained_upload_bytes"), 0),
+        }
+        metrics, _, _ = samples(report, 8, [], (32, 3))
+        self.assertEqual(metrics["frame_ms_p50"], 35)
+        self.assertEqual(metrics["frame_ms_p99"], 36)
+        self.assertEqual(metrics["jit_compiles"], 3)
+        with self.assertRaisesRegex(ValueError, "allocation window"):
+            samples(report, 8, [], (31, 3))
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "instructions"
+            path.write_text("30\n20\n30\n40\n50\n100\n200\n300\n400\n")
+            self.assertEqual(instructions_per_frame(report, path, (32, 3)), 100)
+
+    def test_mutator_requests_exclude_compilation_and_gc(self):
+        from runtime_pairs import allocation_requests_by_origin
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "sites.tsv"
+            path.write_text("rock-sites-v1\t0\n"
+                            "count\t0\t0\t0\t0\t2\t20\n"
+                            "count\t0\t1\t0\t0\t1\t10\n"
+                            "count\t0\t2\t0\t0\t2\t20\n"
+                            "count\t0\t4\t0\t0\t99\t0\n"
+                            "count\t0\t6\t0\t0\t1\t20\n"
+                            "count\t0\t7\t0\t0\t1\t10\n")
+            metrics = dict(alloc_requests=7, alloc_bytes=80, mutator_bytes=50, jit_bytes=20)
+            self.assertEqual(allocation_requests_by_origin(path, metrics),
+                             {"mutator_requests": 5, "jit_requests": 1, "alloc_gc_requests": 1})
+            with self.assertRaisesRegex(ValueError, "reconcile"):
+                allocation_requests_by_origin(path, metrics | {"alloc_requests": 6})
 
     def test_candidate_lua_must_match_its_first_run(self):
         with TemporaryDirectory() as directory:

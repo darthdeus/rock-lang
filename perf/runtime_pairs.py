@@ -11,6 +11,7 @@ import subprocess
 import sys
 
 from compare import median_interval
+from site_diff import EVENTS, read_capture
 
 
 ALLOC_START = 100
@@ -56,23 +57,40 @@ def sha256_file(path):
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
-def samples(report, frames, work_names):
+def frame_interval(report, late_window):
+    start = report["stalls"]["window"]["start_frame"]
+    frames = report["measurement"]["completed_frames"]
+    if late_window is None:
+        return start + 1, start + frames
+    gc_start, length = late_window
+    # With positive warmup, the warmup-closing frame skips the allocator's
+    # frame increment. Accounting starts at the end of the next matching frame.
+    first = gc_start + 2
+    end = first + length
+    if not start < first < end < start + frames:
+        raise ValueError("late window must fit inside the measured frame records")
+    return first, end
+
+
+def samples(report, frames, work_names, late_window=None):
     run = report["run"]
     measurement = report["measurement"]
     gc = report["memory"]["gc_window"]
     trace = gc["jit_trace"]
+    gc_start, gc_frames = late_window or (ALLOC_START, frames - ALLOC_START)
     if (not run["jit"].startswith("on ") or not report["scenario"]["complete"]
             or measurement["termination"] != "window_complete"
             or measurement["completed_frames"] != frames
-            or not gc["valid"] or gc["measured_frames"] != frames - ALLOC_START
+            or not gc["valid"] or gc["measured_frames"] != gc_frames
+            or (late_window and gc["start_frame"] != gc_start)
             or not trace["available"]):
         raise ValueError("expected a complete JIT-on frame and allocation window")
 
-    start = report["stalls"]["window"]["start_frame"]
+    start, end = frame_interval(report, late_window)
     records = report["frame_records"]
     frame = records["columns"].index("frame")
-    rows = [row for row in records["rows"] if row[frame] > start]
-    if len(rows) != frames - 1:
+    rows = [row for row in records["rows"] if start <= row[frame] < end]
+    if len(rows) != end - start:
         raise ValueError("incomplete frame records")
 
     split = gc["allocation_split"]
@@ -87,6 +105,8 @@ def samples(report, frames, work_names):
     if split["available"]:
         metrics["mutator_bytes"] = split["mutator"]["request_bytes"]
         metrics["jit_bytes"] = split["jit_internal"]["request_bytes"]
+    if late_window:
+        metrics["jit_compiles"] = trace["compiles"]
     for column in ("frame_ms", "thread_cpu_ms", "present_ms"):
         index = records["columns"].index(column)
         values = [row[index] for row in rows]
@@ -107,16 +127,41 @@ def samples(report, frames, work_names):
     return metrics, {name: work[name] for name in work_names}, settings
 
 
-def instructions_per_frame(report, path):
+def instructions_per_frame(report, path, late_window=None):
     first, *counts = map(int, path.read_text().splitlines())
-    start = report["stalls"]["window"]["start_frame"] + 1
-    end = start + report["measurement"]["completed_frames"] - 2
+    start, end = frame_interval(report, late_window)
+    if late_window is None:
+        end -= 1
     if not (first <= start < end < first + len(counts)):
         raise ValueError("incomplete retired-instruction window")
     before, after = counts[start - first], counts[end - first]
     if not 0 < before < after:
         raise ValueError("invalid Darwin retired-instruction counters")
     return (after - before) / (end - start)
+
+
+def allocation_requests_by_origin(path, metrics):
+    _, _, _, counts = read_capture(path)
+    requests = dict.fromkeys(("mutator_requests", "jit_requests", "alloc_gc_requests"), 0)
+    mutator_bytes = jit_bytes = total_bytes = 0
+    for _, kind, _, _, count, size in counts:
+        event = EVENTS[kind]
+        if event in ("interpreter", "trace", "restored"):
+            requests["mutator_requests"] += count
+            mutator_bytes += size
+        elif event == "compiler":
+            requests["jit_requests"] += count
+            jit_bytes += size
+        elif event == "collector":
+            requests["alloc_gc_requests"] += count
+        else:
+            continue
+        total_bytes += size
+    if (sum(requests.values()), total_bytes, mutator_bytes, jit_bytes) != (
+        metrics["alloc_requests"], metrics["alloc_bytes"], metrics["mutator_bytes"], metrics["jit_bytes"]
+    ):
+        raise ValueError("site allocations do not reconcile with the allocator window")
+    return requests
 
 
 def summarize(pairs, aa, calibration):
@@ -163,10 +208,12 @@ def measure(args, binary, env, name):
     print(f"{name}  {load}", flush=True)
     output = args.out / name
     output.mkdir()
+    late_window = getattr(args, "late_window", None)
+    gc_start, gc_frames = late_window or (ALLOC_START, args.frames - ALLOC_START)
     command = [str(binary.resolve()), "perf", args.project, "--format", "json",
                "--frames", str(args.frames), "--warmup-frames", str(args.warmup_frames),
-               "--seconds", str(args.seconds), "--gc-window", str(args.frames - ALLOC_START),
-               "--gc-window-start", str(ALLOC_START), "--gc-window-mode", "running",
+               "--seconds", str(args.seconds), "--gc-window", str(gc_frames),
+               "--gc-window-start", str(gc_start), "--gc-window-mode", "running",
                "--output", str(output), *(f"--var={var}" for var in args.var)]
     env = env | {"PERF_MEASURE_FRAMES": str(args.frames)}
     allocation_sources = getattr(args, "allocation_sources", False)
@@ -179,7 +226,7 @@ def measure(args, binary, env, name):
         raise RuntimeError(f"{name}: rock perf exited {result.returncode}. See {output / 'run.log'}")
     try:
         report = json.loads((output / "perf-summary.json").read_text())
-        metrics, work, settings = samples(report, args.frames, args.work)
+        metrics, work, settings = samples(report, args.frames, args.work, late_window)
         if env.get("ROCK_PERF_DETERMINISTIC") == "1":
             if not settings["exact_alloc_bytes"]:
                 raise ValueError("deterministic comparisons require exact allocation bytes")
@@ -187,17 +234,19 @@ def measure(args, binary, env, name):
                 raise ValueError("automatic GC was running in the fixed collection window")
         if args.instructions:
             metrics["retired_instructions_per_frame"] = instructions_per_frame(
-                report, output / "perf-summary.json.instructions")
+                report, output / "perf-summary.json.instructions", late_window)
         if args.fixed_work:
             scenario = report["scenario"]
             work.update(ready_frame=scenario["ready_frame"], start_frame=scenario["absolute_start_frame"])
-        if args.capture_sites and not (output / "perf-summary.json.sites.tsv").is_file():
+        capture = output / "perf-summary.json.sites.tsv"
+        if args.capture_sites and not capture.is_file():
             raise ValueError("missing LuaJIT site capture")
+        if getattr(args, "mutator_only", False):
+            metrics.update(allocation_requests_by_origin(capture, metrics))
     except (OSError, ValueError, KeyError, TypeError) as error:
         raise ValueError(f"{output}: {error}") from error
     lua_digest = sha256_file(output / "main.lua")
     if allocation_sources:
-        capture = output / "perf-summary.json.sites.tsv"
         record = dict(lua_sha256=lua_digest, vm_sha256=sha256_file(args.luajit),
                       capture_sha256=sha256_file(capture), manifest_sha256=sha256_file(manifest),
                       frames=report["memory"]["gc_window"]["measured_frames"],
@@ -218,6 +267,8 @@ def main():
     parser.add_argument("--pairs", type=int, default=10)
     parser.add_argument("--frames", type=int, default=600)
     parser.add_argument("--warmup-frames", type=int, default=600)
+    parser.add_argument("--late-window", nargs=2, type=int, metavar=("GC_START", "LENGTH"),
+                        help="compare this allocator window in a longer measured run")
     parser.add_argument("--seconds", type=int, default=240, help="wall time cap")
     parser.add_argument("--seed", default="42")
     parser.add_argument("--instructions", action="store_true",
@@ -229,6 +280,8 @@ def main():
                         help="use Stone's fixed image work and reset JIT and GC on frame three")
     parser.add_argument("--capture-sites", action="store_true",
                         help="capture allocator and trace sites in a separate diagnostic run")
+    parser.add_argument("--mutator-only", action="store_true",
+                        help="use site capture to count requests by origin and report JIT traffic separately")
     parser.add_argument("--allocation-sources", action="store_true",
                         help="retain the compiler manifest for allocation-site ranking")
     parser.add_argument("--var", action="append", default=[], help="common compiler build var NAME=VALUE")
@@ -236,6 +289,12 @@ def main():
     args = parser.parse_args()
     if args.pairs < 6 or not ALLOC_START < args.frames <= 65536:
         parser.error("use at least six pairs and 101 to 65536 measured frames")
+    if args.late_window:
+        start, length = args.late_window
+        if not (start > args.warmup_frames > 0 and 0 < length < args.frames - 1):
+            parser.error("--late-window requires positive warmup, a later GC start and a shorter length")
+    if args.mutator_only and (args.timing or not args.capture_sites):
+        parser.error("--mutator-only requires deterministic --capture-sites")
     if not args.timing:
         args.fixed_work = True
         if not args.luajit:
@@ -262,6 +321,10 @@ def main():
             "project": args.project, "work": args.work, "instructions": args.instructions,
             "mode": "timing" if args.timing else "counters",
             "vars_sha256": hashlib.sha256(json.dumps(args.var).encode()).hexdigest()}
+    if args.late_window:
+        plan["late_window"] = args.late_window
+    if args.mutator_only:
+        plan["mutator_only"] = True
     if args.luajit:
         args.luajit = args.luajit.resolve()
         if not args.luajit.is_file() or not os.access(args.luajit, os.X_OK):
@@ -309,7 +372,9 @@ def main():
             rows[arm]["metrics"] = {
                 key: value for key, value in metrics.items()
                 if (key.startswith(COUNTER_PREFIXES) != args.timing
-                    or key.startswith(("last_frame_", "retired_instructions_")))
+                    or key.startswith(("last_frame_", "retired_instructions_"))
+                    or (args.late_window and key == "jit_compiles"))
+                and not (args.mutator_only and key in ("alloc_requests", "alloc_bytes"))
             }
         pairs.append(rows)
 

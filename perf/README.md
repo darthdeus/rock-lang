@@ -102,6 +102,16 @@ work and uses a fixed GC schedule. Set `ROCK_PERF_LUAJIT` or supply
 allocation and abort tables. Counter runs disable the optional Lua
 trace observer that copies emitted machine code into Lua strings.
 
+For a steady-state comparison, use a longer `--frames` run with
+`--late-window GC_START LENGTH`. The start uses Stone's absolute
+`--gc-window-start` frame counter. The complete allocation window must fit
+inside the recorded frames after a positive warmup. Frame timing and retired
+instructions then cover that same interval. Check `jit_compiles` and earlier
+frame records to see whether trace compilation has tapered off. Add
+`--mutator-only --capture-sites` in counter mode to compare mutator requests
+and bytes alongside the separate JIT compiler traffic. The site counts must
+reconcile with the allocator totals.
+
 ```sh
 export ROCK_PERF_LUAJIT=/path/to/counter-vm/bin/luajit
 /path/to/rock-lang/perf/runtime_pairs.py . /path/to/base/rock --out /tmp/runtime-aa
