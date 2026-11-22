@@ -1845,35 +1845,29 @@ pub fn render_silhouette_mask(
     cam_offset: Vec2,
     cam_scale: float
 ) -> int {
+    let prior = CURRENT_CANVAS_HANDLE
+    set_canvas(target)
+    stone_clear_canvas_int(0, 0)
+
+    set_shader(outline_target_shader)
+    set_camera(cam_offset, cam_scale)
+    set_engine_uniforms(outline_target_shader, camera_y_bounds())
+
+    // The mask canvas has no depth attachment.
+    unset_depth_mode()
+
     let drawn = 0
-    with_canvas(
-        target,
-        () => {
-            stone_clear_canvas_int(0, 0)
+    for (_, batch_row) in pool.entries {
+        let batch = batch_row.borrow().unwrap()
+        if batch.count == 0 { continue }
 
-            with_shader(
-                outline_target_shader,
-                () => {
-                    set_camera(cam_offset, cam_scale)
-                    set_engine_uniforms(outline_target_shader, camera_y_bounds())
+        draw_batch_mesh(batch)
+        drawn += 1
+    }
 
-                    // Canvas has no depth attachment; depth test must be fully
-                    // disabled or some drivers drop fragments unpredictably.
-                    unset_depth_mode()
-
-                    for (_, batch_row) in pool.entries {
-                        let batch = batch_row.borrow().unwrap()
-                        if batch.count == 0 { continue }
-
-                        draw_batch_mesh(batch)
-                        drawn = drawn + 1
-                    }
-
-                    reset_camera()
-                }
-            )
-        }
-    )
+    reset_camera()
+    end_shader()
+    set_canvas_handle(prior)
     return drawn
 }
 

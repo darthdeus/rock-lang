@@ -1,5 +1,43 @@
 use stone::*
 
+inline(lua) fn outline_measure_allocations(body: fn()) -> float = """
+    local was_on = jit.status()
+    jit.off()
+    collectgarbage('collect')
+    collectgarbage('stop')
+    local before = collectgarbage('count')
+    local ok, err = pcall(body)
+    local bytes = (collectgarbage('count') - before) * 1024
+    collectgarbage('restart')
+    if was_on then jit.on() end
+    if not ok then error(err) end
+    return bytes
+"""
+
+@test
+fn silhouette_mask_does_not_allocate_callback_environments() {
+    outline_canvas_fixture((_white) => {
+        let canvas = new_canvas(16.0, 16.0, "r32i")
+        let pool = render_batch_pool_new()
+        defer {
+            render_batch_pool_destroy(pool)
+            destroy_canvas(canvas)
+        }
+        let prior = CURRENT_CANVAS_HANDLE
+        let offset = v(0.0, 0.0)
+        assert_eq(render_silhouette_mask(pool, canvas, offset, 16.0), 0)
+        let repeats = 32
+        let bytes = outline_measure_allocations(() => {
+            for _ in 0..repeats {
+                let _ = render_silhouette_mask(pool, canvas, offset, 16.0)
+            }
+        })
+        assert(bytes / (repeats as float) < 800.0, "empty mask allocated {bytes} bytes in {repeats} passes")
+        assert_eq(CURRENT_CANVAS_HANDLE, prior)
+        assert(WATCHER.current_shader_name == null, "the mask unbinds its shader")
+    })
+}
+
 // Readback goes through a saved PNG so rows read top-down.
 
 const OUTLINE_DETECT_VISIBLE: Color = color(0.0, 1.0, 0.0, 1.0)
@@ -74,8 +112,8 @@ fn outline_detect_classifies_occlusion_and_keeps_each_entitys_width() {
         outline_detect_quad(vis_pool, white, v(0, 0.5), v(2, 1), 1)
         outline_detect_quad(vis_pool, white, v(0.75, 0.5), v(2, 1), 2)
         outline_detect_quad(vis_pool, white, v(0, -1.5), v(0.75, 0.75), 256)
-        render_silhouette_mask(mask_pool, mask, v(off, off), scale)
-        render_silhouette_mask(vis_pool, visible, v(off, off), scale)
+        assert_eq(render_silhouette_mask(mask_pool, mask, v(off, off), scale), 1)
+        assert_eq(render_silhouette_mask(vis_pool, visible, v(off, off), scale), 1)
         defer {
             render_batch_pool_destroy(mask_pool)
             render_batch_pool_destroy(vis_pool)
