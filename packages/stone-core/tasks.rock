@@ -195,43 +195,49 @@ pub fn task_poll_step<R>(pc: Task<R>, dt: float, frame: int) -> bool {
     return true
 }
 
-@nomangle fn task_owned_step(task: Task, dt: float, frame: int?, scheduled: bool) -> bool {
+@nomangle fn task_owned_step(coroutine: Coroutine<Wait>,
+    state: TaskState, dt: float, frame: int?, scheduled: bool) -> bool {
+    let task = Task { coroutine, state }
     let stamp = frame ?? return poll(task, dt)
     if scheduled { return task_tick_step(task, dt, stamp) }
     return task_poll_step(task, dt, stamp)
 }
 
-fn task_step_error(task: Task, message: string) {
-    kill(task.coroutine)
+@nomangle fn task_step_error(coroutine: Coroutine<Wait>, message: string) {
+    kill(coroutine)
     log_error("CO", "coroutine errored: {message}")
 }
 
-@intrinsic @nomangle inline(lua) fn task_protected_step(
-    task: Task,
+@inline fn task_protected_step(task: Task, dt: float, frame: int?, scheduled: bool) -> bool? {
+    return task_try_step(task.coroutine, task.state, dt, frame, scheduled)
+}
+
+@intrinsic @nomangle inline(lua) fn task_try_step(
+    @repr(opaque) coroutine: Coroutine<Wait>,
+    @repr(opaque) state: TaskState,
     dt: float,
     frame: int?,
     scheduled: bool,
-    on_error: fn(Task, string) -> (),
 ) -> bool? = """
-    local ok, live = pcall(task_owned_step, task, dt, frame, scheduled)
+    local ok, live = pcall(task_owned_step, coroutine, state, dt, frame, scheduled)
     if not ok then
-        on_error(task, tostring(live))
+        task_step_error(coroutine, tostring(live))
         return nil
     end
     return live
 """
 
-@intrinsic @nomangle inline(js) fn task_protected_step(
-    task: Task,
+@intrinsic @nomangle inline(js) fn task_try_step(
+    coroutine: Coroutine<Wait>,
+    state: TaskState,
     dt: float,
     frame: int?,
     scheduled: bool,
-    on_error: fn(Task, string) -> (),
 ) -> bool? = """
     try {
-        return task_owned_step(task, dt, frame, scheduled);
+        return task_owned_step(coroutine, state, dt, frame, scheduled);
     } catch (err) {
-        __rock_call(on_error, task, String(err));
+        task_step_error(coroutine, String(err));
         return null;
     }
 """
@@ -245,7 +251,7 @@ pub fn start_protected(coroutine: Coroutine<Wait>, poller: CoroutinePoller) -> T
         return null
     }
     let task = task_new_in(poller.scope, coroutine, poller.clock, Wait::Frame)
-    if task_protected_step(task, 0.0, null, false, task_step_error) == null {
+    if task_protected_step(task, 0.0, null, false) == null {
         task_abandon(task)
         return null
     }
@@ -259,7 +265,7 @@ pub fn poll_protected(task: Task, dt: float, owner_clock: TaskClock? = null) -> 
         let state = task.state.get() ?? return false
         if task_clock_same(state.clock, clock) && !clock.retired { frame = clock.frame }
     }
-    let live = task_protected_step(task, dt, frame, false, task_step_error) ?? {
+    let live = task_protected_step(task, dt, frame, false) ?? {
         task_abandon(task)
         return false
     }
@@ -267,7 +273,7 @@ pub fn poll_protected(task: Task, dt: float, owner_clock: TaskClock? = null) -> 
 }
 
 fn task_prime_owned(task: Task) {
-    if task_protected_step(task, 0.0, null, false, task_step_error) != true {
+    if task_protected_step(task, 0.0, null, false) != true {
         task_abandon(task)
     }
 }
@@ -337,7 +343,7 @@ pub fn coroutine_poller_update(poller: CoroutinePoller) {
                     entry.last = task
                 }
             } else { entry.last = task }
-            if task_protected_step(task, delta, frame, true, task_step_error) != true {
+            if task_protected_step(task, delta, frame, true) != true {
                 if let current = entry.live_task() {
                     entry.last = current
                     if task_same_instance(current, task) {

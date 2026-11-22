@@ -81,3 +81,21 @@ fn poller_update_with_entity_slot_coroutines_allocates_nothing() {
     let jit_bytes = poller_idle_jit_bytes_per_coroutine(poller, count)
     assert(jit_bytes < 0.25, "JIT-on idle run_into() coroutine allocates {jit_bytes} bytes per poller update")
 }
+
+@test
+fn protected_manual_poll_does_not_box_the_task() {
+    let poller = CoroutinePoller { clock: task_clock_new() }
+    let task = start_protected(poller_idle_forever(), poller).unwrap()
+    let updates = 128
+    luajit_off()
+    poller_gc_freeze()
+    let before = poller_gc_kb()
+    for _ in 0..updates {
+        task_clock_advance(poller.clock, 0.016)
+        assert(poll_protected(task, 0.016, poller.clock))
+    }
+    let bytes = (poller_gc_kb() - before) * 1024.0 / (updates as float)
+    poller_gc_thaw()
+    luajit_on()
+    assert(bytes < 1.0, "manual protected poll allocates {bytes} bytes per update")
+}
