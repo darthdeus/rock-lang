@@ -20,7 +20,7 @@ value ArenaGenerationSnapshot {
     next_generation: int,
 }
 
-@lua_named struct ArenaRegistry {
+struct ArenaRegistry {
     stores: Map<int, any>,
     next_id: int,
     process_root: int,

@@ -53,7 +53,7 @@ pub fn task_clock_set(clock: TaskClock, dt: float, time: float, frame: int) {
     state.frame = frame
 }
 
-pub @lua_named struct CoroutinePoller {
+pub struct CoroutinePoller {
     clock: TaskClock,
     entries: [CoState?] = [],
     free_entries: [int] = [],
@@ -278,7 +278,7 @@ fn task_prime_owned(task: Task) {
     }
 }
 
-pub @lua_named struct CoState {
+pub struct CoState {
     // Exactly one of `fetch` and `task` is set. `run` stores its Task directly:
     // a closure capturing it would rebuild its tables on every call.
     fetch: (() -> Task?)? = null,

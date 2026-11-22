@@ -108,7 +108,7 @@ enum CanonicalUniformLeaf {
     Bool(bool),
 }
 
-@lua_named struct SemanticUniformBlock {
+struct SemanticUniformBlock {
     fingerprint: int,
     leaves: [CanonicalUniformLeaf],
 }
