@@ -200,16 +200,19 @@ pub extern "C" fn stone_file_read(path: *const c_char, out_len: *mut usize) -> *
         None => return ptr::null_mut(),
     };
 
-    let len = contents.len();
-    let buffer = unsafe { libc::malloc(len + 1) as *mut c_char };
-    if buffer.is_null() {
-        return ptr::null_mut();
+    let buffer = copy_terminated(&contents);
+    if !buffer.is_null() && !out_len.is_null() {
+        unsafe { *out_len = contents.len() };
     }
-    unsafe {
-        ptr::copy_nonoverlapping(contents.as_ptr(), buffer as *mut u8, len);
-        *buffer.add(len) = 0;
-        if !out_len.is_null() {
-            *out_len = len;
+    buffer
+}
+
+fn copy_terminated(bytes: &[u8]) -> *mut c_char {
+    let buffer = unsafe { libc::malloc(bytes.len() + 1) as *mut c_char };
+    if !buffer.is_null() {
+        unsafe {
+            ptr::copy_nonoverlapping(bytes.as_ptr(), buffer.cast(), bytes.len());
+            *buffer.add(bytes.len()) = 0;
         }
     }
     buffer
@@ -447,9 +450,7 @@ pub extern "C" fn stone_list_directory(
         return false;
     }
     for (i, name) in entries.iter().enumerate() {
-        let copy = CString::new(name.as_str()).map_or(ptr::null_mut(), |name| unsafe {
-            libc::strdup(name.as_ptr())
-        });
+        let copy = copy_terminated(name.as_bytes());
         if copy.is_null() {
             stone_free_string_array(arr, count as c_int);
             return false;
