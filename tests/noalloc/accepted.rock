@@ -30,9 +30,21 @@ fn add_to_counter(counter: FixedCounter, by: int) {
     counter.value += by
 }
 
+@noalloc fn live_counter(counter: FixedCounter) -> FixedCounter {
+    if counter.value < 0 { error("counter is retired") }
+    return counter
+}
+
+@noalloc fn add_to_live_counter(counter: FixedCounter, by: int) {
+    let live = live_counter(counter)
+    live.value += by
+}
+
 @test
 fn noalloc_overwrites_existing_field() {
     let counter = FixedCounter { value: 3 }
     add_to_counter(counter, 4)
     assert(counter.value == 7)
+    add_to_live_counter(counter, 2)
+    assert(counter.value == 9)
 }

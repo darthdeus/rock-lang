@@ -35,11 +35,14 @@ impl Emitter<'_> {
             Inst::StoreIndex {
                 base,
                 index,
-                kind: ContainerKind::Record(_),
+                kind: ContainerKind::Record(owner),
                 ..
             } => match self.func.insts[*index] {
                 Inst::Const(Lit::Str(field)) => {
-                    !cell_never_nil(self.ws, self.field_type(*base, field))
+                    let ty = owner
+                        .and_then(|name| self.declared_field_type(name, field.as_str()))
+                        .or_else(|| self.field_type(*base, field));
+                    !cell_never_nil(self.ws, ty)
                 }
                 _ => true,
             },
@@ -52,6 +55,19 @@ impl Emitter<'_> {
             _ => false,
         };
         grows.then_some(EmittedAllocationKind::ContainerGrowth)
+    }
+
+    fn declared_field_type(
+        &self,
+        name: ustr::Ustr,
+        field: &str,
+    ) -> Option<bone_core::prelude::TyId> {
+        let owner = self.ws.nominals.struct_id(name)?;
+        self.ws.module(owner.module).structs[owner.def]
+            .fields
+            .iter()
+            .find(|f| f.name.as_str() == field)
+            .map(|f| f.storage_ty)
     }
 
     fn field_type(&self, base: Idx<Inst>, field: ustr::Ustr) -> Option<bone_core::prelude::TyId> {
@@ -90,13 +106,7 @@ impl Emitter<'_> {
                     ctor: TypeCtor::Nominal(name),
                     ..
                 } => {
-                    let owner = self.ws.nominals.struct_id(name)?;
-                    let field = parts.next()?;
-                    ty = self.ws.module(owner.module).structs[owner.def]
-                        .fields
-                        .iter()
-                        .find(|f| f.name.as_str() == field)?
-                        .storage_ty;
+                    ty = self.declared_field_type(name, parts.next()?)?;
                     if parts.peek().is_none() {
                         return Some(ty);
                     }
