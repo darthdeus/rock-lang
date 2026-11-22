@@ -272,14 +272,6 @@ pub struct GlobalPlan {
     arena: Arc<RepArena>,
 }
 
-impl PartialEq for GlobalPlan {
-    fn eq(&self, other: &Self) -> bool {
-        self.representation == other.representation && self.arena.equivalent(&other.arena)
-    }
-}
-
-impl Eq for GlobalPlan {}
-
 impl GlobalPlan {
     pub fn for_declared_type(
         ws: &Workspace,
@@ -348,10 +340,6 @@ impl GlobalPlan {
 
     pub fn value_storage(&self) -> Option<ValueStorage> {
         self.arena.get(self.representation).value_storage()
-    }
-
-    pub fn leaf_paths(&self) -> Option<Vec<Ustr>> {
-        self.arena.get(self.representation).leaf_paths()
     }
 
     pub fn leaf_names(&self, base: Ustr) -> Option<Vec<Ustr>> {
