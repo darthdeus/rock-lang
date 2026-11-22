@@ -1,8 +1,5 @@
 # Compiler performance measurement
 
-`python3 perf/inventory.py` writes a source-size and test-location inventory to
-`target/inventory/index.html`. Track cleanup work in GitHub issues.
-
 Scripts that measure the compiler on the public corpora: how long a cold
 build takes, where its time goes and what the emitted Lua consists of. The
 `rock backend-stats`,
