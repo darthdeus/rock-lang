@@ -552,31 +552,23 @@ impl<'a> Parser<'a> {
                     && matches!(peek2(self), TokenKind::Ident(ref n) if n.as_str() == "set"));
             if is_pub && pub_follows {
                 self.advance();
-                if self.kind() == TokenKind::OpenParen && self.peek_kind() == TokenKind::In {
-                    self.advance(); // `(`
-                    self.advance(); // `in`
-                    let mut segments = vec![self.expect_ident()?];
-                    while self.kind() == TokenKind::DoubleColon {
-                        self.advance();
-                        segments.push(self.expect_ident()?);
-                    }
-                    self.expect(TokenKind::CloseParen)?;
-                    mods.vis = Some(Visibility::PubIn(segments));
-                } else if self.kind() == TokenKind::OpenParen {
+                if self.kind() == TokenKind::OpenParen {
                     self.advance();
+                    if self.kind() == TokenKind::In {
+                        return Err(self.err(
+                            "unknown visibility qualifier `pub(in ...)`; known: pub, pub(package)"
+                                .to_string(),
+                        ));
+                    }
                     let q = self.expect_ident()?;
                     match q.name.as_str() {
                         "package" => {
                             self.expect(TokenKind::CloseParen)?;
                             mods.vis = Some(Visibility::PubPackage);
                         }
-                        "super" => {
-                            self.expect(TokenKind::CloseParen)?;
-                            mods.vis = Some(Visibility::PubSuper);
-                        }
                         other => {
                             return Err(self.err(format!(
-                                "unknown visibility qualifier `pub({other})`; known: pub, pub(super), pub(package), pub(in path)"
+                                "unknown visibility qualifier `pub({other})`; known: pub, pub(package)"
                             )));
                         }
                     }

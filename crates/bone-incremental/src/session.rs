@@ -396,14 +396,7 @@ fn hash_visibility(vis: Option<&skull_parser::Visibility>, h: &mut rustc_hash::F
         None => 0u8.hash(h),
         Some(Visibility::Private) => 1u8.hash(h),
         Some(Visibility::Pub) => 2u8.hash(h),
-        Some(Visibility::PubSuper) => 3u8.hash(h),
         Some(Visibility::PubPackage) => 4u8.hash(h),
-        Some(Visibility::PubIn(path)) => {
-            5u8.hash(h);
-            for seg in path {
-                seg.name.as_str().hash(h);
-            }
-        }
     }
 }
 

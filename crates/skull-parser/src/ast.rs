@@ -642,13 +642,8 @@ pub enum Visibility {
     /// `private` / `pub(self)`: the defining module and its descendants.
     Private,
     Pub,
-    /// `pub(super)`: the parent module and its descendants.
-    PubSuper,
     /// `pub(package)`: every module in the defining package.
     PubPackage,
-    /// `pub(in a::b)`: that ancestor module, package-root-relative, and its
-    /// descendants.
-    PubIn(Vec<Ident>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]

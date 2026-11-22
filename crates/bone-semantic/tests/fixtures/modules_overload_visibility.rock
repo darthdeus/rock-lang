@@ -122,27 +122,6 @@ fn outside() -> string {
     super::m::f("x")
 }
 
-//- a_pub_super_member_of_a_nested_module_reaches_its_parent
-//-- outer.rock @pkg=chess,1 @v1
-mod outer;
-
-fn from_parent() -> int {
-    let n = inner::g(1)
-            //^ int
-    n
-}
-
-//-- inner.rock @pkg=chess,1 @v1
-mod outer::inner;
-
-pub(super) fn g(n: int) -> int {
-    n
-}
-
-fn g(s: string) -> string {
-    s
-}
-
 //- a_private_member_of_a_nested_module_stays_hidden_from_its_parent @fail=No accessible overload for `chess::outer::inner::g` with argument types (string)
 //-- outer.rock @pkg=chess,1 @v1
 mod outer;
@@ -154,7 +133,7 @@ fn from_parent() -> string {
 //-- inner.rock @pkg=chess,1 @v1
 mod outer::inner;
 
-pub(super) fn g(n: int) -> int {
+pub fn g(n: int) -> int {
     n
 }
 

@@ -74,9 +74,8 @@ not import its extension functions. Macros retain global lookup.
 ## Visibility and fields
 
 Ordinary items default to visibility within their defining module and its
-descendants. `private` and `pub(self)` spell that default; `pub(super)` grants
-access to the parent subtree, `pub(in path)` to a named ancestor subtree,
-`pub(package)` to the package, and `pub` to consumers with an accessible path.
+descendants. `private` and `pub(self)` spell that default; `pub(package)` grants
+access to the package, and `pub` to consumers with an accessible path.
 A child can access an ancestor's private item, but a parent cannot access a
 child's private item merely by being its parent. Permission does not implicitly
 import the name. A public module does not make its contents public.

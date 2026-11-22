@@ -127,10 +127,6 @@ impl<'a> AccessSite<'a> {
 pub enum NsVisibility {
     /// Defining module and its descendants (the default).
     Private,
-    /// `pub(super)`.
-    Super,
-    /// `pub(in a::b)` — named ancestor module, package-root-relative.
-    In(ModulePath),
     /// `pub(package)`.
     Package,
     /// `pub`.
@@ -142,11 +138,7 @@ impl NsVisibility {
         match vis {
             skull_parser::Visibility::Private => NsVisibility::Private,
             skull_parser::Visibility::Pub => NsVisibility::Pub,
-            skull_parser::Visibility::PubSuper => NsVisibility::Super,
             skull_parser::Visibility::PubPackage => NsVisibility::Package,
-            skull_parser::Visibility::PubIn(path) => {
-                NsVisibility::In(path.iter().map(|i| i.name).collect())
-            }
         }
     }
 }
@@ -370,13 +362,6 @@ impl NsTree {
             NsVisibility::Pub => true,
             NsVisibility::Package => owner_pkg == from_pkg,
             NsVisibility::Private => owner_pkg == from_pkg && from_path.starts_with(owner_path),
-            NsVisibility::Super => {
-                owner_pkg == from_pkg
-                    && owner_path
-                        .split_last()
-                        .is_some_and(|(_, parent)| from_path.starts_with(parent))
-            }
-            NsVisibility::In(ancestor) => owner_pkg == from_pkg && from_path.starts_with(ancestor),
         }
     }
 }

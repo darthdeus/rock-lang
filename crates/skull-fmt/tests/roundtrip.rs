@@ -12,7 +12,7 @@ fn modules_v1_forms_format_unchanged() {
         "mod a {\n    pub fn f() {}\n}\n\nmod b {\n    pub fn g() {}\n}\n",
         "use a::b::*;\nuse a::b::{Actor, heal as restore};\nuse geo::operator(+);\n\nfn f() {\n}\n",
         "pub @inline fn a() -> int { 1 }\n\npub(package) @pure\nfn b() -> int {\n    2\n}\n",
-        "pub fn c() -> int {\n    3\n}\n\npub struct S {\n    x: int,\n    pub(package) y: int,\n    pub private(set) z: int = 0,\n}\n\nprivate global G: int = 1\n\npub(in a::b) @inline inline(lua) fn d() -> int = \"\"\"return 1\"\"\"\n",
+        "pub fn c() -> int {\n    3\n}\n\npub struct S {\n    x: int,\n    pub(package) y: int,\n    pub private(set) z: int = 0,\n}\n\nprivate global G: int = 1\n\npub(package) @inline inline(lua) fn d() -> int = \"\"\"return 1\"\"\"\n",
         "mod main;\n\nuse super::helpers::shout;\n\nfn main() {\n    print(shout(\"hi\"))\n}\n",
         "pub mod a::b;\n\n// lead\nfn f() {\n    g()\n}\n",
         "private mod secret;\n\npub fn f() {\n    g()\n}\n",

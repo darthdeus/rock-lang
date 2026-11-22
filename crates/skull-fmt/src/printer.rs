@@ -2352,12 +2352,7 @@ fn item_visibility(vis: Option<&Visibility>) -> Vec<Doc> {
         None => return Vec::new(),
         Some(Visibility::Pub) => "pub ".to_string(),
         Some(Visibility::Private) => "private ".to_string(),
-        Some(Visibility::PubSuper) => "pub(super) ".to_string(),
         Some(Visibility::PubPackage) => "pub(package) ".to_string(),
-        Some(Visibility::PubIn(path)) => {
-            let path: Vec<&str> = path.iter().map(|i| i.name.as_str()).collect();
-            format!("pub(in {}) ", path.join("::"))
-        }
     };
     vec![Doc::text(text)]
 }
