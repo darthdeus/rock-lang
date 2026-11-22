@@ -1191,65 +1191,6 @@ fn json_reader_materialize(reader: JsonReader) -> JsonValue {
     return parse_value(p)
 }
 
-fn json_reader_float_components(reader: JsonReader, size: int) -> (bool, float?, float?, float?) {
-    let (shape, x, y, z, _) = json_reader_float_components_end(reader, size)
-    return (shape, x, y, z)
-}
-
-fn json_reader_float_components_end(reader: JsonReader, size: int) -> (bool, float?, float?, float?, int) {
-    assert(size == 2 || size == 3, "JSON coordinate tuples contain two or three components")
-    if let value = reader.value {
-        let values = json_as_array(value)
-        if values == null || values.len() != size { return (false, null, null, null, reader.at) }
-        let items = values
-        return (true, json_as_float(items[0]), json_as_float(items[1]),
-            if size == 3 { json_as_float(items[2]) } else { null }, reader.at)
-    }
-    if reader.at < 0 { return (false, null, null, null, reader.at) }
-    let src = reader.src.unwrap()
-    if src.unit_at(reader.at) != 91 { return (false, null, null, null, reader.at) }
-    let pos = parse_skip_ws_inline_at(src, reader.at + 1)
-    let x: float? = null
-    let y: float? = null
-    let z: float? = null
-    for index in 0..size {
-        if src.unit_at(pos) == 93 { return (false, null, null, null, reader.at) }
-        let (number, end) = json_reader_number_end_at(src, pos)
-        if index == 0 { x = number }
-        else if index == 1 { y = number }
-        else { z = number }
-        pos = parse_skip_ws_inline_at(src, if end > pos { end } else { json_reader_skip(src, pos, reader.offsets) })
-        if index + 1 < size {
-            if src.unit_at(pos) != 44 { return (false, null, null, null, reader.at) }
-            pos = parse_skip_ws_inline_at(src, pos + 1)
-        }
-    }
-    return (src.unit_at(pos) == 93, x, y, z, pos + 1)
-}
-
-fn JsonReaderArrayIter.next_float_components(it, size: int) -> (bool, bool, float?, float?, float?) {
-    let array = it.array
-    if array.values != null {
-        let (more, reader) = it.next()
-        if !more { return (false, false, null, null, null) }
-        let (shape, x, y, z) = json_reader_float_components(reader, size)
-        return (true, shape, x, y, z)
-    }
-    if it.pos < 0 { return (false, false, null, null, null) }
-    let src = array.reader.src.unwrap()
-    if src.unit_at(it.pos) == 93 { return (false, false, null, null, null) }
-    let (shape, x, y, z, end) = json_reader_float_components_end(json_reader_at(array.reader, it.pos), size)
-    if shape {
-        let pos = parse_skip_ws_inline_at(src, end)
-        if src.unit_at(pos) == 44 { pos = parse_skip_ws_inline_at(src, pos + 1) }
-        it.pos = pos
-        it.index += 1
-    } else {
-        let _ = it.next()
-    }
-    return (true, shape, x, y, z)
-}
-
 fn json_reader_is_object(reader: JsonReader) -> bool {
     if let value = reader.value { return json_as_object(value) != null }
     return reader.at >= 0 && reader.src.unwrap().unit_at(reader.at) == 123
