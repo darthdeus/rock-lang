@@ -648,7 +648,7 @@ pub fn mark_texture_slot_activation(shader_name: string, slot: int) {
 }
 
 fn texture_slot_marks_suppressed() -> bool {
-    static force_unfilled = os_getenv("STONE_TEXTURE_SLOT_FORCE_UNFILLED") == "1"
+    static force_unfilled = env_var("STONE_TEXTURE_SLOT_FORCE_UNFILLED") == "1"
     return force_unfilled
 }
 

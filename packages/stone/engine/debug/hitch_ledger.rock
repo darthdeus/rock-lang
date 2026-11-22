@@ -22,14 +22,14 @@ const HITCH_CAUSES: [string] = ["gc", "alloc", "jit", "present", "upload", "resi
     "logic", "render"]
 
 pub struct HitchLedger {
-    enabled: bool = os_getenv("HITCH_LEDGER") != "0",
+    enabled: bool = env_var("HITCH_LEDGER") != "0",
     threshold_ms: float = get_env_float("HITCH_MS", 25.0),
     loud_ms: float = get_env_float("HITCH_LOUD_MS", 50.0),
     warmup_frames: int = get_env_int("HITCH_WARMUP_FRAMES", 600),
     window_secs: float = get_env_float("HITCH_WINDOW_SECS", 60.0),
     // Negative until the first frame.
     window_start: float = -1.0,
-    dump_path: string = os_getenv("HITCH_LEDGER_PATH") ?? "",
+    dump_path: string = env_var("HITCH_LEDGER_PATH") ?? "",
     // The ring: `count` records written; slot = count % HITCH_RING_FRAMES.
     frame: NativeBuffer<int> = native_buffer_int(HITCH_RING_FRAMES),
     frame_ms: NativeBuffer<float> = native_buffer_float(HITCH_RING_FRAMES),

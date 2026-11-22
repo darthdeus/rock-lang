@@ -645,9 +645,9 @@ use stone_core::*;
 
 @init
 fn probe_init() {
-    if os_getenv("BOUNDED_FAIL") == "throw" { error("bounded runtime sentinel") }
+    if env_var("BOUNDED_FAIL") == "throw" { error("bounded runtime sentinel") }
     // Production code logs and continues; the bounded run still fails.
-    if os_getenv("BOUNDED_FAIL") == "log" { log_error("PROBE", "bounded runtime sentinel") }
+    if env_var("BOUNDED_FAIL") == "log" { log_error("PROBE", "bounded runtime sentinel") }
 }
 fn main() {
     stone_run_game(GameConfig { title: "bounded-probe", width: 64, height: 64,
@@ -923,12 +923,12 @@ inline(lua) fn sim_exit_finalizer() = """
     getmetatable(guard).__gc = function() __rock_log(0, "PROBE", "finalizer failure") end
 """
 fn main() {
-    if os_getenv("SIM_PROBE_EARLY") == "1" {
+    if env_var("SIM_PROBE_EARLY") == "1" {
         log_error("PROBE", "startup failure")
     }
     stone_run_game(GameConfig { title: "sim-probe", width: 64, height: 64, vsync: 0 })
-    if os_getenv("SIM_PROBE_TAIL") == "1" { log_error("PROBE", "tail failure") }
-    if os_getenv("SIM_PROBE_FINALIZER") == "1" { sim_exit_finalizer() }
+    if env_var("SIM_PROBE_TAIL") == "1" { log_error("PROBE", "tail failure") }
+    if env_var("SIM_PROBE_FINALIZER") == "1" { sim_exit_finalizer() }
 }
 "#,
             ),
@@ -939,7 +939,7 @@ use stone::*;
 use stone_core::*;
 
 @shutdown fn probe_shutdown() {
-    if os_getenv("SIM_PROBE_LATE") == "1" {
+    if env_var("SIM_PROBE_LATE") == "1" {
         log_error("PROBE", "shutdown failure")
         probe_native_error()
     }
@@ -959,7 +959,7 @@ co fn portable_sim() -> Coroutine<Wait> {
     sim_expect_error_log("[STONE] stone_gpu_scope_begin: null name")
     probe_native_error()
     // Production code logs and continues; the sim still fails.
-    if os_getenv("SIM_PROBE_FAIL") == "1" {
+    if env_var("SIM_PROBE_FAIL") == "1" {
         log_error("PROBE", "recovered failure")
         sim_expect_error_log("[PROBE] never logged")
         probe_native_error()

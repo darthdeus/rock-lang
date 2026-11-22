@@ -233,7 +233,7 @@ fn outline_pass_cached(radius: float, classify: float, noise_origin: Vec2, outpu
 }
 
 fn outline_force_scan() -> bool {
-    static forced = os_getenv("STONE_OUTLINE_FORCE") == "1"
+    static forced = env_var("STONE_OUTLINE_FORCE") == "1"
     return forced
 }
 

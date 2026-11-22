@@ -59,7 +59,7 @@ pub fn uniform_block_dump_arm(frames: int, screenshot_dir: string = "") -> bool 
     context["build_sha"] = json_str(__perf_build_sha())
     context["source_dir"] = json_str(current_game_source_dir())
     context["working_directory"] = json_str(get_working_directory())
-    context["runtime_library"] = json_str(os_getenv("ROCK_STONE_LIB") ?? "launcher selected")
+    context["runtime_library"] = json_str(env_var("ROCK_STONE_LIB") ?? "launcher selected")
     let sources: [JsonValue] = []
     for row in residency_dump() {
         let source: Map<string, JsonValue> = map_new()

@@ -16,7 +16,7 @@ pub @nomangle
 fn d(msg: string) {
     debug_log(msg)
 
-    if os_getenv("ONE_FRAME") == "1" || !is_null(os_getenv("FRAME_COUNT")) {
+    if env_var("ONE_FRAME") == "1" || !is_null(env_var("FRAME_COUNT")) {
         let max_width = 120
         let prefix = "[DEBUG] "
         if msg.len() <= max_width - 8 {

@@ -74,7 +74,7 @@ fn imgui_image_button_recorded(
 
 pub fn imgui_default_scale() -> float {
     // Explicit scale overrides incorrect display density reports.
-    if let raw = os_getenv("STONE_IMGUI_SCALE") {
+    if let raw = env_var("STONE_IMGUI_SCALE") {
         if raw != "" {
             if let override = raw.parse_float() {
                 if override > 0.0 { return override }

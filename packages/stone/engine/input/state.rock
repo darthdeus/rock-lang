@@ -252,9 +252,9 @@ fn input_copy_live_mouse(dst: Map<int, bool>) {
 }
 
 pub fn input_resolve_authority() {
-    let host_opt_in = os_getenv("SIM_INPUT_SYNTHETIC_ONLY") == "0"
+    let host_opt_in = env_var("SIM_INPUT_SYNTHETIC_ONLY") == "0"
     let sim = sim_mode_active()
-    INPUT_FOLLOWS_WINDOW_VISIBILITY = !host_opt_in && !sim && os_getenv("STONE_HEADLESS") != null
+    INPUT_FOLLOWS_WINDOW_VISIBILITY = !host_opt_in && !sim && env_var("STONE_HEADLESS") != null
     SIM_INPUT_SYNTHETIC_ONLY = !host_opt_in && (sim || INPUT_FOLLOWS_WINDOW_VISIBILITY)
 }
 

@@ -413,7 +413,7 @@ fn tonemap_command(shader: string, scene: Canvas, bloom: Canvas, weight: Canvas?
 // the drawing was the limit.
 //
 // Read from the environment at load.
-global FX_OFF: string = os_getenv("STONE_FX_OFF") ?? ""
+global FX_OFF: string = env_var("STONE_FX_OFF") ?? ""
 
 pub fn fx_disabled(name: string) -> bool {
     let off = FX_OFF

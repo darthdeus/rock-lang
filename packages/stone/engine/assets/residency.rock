@@ -812,10 +812,10 @@ fn asset_report_parse_int(text: string) -> int? {
 fn asset_report_env_boot() {
     if ASSET_REPORT_ENV_CHECKED { return }
     ASSET_REPORT_ENV_CHECKED = true
-    let dir = os_getenv("STONE_ASSET_REPORT_DIR") ?? return
+    let dir = env_var("STONE_ASSET_REPORT_DIR") ?? return
     if dir == "" { return }
     let interval = 600
-    if let text = os_getenv("STONE_ASSET_REPORT_INTERVAL") {
+    if let text = env_var("STONE_ASSET_REPORT_INTERVAL") {
         interval = asset_report_parse_int(text) ?? 600
     }
     asset_report_configure(dir, interval)

@@ -81,7 +81,7 @@ fn texture_slot_marks_preserve_draw_and_activation_lifetimes() {
     mark_texture_slot_activation(shader, 0)
     mark_texture_slot_filled(shader, 1)
     mark_texture_slot_filled(shader, 1)
-    if os_getenv("STONE_TEXTURE_SLOT_FORCE_UNFILLED") == "1" {
+    if env_var("STONE_TEXTURE_SLOT_FORCE_UNFILLED") == "1" {
         assert(TEXTURE_SLOT_FILLED.get(shader) == null, "suppression prevents per-draw writes")
         assert(TEXTURE_SLOT_ACTIVATION.get(shader) == null, "suppression prevents activation writes")
         return

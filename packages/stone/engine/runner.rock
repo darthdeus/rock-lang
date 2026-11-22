@@ -111,7 +111,7 @@ fn frame_pace_wait(delay_ms: int) {
 // difference between them prices the wait separately from the submission.
 // GPU pricing runs pass `finish` explicitly.
 fn present_sync() {
-    static mode = os_getenv("STONE_PRESENT_SYNC") ?? "auto"
+    static mode = env_var("STONE_PRESENT_SYNC") ?? "auto"
     if mode == "none" { return }
     if mode == "flush" {
         stone_gl_flush()
@@ -158,7 +158,7 @@ fn texture_filter_to_int(f: TextureFilter) -> int {
 // Window width can select a CrispArt rung, so a test that wants a rung derives
 // it from the environment rather than assuming a literal width.
 pub fn host_window_size(fallback: IVec2) -> IVec2 {
-    let spec = os_getenv("STONE_WINDOW_DEFAULT") ?? ""
+    let spec = env_var("STONE_WINDOW_DEFAULT") ?? ""
     if spec != "" {
         let parts = spec.split("x")
         if parts.len == 2 {
@@ -228,7 +228,7 @@ fn native_engine_configure(config: GameConfig) {
     FONT_COVERAGE_OVERSAMPLING = font_coverage_oversampling
     FRAME_FORCE_ERROR_AT = get_env_int("STONE_FRAME_FORCE_ERROR", -1)
     TEST_IMAGE_LOAD_AT_FRAME = get_env_int("STONE_TEST_IMAGE_LOAD_AT_FRAME", -1)
-    FRAME_FORCE_ERROR_WHILE_UPLOADS_PENDING = os_getenv("STONE_FRAME_FORCE_ERROR_WHILE_UPLOADS_PENDING") == "1"
+    FRAME_FORCE_ERROR_WHILE_UPLOADS_PENDING = env_var("STONE_FRAME_FORCE_ERROR_WHILE_UPLOADS_PENDING") == "1"
     WORLD_TEXT_SNAP = env_flag_override("STONE_WORLD_TEXT_SNAP", config.world_text_snap)
     WORLD_TEXT_QUANTIZE_EM = config.world_text_quantize_em
 }
@@ -460,7 +460,7 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
     }
     // JIT-trace logging from startup (same as the F2 hotkey) so trace-abort
     // buckets are measurable in a headless run, not just interactively.
-    if os_getenv("STONE_JIT_LOG") == "1" {
+    if env_var("STONE_JIT_LOG") == "1" {
         toggle_jit_trace_logging()
     }
 
@@ -508,7 +508,7 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
     // (GC/retrace/stall) — avg alone hides both. The per-frame ms feed a
     // Metric (the shared windowed-stats type) re-created each interval so the
     // distribution covers that interval's frames; avg is the true throughput.
-    let fps_log = os_getenv("FPS_LOG") == "1"
+    let fps_log = env_var("FPS_LOG") == "1"
     let fps_window_secs = 5.0
     let fps_window_start_time = stone_get_time()
     let fps_window_start_frame = 0
@@ -567,9 +567,9 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
 
         stone_end_frame()
 
-        if os_getenv("ROCK_FRAME_WATCHDOG") == "1" {
+        if env_var("ROCK_FRAME_WATCHDOG") == "1" {
             log_info("WATCHDOG", "ROCK_FRAME_PROGRESS renderer=gl completed={frame} requested={max_frames}")
-            if frame == 1 && os_getenv("ROCK_PERF_STARTUP_WATCHDOG") == "1" {
+            if frame == 1 && env_var("ROCK_PERF_STARTUP_WATCHDOG") == "1" {
                 os_setenv("ROCK_FRAME_WATCHDOG", "0")
             }
         }
@@ -1249,7 +1249,7 @@ fn run_one_frame(
     screenshot_frame_begin()
 
     if _frame == TEST_IMAGE_LOAD_AT_FRAME {
-        let path = os_getenv("STONE_TEST_IMAGE_LOAD_PATH")
+        let path = env_var("STONE_TEST_IMAGE_LOAD_PATH")
         if path != null { let _ = load_image_asset(path) }
     }
     if FRAME_FORCE_ERROR_WHILE_UPLOADS_PENDING && stone_image_uploads_pending() > 0 {
@@ -1329,10 +1329,10 @@ fn print_environment_banner(config: GameConfig) {
     log_info("ENV", "os={os_name} window={actual_w}x{actual_h} (req {config.width}x{config.height}) vsync_req={config.vsync} vsync_active={VSYNC_ACTIVE}")
     log_info("ENV", "jit={jit_v} status={jit_s}")
     log_info("ENV", "asset_dev_mode={ASSET_DEV_MODE} (on = assets on disk)")
-    let perf_mode = os_getenv("PERF_MODE") ?? "0"
-    let frame_count = os_getenv("FRAME_COUNT") ?? "-"
-    let perf_seconds = os_getenv("PERF_SECONDS") ?? "-"
-    let slow_ms_env = os_getenv("SLOW_FRAME_MS") ?? "(default 50)"
+    let perf_mode = env_var("PERF_MODE") ?? "0"
+    let frame_count = env_var("FRAME_COUNT") ?? "-"
+    let perf_seconds = env_var("PERF_SECONDS") ?? "-"
+    let slow_ms_env = env_var("SLOW_FRAME_MS") ?? "(default 50)"
     log_info("ENV", "PERF_MODE={perf_mode} FRAME_COUNT={frame_count} PERF_SECONDS={perf_seconds} SLOW_FRAME_MS={slow_ms_env}")
 }
 

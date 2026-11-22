@@ -145,14 +145,14 @@ pub fn sim_process_never_draws() -> bool {
 }
 
 fn sim_apply_draw_mode() {
-    let mode = os_getenv("SIM_DRAW") ?? "none"
+    let mode = env_var("SIM_DRAW") ?? "none"
     if mode != "none" && mode != "commands" && mode != "on_demand" && mode != "every_frame" {
         error("SIM_DRAW `{mode}` is not one of none, commands, on_demand, every_frame")
     }
     SIM_SKIP_RENDER = mode == "none"
     SIM_SKIP_SUBMIT = mode == "commands"
     SIM_DRAW_ON_DEMAND = mode == "on_demand" && sim_mode_active()
-        && os_getenv("ROCK_SIM_DRAW_EVERY_FRAME") != "1"
+        && env_var("ROCK_SIM_DRAW_EVERY_FRAME") != "1"
 }
 
 fn sim_start_entry(frame: int) {
@@ -228,7 +228,7 @@ fn sim_entry_frame_timing_json() -> string {
 
 fn sim_apply_fixed_dt() {
     SIM_FIXED_DT = 1.0 / 60.0
-    let dt_override = os_getenv("SIM_DT")
+    let dt_override = env_var("SIM_DT")
     if dt_override != null && dt_override != "" {
         if let parsed = dt_override.parse_float() {
             SIM_FIXED_DT = parsed
@@ -241,7 +241,7 @@ fn sim_apply_fixed_dt() {
 // Called during init, before the rest of boot: vsync and frame-budget decisions
 // need to know a sim is coming.
 fn runner_load_sim() {
-    SIM_NAME = os_getenv("ROCK_RUN_SIM") ?? ""
+    SIM_NAME = env_var("ROCK_RUN_SIM") ?? ""
     if SIM_NAME == "" { return }
     SIM_FRAME_BUDGET = get_env_int("FRAME_COUNT", -1)
     sim_apply_fixed_dt()
@@ -307,7 +307,7 @@ fn runner_sim_advance(frame: int) -> bool {
 // Game code with irreversible side effects (writing authored files, network,
 // user settings) gates on this so sims cannot clobber committed state.
 pub fn sim_mode_active() -> bool {
-    let name = os_getenv("ROCK_RUN_SIM") ?? return false
+    let name = env_var("ROCK_RUN_SIM") ?? return false
     return name != ""
 }
 

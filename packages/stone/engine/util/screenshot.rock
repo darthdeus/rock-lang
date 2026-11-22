@@ -24,7 +24,7 @@ fn init_screenshot_system() {
 }
 
 fn screenshot_frame_begin() {
-    if os_getenv("TAKE_SCREENSHOT") == "1" {
+    if env_var("TAKE_SCREENSHOT") == "1" {
         screenshot_frame_counter = screenshot_frame_counter + 1
     }
 }
@@ -80,13 +80,13 @@ fn update_screenshot_system() {
     }
 
     if !screenshot_taken_via_env {
-        let take_screenshot_env = os_getenv("TAKE_SCREENSHOT")
+        let take_screenshot_env = env_var("TAKE_SCREENSHOT")
         if take_screenshot_env != null && take_screenshot_env == "1" {
             let target_frame = get_env_int("FRAME_COUNT", 1)
             if target_frame < 1 { target_frame = 1 }
             if screenshot_frame_counter >= target_frame {
                 // The process chdirs to the workspace root; parallel runs need STONE_SCREENSHOT_PATH.
-                take_screenshot(os_getenv("STONE_SCREENSHOT_PATH") ?? "screenshot.png")
+                take_screenshot(env_var("STONE_SCREENSHOT_PATH") ?? "screenshot.png")
                 screenshot_taken_via_env = true
             }
         }
