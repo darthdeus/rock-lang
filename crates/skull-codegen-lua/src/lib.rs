@@ -112,11 +112,14 @@ pub struct EmittedAllocationSite {
     lua_byte_offset: usize,
 }
 
+pub type PcSource = (u32, &'static str, Span);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LuaEmission {
     pub lua: String,
     pub allocation_sites: Vec<EmittedAllocationSite>,
     pub call_sites: Vec<Idx<Inst>>,
+    pub pc_sources: Vec<PcSource>,
 }
 
 fn checked_u32_constant(func: &MirFunc, x: Idx<Inst>) -> Option<f64> {
@@ -280,6 +283,7 @@ pub struct CodegenCtx {
     /// Disabled only by boundary tests that compare our rejection with LuaJIT loadfile.
     frame_limits: bool,
     line_directives: bool,
+    allocation_sources: bool,
 }
 
 impl Clone for CodegenCtx {
@@ -297,6 +301,7 @@ impl Clone for CodegenCtx {
             call_sccs: self.call_sccs.clone(),
             frame_limits: self.frame_limits,
             line_directives: self.line_directives,
+            allocation_sources: self.allocation_sources,
         }
     }
 }
@@ -569,6 +574,7 @@ impl CodegenCtx {
             call_sccs: HashMap::default(),
             frame_limits: true,
             line_directives: line_directives_mode(),
+            allocation_sources: false,
         };
         if skull_mir::verify::checks_enabled() {
             ctx.mint_synthetic(skull_mir::mir::VALUE_INTEGER_CHECK.to_string());
@@ -592,6 +598,10 @@ impl CodegenCtx {
     /// Override `ROCK_SKULL_LINE_DIRECTIVES` for this context.
     pub fn set_line_directives(&mut self, on: bool) {
         self.line_directives = on;
+    }
+
+    pub fn set_allocation_sources(&mut self, on: bool) {
+        self.allocation_sources = on;
     }
 
     pub fn line_directives(&self) -> bool {

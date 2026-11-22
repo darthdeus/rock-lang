@@ -38,12 +38,15 @@ pub struct FrameCtx {
     pub slots: HashMap<Idx<Cell>, u32>,
 }
 
+type PcSourceOffset = (usize, &'static str, Span);
+
 #[derive(Clone, Copy)]
 pub(crate) struct AllocationEmission<'a> {
     pub(crate) body: &'a str,
     pub(crate) sites: &'a RefCell<Vec<EmittedAllocationSite>>,
     pub(crate) calls: &'a RefCell<Vec<Idx<Inst>>>,
     pub(crate) instrument: bool,
+    pub(crate) pc_sources: Option<&'a RefCell<Vec<PcSourceOffset>>>,
 }
 
 /// [`emit_named`] with an optional coroutine frame context (the `__step` fn).
@@ -92,10 +95,13 @@ pub fn emit_lua_definition(
             lua,
             allocation_sites: Vec::new(),
             call_sites: Vec::new(),
+            pc_sources: Vec::new(),
         };
     };
     let sites = RefCell::new(Vec::new());
     let calls = RefCell::new(Vec::new());
+    let pc_sources =
+        (ctx.allocation_sources && !ctx.line_directives()).then(|| RefCell::new(Vec::new()));
     // A bound body sits inside a factory, so its header cannot be found by
     // searching for `function <name>`.
     let (lua, header_offset) = emit_body(
@@ -112,6 +118,7 @@ pub fn emit_lua_definition(
             sites: &sites,
             calls: &calls,
             instrument,
+            pc_sources: pc_sources.as_ref(),
         }),
     );
     let mut allocation_sites = sites.into_inner();
@@ -136,10 +143,25 @@ pub fn emit_lua_definition(
     let mut call_sites = calls.into_inner();
     call_sites.sort_unstable();
     call_sites.dedup();
+    let pc_sources = pc_sources.map_or_else(Vec::new, |sources| {
+        let newlines: Vec<_> = lua
+            .bytes()
+            .enumerate()
+            .filter_map(|(i, byte)| (byte == b'\n').then_some(i))
+            .collect();
+        let line = |at| newlines.partition_point(|&end| end < at);
+        let first = line(header_offset);
+        sources
+            .into_inner()
+            .into_iter()
+            .map(|(at, kind, span)| ((line(at) - first + 1) as u32, kind, span))
+            .collect()
+    });
     LuaEmission {
         lua,
         allocation_sites,
         call_sites,
+        pc_sources,
     }
 }
 

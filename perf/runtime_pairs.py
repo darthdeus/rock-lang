@@ -169,6 +169,10 @@ def measure(args, binary, env, name):
                "--gc-window-start", str(ALLOC_START), "--gc-window-mode", "running",
                "--output", str(output), *(f"--var={var}" for var in args.var)]
     env = env | {"PERF_MEASURE_FRAMES": str(args.frames)}
+    allocation_sources = getattr(args, "allocation_sources", False)
+    manifest = output / "manifest.txt"
+    if allocation_sources:
+        env["SKULL_ALLOCATION_REPORT"] = str(manifest)
     with (output / "run.log").open("w") as log:
         result = subprocess.run(command, env=env, stdout=log, stderr=subprocess.STDOUT)
     if result.returncode:
@@ -191,8 +195,16 @@ def measure(args, binary, env, name):
             raise ValueError("missing LuaJIT site capture")
     except (OSError, ValueError, KeyError, TypeError) as error:
         raise ValueError(f"{output}: {error}") from error
+    lua_digest = sha256_file(output / "main.lua")
+    if allocation_sources:
+        capture = output / "perf-summary.json.sites.tsv"
+        record = dict(lua_sha256=lua_digest, vm_sha256=sha256_file(args.luajit),
+                      capture_sha256=sha256_file(capture), manifest_sha256=sha256_file(manifest),
+                      frames=report["memory"]["gc_window"]["measured_frames"],
+                      requests=metrics["alloc_requests"], bytes=metrics["alloc_bytes"])
+        (output / "allocation-capture.json").write_text(json.dumps(record, indent=2) + "\n")
     return {"metrics": metrics, "work": work, "settings": settings, "uptime": load,
-            "lua_sha256": sha256_file(output / "main.lua"),
+            "lua_sha256": lua_digest,
             "end_uptime": subprocess.check_output(["uptime"], text=True).strip()}
 
 
@@ -217,6 +229,8 @@ def main():
                         help="use Stone's fixed image work and reset JIT and GC on frame three")
     parser.add_argument("--capture-sites", action="store_true",
                         help="capture allocator and trace sites in a separate diagnostic run")
+    parser.add_argument("--allocation-sources", action="store_true",
+                        help="retain the compiler manifest for allocation-site ranking")
     parser.add_argument("--var", action="append", default=[], help="common compiler build var NAME=VALUE")
     parser.add_argument("--work", action="append", default=[], help="require equal work_units for this section")
     args = parser.parse_args()
@@ -235,6 +249,12 @@ def main():
         parser.error("measurement hooks require an unset LUA_INIT")
     if args.capture_sites and not args.luajit:
         parser.error("--capture-sites requires a site-enabled --luajit")
+    if args.allocation_sources:
+        if not args.capture_sites or args.timing:
+            parser.error("--allocation-sources requires deterministic --capture-sites")
+        if ("SKULL_ALLOCATION_ACTIVATION" in os.environ
+                or os.environ.get("ROCK_SKULL_LINE_DIRECTIVES") == "1"):
+            parser.error("--allocation-sources requires uninstrumented Lua with generated line numbers")
     if args.noise and not args.candidate:
         parser.error("--noise requires an A/B comparison")
     calibration = json.loads(args.noise.read_text()) if args.noise else None

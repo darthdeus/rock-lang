@@ -157,6 +157,9 @@ impl Emitter<'_> {
                 value,
                 kind,
             } => {
+                if matches!(kind, ContainerKind::VecStrideSlot) {
+                    self.pc_source(out.len(), id, "container-growth");
+                }
                 let checked_set = match kind {
                     ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_) => {
                         Some("__nb_checked_set")

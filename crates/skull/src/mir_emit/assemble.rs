@@ -1,4 +1,5 @@
 use super::*;
+use bone_semantic::prelude::Span;
 
 #[derive(Clone, Default)]
 pub(crate) struct UnitComptimeReads {
@@ -64,6 +65,7 @@ struct Assembly {
     all_statics: Vec<skull_mir::mir::StaticCell>,
     code_artifact: skull_mir::code_identity::CodeArtifact,
     allocation_bodies: Vec<crate::allocation_report::AllocationBody>,
+    pc_owners: BTreeMap<String, (&'static str, Span)>,
     always_emitted_calls: Vec<FuncRef>,
     always_emitted_names: Vec<Ustr>,
     unit_reads: UnitComptimeReads,
@@ -92,6 +94,7 @@ impl Assembly {
             all_statics: Vec::new(),
             code_artifact: units.code_artifact,
             allocation_bodies: units.allocation_bodies,
+            pc_owners: BTreeMap::new(),
             always_emitted_calls: units.calls,
             always_emitted_names: units.names,
             unit_reads: units.reads,
@@ -118,10 +121,23 @@ impl Assembly {
                 })
                 .collect()
         };
-        for ((_, f), placement) in fns.into_iter().zip(placements) {
+        let pc_sources = allocation == Some(false) && !cache.cg.line_directives();
+        for ((function, f), placement) in fns.into_iter().zip(placements) {
             match placement {
                 Placement::None => {}
                 Placement::Text(Ok((text, allocation))) => {
+                    if pc_sources {
+                        let kind = if f.is_extern {
+                            "ffi-boundary"
+                        } else if f.name.as_str() == "__map_col_new_spine"
+                            && ws.module(function.module).file.as_str() == "<stdlib>/unified.rock"
+                        {
+                            "map-construction"
+                        } else {
+                            "inline-lua"
+                        };
+                        self.pc_owners.insert(mangle_fn(ws, f), (kind, f.name_span));
+                    }
                     definitions.push_text(text);
                     self.allocation_bodies.extend(allocation);
                 }
@@ -367,6 +383,7 @@ pub(super) fn ffi_extern_wrapper(
                 declaration_span: Some(f.name_span),
                 direct_sites: sites.into(),
                 call_edges: Vec::new(),
+                pc_sources: Vec::new(),
             });
             format!(
                 "  local __out = {temp}\n  {lib}.{nm}({call_args})\n{}",
@@ -1061,11 +1078,12 @@ pub(super) fn assemble(
         None => (skull_mir::definition::collect(ws)?, None),
     };
     let lifecycle_plan = skull_mir::lifecycle::collect_with_artifact(ws, &asm.code_artifact)?;
-    let allocation_report = if crate::allocation_report::enabled() {
+    let mut allocation_report = if crate::allocation_report::enabled() {
         let mut report = crate::allocation_report::AllocationReport::from_bodies(std::mem::take(
             &mut asm.allocation_bodies,
         ));
         report.populate_lifecycle_routes(&lifecycle_plan, &asm.code_artifact);
+        report.pc_owners = std::mem::take(&mut asm.pc_owners);
         report
     } else {
         crate::allocation_report::AllocationReport::default()
@@ -1144,6 +1162,22 @@ pub(super) fn assemble(
     runtime_refs.extend(glue_calls);
     runtime_refs.extend(directory.ctors);
     let value_ctor_lua = crate::value_ctor_defs(&value_ctors, &runtime_refs);
+    if crate::allocation_report::enabled()
+        && !crate::allocation_report::activation_enabled()
+        && !cg.line_directives()
+    {
+        for s in crate::canonical_value_structs(ws) {
+            let symbol = skull_mir::mangle::type_symbol(ws, s.name);
+            for suffix in ["_vt", "_lct"] {
+                let name = format!("{symbol}{suffix}");
+                if runtime_refs.contains(&Ustr::from(&name)) {
+                    allocation_report
+                        .pc_owners
+                        .insert(name, ("generated-value-bridge", s.name_span));
+                }
+            }
+        }
+    }
     let mut globals_bridge_end =
         Some(head.len() + value_ctor_lua.len() + definitions_lua.len() + bridge_end_in_tail);
     asm.out = par_concat(&[

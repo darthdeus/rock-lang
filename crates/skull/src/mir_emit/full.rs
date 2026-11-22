@@ -797,9 +797,12 @@ pub(super) fn emit_full_build(
     let SetupLanes {
         lua_view,
         scx,
-        cg,
+        mut cg,
         windows,
     } = lanes;
+    cg.set_allocation_sources(
+        crate::allocation_report::enabled() && !crate::allocation_report::activation_enabled(),
+    );
     setup_phases.0.extend(windows);
     setup_phases.timed("setup: ABI validation", || {
         reject_abi_param_collisions(ws, &scx, &cg)

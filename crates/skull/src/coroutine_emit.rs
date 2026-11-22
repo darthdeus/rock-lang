@@ -4,9 +4,7 @@ use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::CompilerError;
 use comfy_la_arena::Idx;
 use rustc_hash::FxHashSet;
-use skull_codegen_lua::{
-    CodegenCtx, FrameCtx, LuaEmission, emit_lua_definition, emit_named_framed,
-};
+use skull_codegen_lua::{CodegenCtx, FrameCtx, emit_lua_definition, emit_named_framed};
 use skull_mir::code_identity::CodeArtifact;
 use skull_mir::lower::CoroutinePlan;
 use skull_mir::mir::*;
@@ -126,6 +124,7 @@ pub(crate) fn emit_coroutine_with_artifact(
                 declaration_span: Some(source_func.name_span),
                 direct_sites: vec![site],
                 call_edges: Vec::new(),
+                pc_sources: Vec::new(),
             });
     }
     out.lua.push_str(&constructor);
@@ -192,11 +191,7 @@ fn emit_coroutine_body(
             body: None,
         };
     }
-    let LuaEmission {
-        lua,
-        allocation_sites,
-        call_sites,
-    } = emit_lua_definition(
+    let mut emission = emit_lua_definition(
         ws,
         ctx,
         interner,
@@ -213,10 +208,12 @@ fn emit_coroutine_body(
         emitted_name,
         diagnostic_name,
         func,
-        allocation_sites,
-        &call_sites,
+        &mut emission,
     );
-    CoroutineBodyEmission { lua, body }
+    CoroutineBodyEmission {
+        lua: emission.lua,
+        body,
+    }
 }
 
 /// Construct the frame with step-bound resume/advance CodeRefs.

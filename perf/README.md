@@ -214,3 +214,22 @@ python3 perf/site_diff.py BASE.lua CANDIDATE.lua \
 Use `--by-prototype` when the bytecode changes within a function. Compare
 the normalized rows for allocation and abort counts. The raw TSV also
 retains generated PCs, trace generations and machine-code sizes.
+
+### Ranking Rock allocation sites
+
+For deterministic runs, add `--capture-sites --allocation-sources` to
+`runtime_pairs.py`. Each run keeps its original Lua, site capture and
+compiler manifest alongside `allocation-capture.json`. Use the same
+measurement VM that produced the capture.
+
+```sh
+python3 perf/join_allocation_sites.py /tmp/runtime-aa/01-a --luajit "$ROCK_PERF_LUAJIT"
+```
+
+The report ranks source locations by bytes requested per measured frame and
+also gives requests per frame. It checks the capture's artifact hashes, the
+bytecode coordinates and the totals for the allocator window. A generated
+value helper is charged to its type declaration. An opaque call or inline
+Lua allocation is tracked to the Rock boundary. VM compiler and collector
+traffic have separate rows. Conflicting source candidates and PCs without
+compiler provenance appear as unknown.

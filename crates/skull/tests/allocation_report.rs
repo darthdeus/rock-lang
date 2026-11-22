@@ -8,7 +8,9 @@ global RETAINED: Carrier? = null
 global FRAME_VALUE: int = 0
 @lifecycle(phase="update", owner="process") deco init tick {}
 @lifecycle(phase="draw", owner="process") deco init paint {}
-fn consume(carrier: Carrier) -> int { return carrier.value }
+inline(lua) fn raw_add(x: int) -> int = "return x + 1"
+inline(js) fn raw_add(x: int) -> int = "return x + 2"
+fn consume(carrier: Carrier) -> int { return raw_add(carrier.value) }
 fn direct() -> int { return consume(Carrier { value: 1 }) }
 fn returned() -> Carrier { return Carrier { value: 2 } }
 fn retain() { RETAINED = Carrier { value: 3 } }
@@ -51,6 +53,23 @@ fn update_root() -> int {
     let text = reported.allocation_report.render_text();
     assert!(text.contains("emitted site manifest:"));
     assert!(text.contains("\tstruct-construction\t"));
+    for kind in ["projection", "opaque-call"] {
+        assert!(
+            text.lines().any(|line| (line.starts_with("pc-source\t")
+                || line.starts_with("pc-line\t"))
+                && line.contains(&format!("\t{kind}\t"))),
+            "{kind}"
+        );
+    }
+    let raw_lua_line = source
+        .lines()
+        .position(|line| line.starts_with("inline(lua) fn raw_add"))
+        .unwrap()
+        + 1;
+    assert!(text.contains(&format!(
+        "pc-source\traw_add_int\t0\tinline-lua\t<test>:{raw_lua_line}\n"
+    )));
+    assert!(!empty.contains("pc-source\t"));
     for use_kind in ["direct-call", "returned", "global-store"] {
         assert!(text.contains(&format!("\t{use_kind}\t1\t")), "{use_kind}");
     }

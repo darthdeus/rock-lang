@@ -23,14 +23,36 @@ impl Emitter<'_> {
         }
     }
 
-    fn record_call(&self, id: Idx<Inst>) {
-        if let Some(allocation) = self.allocation {
-            allocation.calls.borrow_mut().push(id);
+    pub(crate) fn pc_source(&self, offset: usize, id: Idx<Inst>, kind: &'static str) {
+        if let (Some(marks), Some(span)) = (
+            self.allocation.and_then(|a| a.pc_sources),
+            self.func.inst_spans.get(id),
+        ) {
+            marks.borrow_mut().push((offset, kind, *span));
+        }
+    }
+
+    fn record_call(&self, id: Idx<Inst>, offset: Option<usize>) {
+        let Some(allocation) = self.allocation else {
+            return;
+        };
+        allocation.calls.borrow_mut().push(id);
+        if let (Some(offset), Some(_)) = (offset, allocation.pc_sources) {
+            let opaque = match self.func.insts[id] {
+                Inst::Call { func, .. } | Inst::CallMulti { func, .. } => {
+                    let f = func_of(self.ws, func);
+                    f.is_extern || f.inline_body.is_some()
+                }
+                _ => true,
+            };
+            if opaque {
+                self.pc_source(offset, id, "opaque-call");
+            }
         }
     }
 
     pub(crate) fn write_call(&self, out: &mut String, id: Idx<Inst>) {
-        self.record_call(id);
+        self.record_call(id, Some(out.len()));
         match &self.func.insts[id] {
             Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => {
                 if let Some(path) = func_of(self.ws, *func).lua_extern_path {
@@ -131,14 +153,13 @@ impl Emitter<'_> {
         // local copy of it: the body writes no register of the caller, and
         // its result register is assigned by the last statement only.
         let analyzed = InlineLuaBody::new(body.as_str());
-        self.record_call(result);
+        self.record_call(result, None);
         let splice_start = out.len();
         let first_site = self.allocation.map_or(0, |a| a.sites.borrow().len());
         let mut locals = String::new();
         let mut substitutions = Vec::new();
         for (p, a) in callee.param_decls.iter().zip(args.iter()) {
-            let mut operand = String::new();
-            self.write_opnd(&mut operand, *a);
+            let operand = self.opnd_str(*a);
             let standalone = operand
                 .bytes()
                 .all(|c| c.is_ascii_alphanumeric() || c == b'_')
@@ -170,15 +191,24 @@ impl Emitter<'_> {
         let body = analyzed.substitute_params(&subs);
         // A discarded call result runs as a bare call; any other discarded
         // result still needs a local to evaluate it into.
-        let result = result_expr(&body, shape);
-        let bare = discarded && result.is_some_and(is_call_statement);
-        let block =
-            !locals.is_empty() || discarded && !bare && result.is_some() || declares_names(&body);
+        let expression = result_expr(&body, shape);
+        let bare = discarded && expression.is_some_and(is_call_statement);
+        let block = !locals.is_empty()
+            || discarded && !bare && expression.is_some()
+            || declares_names(&body);
         if block {
             out.push_str(" do\n");
         }
         out.push_str(&locals);
+        let body_start = out.len();
         render_spliced_inline_lua(out, &body, shape, (!bare).then_some(destination.as_str()));
+        if self.allocation.is_some_and(|a| a.pc_sources.is_some()) {
+            let mut offset = body_start;
+            for line in out[body_start..].split_inclusive('\n') {
+                self.pc_source(offset, result, "inline-lua");
+                offset += line.len();
+            }
+        }
         if block {
             out.push_str(" end\n");
         }
@@ -246,8 +276,13 @@ impl Emitter<'_> {
     }
 
     pub(crate) fn opnd_str(&self, id: Idx<Inst>) -> String {
+        let marks = self.allocation.and_then(|a| a.pc_sources);
+        let first = marks.map_or(0, |marks| marks.borrow().len());
         let mut s = String::new();
         self.write_opnd(&mut s, id);
+        if let Some(marks) = marks {
+            marks.borrow_mut().truncate(first);
+        }
         s
     }
 }

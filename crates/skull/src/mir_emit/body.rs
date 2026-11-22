@@ -345,7 +345,7 @@ impl BodyEmitter<'_> {
         let interner = self.scx.interner();
         let allocation = (contract.is_some() || crate::allocation_report::enabled())
             .then(crate::allocation_report::activation_enabled);
-        let emission = skull_codegen_lua::with_constants_baked(self.cg, mf, |mf| {
+        let mut emission = skull_codegen_lua::with_constants_baked(self.cg, mf, |mf| {
             skull_codegen_lua::emit_lua_definition(
                 self.ws,
                 self.cg,
@@ -367,8 +367,7 @@ impl BodyEmitter<'_> {
             name,
             source,
             mf,
-            emission.allocation_sites,
-            &emission.call_sites,
+            &mut emission,
         ) {
             self.allocation_bodies.push(body);
         }

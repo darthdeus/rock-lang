@@ -170,6 +170,7 @@ pub struct AllocationBody {
     pub(crate) declaration_span: Option<Span>,
     pub direct_sites: Vec<AllocationSite>,
     pub call_edges: Vec<AllocationCallEdge>,
+    pub(crate) pc_sources: Vec<skull_codegen_lua::PcSource>,
 }
 
 impl AllocationBody {
@@ -202,6 +203,7 @@ pub struct AllocationRoute {
 pub struct AllocationReport {
     pub bodies: BTreeMap<String, AllocationBody>,
     pub lifecycle_routes: Vec<AllocationRoute>,
+    pub(crate) pc_owners: BTreeMap<String, (&'static str, Span)>,
 }
 
 impl AllocationReport {
@@ -426,6 +428,26 @@ impl AllocationReport {
                 );
             }
         }
+        for (name, &(kind, span)) in &self.pc_owners {
+            let _ = writeln!(out, "pc-source\t{name}\t0\t{kind}\t{}", span.format_site());
+        }
+        let mut files = BTreeMap::new();
+        for body in self
+            .bodies
+            .values()
+            .filter(|body| !body.pc_sources.is_empty())
+        {
+            let _ = writeln!(out, "pc-body\t{}", body.emitted_name);
+            for &(line, kind, span) in &body.pc_sources {
+                let next = files.len();
+                let file = files.entry(span.file).or_insert_with(|| {
+                    let _ = writeln!(out, "pc-file\t{next}\t{}", span.file);
+                    next
+                });
+                let source_line = span.line_range().0 + 1;
+                let _ = writeln!(out, "pc-line\t{line}\t{kind}\t{file}\t{source_line}");
+            }
+        }
         out
     }
 }
@@ -436,8 +458,7 @@ pub(crate) fn collect_emitted_body(
     emitted_name: &str,
     diagnostic_name: &str,
     func: &MirFunc,
-    emitted_sites: Vec<skull_codegen_lua::EmittedAllocationSite>,
-    call_sites: &[Idx<Inst>],
+    emission: &mut skull_codegen_lua::LuaEmission,
 ) -> Option<AllocationBody> {
     if !enabled() {
         return None;
@@ -451,7 +472,7 @@ pub(crate) fn collect_emitted_body(
         }
     }
     let result_uses = allocation_result_uses(func);
-    let mut direct_sites = emitted_sites
+    let mut direct_sites = std::mem::take(&mut emission.allocation_sites)
         .into_iter()
         .map(|site| {
             let iid = Idx::from_raw(site.mir_inst.into());
@@ -481,7 +502,7 @@ pub(crate) fn collect_emitted_body(
     for block in reachable_blocks_from(func, func.entry) {
         let loop_depth = block_loop_depths.get(&block).copied().unwrap_or(0);
         for &iid in &func.blocks[block].insts {
-            if call_sites.binary_search(&iid).is_err() {
+            if emission.call_sites.binary_search(&iid).is_err() {
                 continue;
             }
             match &func.insts[iid] {
@@ -553,6 +574,7 @@ pub(crate) fn collect_emitted_body(
             .first()
             .map(|owner| ws.module(owner.func.module).functions[owner.func.func].name_span),
         direct_sites,
+        pc_sources: std::mem::take(&mut emission.pc_sources),
         call_edges: call_edges
             .into_iter()
             .map(|(callee, local_loop_depth)| AllocationCallEdge {
