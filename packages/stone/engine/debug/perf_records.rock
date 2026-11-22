@@ -13,7 +13,14 @@
         return
     end
     state.active = active
-    if state.observe == nil then
+    if state.observe == nil then perf_jit_health_install(state) end
+    _G.__stone_perf_jit_event = state.observe
+"""
+
+// A function that creates a closure closes upvalues (UCLO) on every return,
+// which LuaJIT cannot record, so the observer is built out of line.
+@nomangle inline(lua) fn perf_jit_health_install(state: any) = """
+    do
         local util = require("jit.util")
         local function exit_for(parent_id, exit_id)
             local parent = state.exits[parent_id]
@@ -71,7 +78,6 @@
             end
         end
     end
-    _G.__stone_perf_jit_event = state.observe
 """
 
 @nomangle inline(lua) fn perf_jit_health_json() -> string = """
