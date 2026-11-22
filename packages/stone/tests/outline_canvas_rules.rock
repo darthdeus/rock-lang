@@ -156,3 +156,21 @@ fn outline_canvas_alternating_sizes_share_one_mask_allocation() {
         assert_eq(canvas_active(it.canvas).x, 128, "the active rect follows the last target")
     })
 }
+
+@test
+fn immediate_rect_outline_keeps_one_pixel_edges_at_the_rectangle_bounds() {
+    outline_canvas_fixture((_white) => {
+        let canvas = new_canvas(32.0, 32.0, "rgba8")
+        defer { destroy_canvas(canvas) }
+        with_canvas(canvas, () => {
+            clear_screen(0.0, 0.0, 0.0, 0.0)
+            draw_rect_outline_immediate(v(16.5, 16.0), v(16.0, 11.0), WHITE)
+        })
+        for x in 0..32 {
+            assert_eq(outline_canvas_alpha(canvas, x, 16) > 0.5, x == 8 || x == 24)
+        }
+        for y in 0..32 {
+            assert_eq(outline_canvas_alpha(canvas, 16, y) > 0.5, y == 10 || y == 21)
+        }
+    })
+}

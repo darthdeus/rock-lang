@@ -1170,14 +1170,10 @@ fn submit_immediate_shape(batch: RenderBatch) {
     end_immediate_shader(shader_state)
 }
 
-pub fn draw_rect_immediate(pos: Vec2, size: Vec2, color: Color, mode: string = "fill") {
-    if mode == "fill" {
-        let b = immediate_shape_batch()
-        add_rect_vertices_of(b, pos, size, color, FillMode::Fill, 0.0, 0)
-        submit_immediate_shape(b)
-    } else {
-        draw_rect_outline_immediate(pos, size, color)
-    }
+pub fn draw_rect_immediate(pos: Vec2, size: Vec2, color: Color) {
+    let b = immediate_shape_batch()
+    add_rect_vertices_of(b, pos, size, color, FillMode::Fill, 0.0, 0)
+    submit_immediate_shape(b)
 }
 
 pub fn draw_image_immediate(
