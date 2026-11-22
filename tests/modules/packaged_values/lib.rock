@@ -46,3 +46,11 @@ fn packaged_generic_iterator_yields_tuple() {
     let values = Sequence { item: 7 }
     for (index, item) in values { print(index + item) }
 }
+
+co fn actor_identity::MobId.slot_once(id) -> Coroutine<int> { yield id.slot }
+
+@test
+fn qualified_coroutine_method_yields() {
+    let generator = mob_id().slot_once()
+    assert_eq(generator.resume(), 4)
+}

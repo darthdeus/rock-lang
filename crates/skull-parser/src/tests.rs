@@ -170,3 +170,9 @@ fn lib::Actor<T>.heal<U>(self, amount: U) -> ::a::B<int> {
 "#,
     );
 }
+
+#[test]
+fn qualified_coroutine_method_keeps_its_coroutine_flag() {
+    let ast = parse("co fn ns::Actor.step(self) -> Coroutine<int> { yield 1 }");
+    assert!(first_fn(&ast).is_coroutine);
+}

@@ -1060,7 +1060,7 @@ impl<'a> Parser<'a> {
         mut name: Ident,
         start: Span,
         is_macro: bool,
-        mut is_coroutine: bool,
+        is_coroutine: bool,
         extern_body: Option<FunctionBody>,
         backend: FnBackend,
     ) -> PResult<FunctionDef> {
@@ -1108,7 +1108,6 @@ impl<'a> Parser<'a> {
             let receiver = if let Some(path) = path {
                 let last = path.segments.last().expect("path has segments").clone();
                 let ty = self.ast.ty(path.span(), TypeExprKind::Path(path), false);
-                is_coroutine = false;
                 ((last, 0), ty)
             } else {
                 let ty = self.synth_receiver_type(&name, &generics);
