@@ -79,8 +79,8 @@ pub use abi::{
 
 mod struct_plan;
 pub use struct_plan::{
-    GcTableField, StructFieldPlan, StructRegistryPlan, cdata_leaf_alias, gc_table_fields,
-    nobox_leaf_paths, struct_field_plan,
+    CDATA_LEAF_PREFIX, GcTableField, StructFieldPlan, StructRegistryPlan, cdata_leaf_alias,
+    gc_table_fields, nobox_leaf_paths, struct_field_plan,
 };
 
 mod coroutine;

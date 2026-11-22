@@ -93,12 +93,14 @@ pub fn nobox_leaf_paths(ws: &Workspace, name: Ustr) -> Option<Vec<Ustr>> {
     ))
 }
 
+pub const CDATA_LEAF_PREFIX: &str = "__rock_leaf_";
+
 /// A native primitive projection aliases the original nested bytes. Hex paths
 /// keep dots injective; avoid the entire declared-field prefix namespace.
 pub fn cdata_leaf_alias(ws: &Workspace, owner: Ustr, path: &str) -> Ustr {
     let sid = ws.nominals.struct_id(owner).unwrap();
     let fields = &ws.modules[sid.module.index()].structs[sid.def].fields;
-    let mut prefix = "__rock_leaf_".to_string();
+    let mut prefix = CDATA_LEAF_PREFIX.to_string();
     while fields
         .iter()
         .any(|field| field.name.as_str().starts_with(&prefix))

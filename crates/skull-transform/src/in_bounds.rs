@@ -13,7 +13,7 @@
 //! records and recognized pushes cannot invoke metamethods.
 
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{Cell as LocalCell, RefCell};
 use std::ops::Deref;
 
 use rustc_hash::{FxHashMap, FxHashSet as HashSet};
@@ -22,6 +22,7 @@ use bone_core::hir::FnBackend;
 use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
 use skull_mir::cfg::{predecessors, reverse_postorder, successors};
+use skull_mir::lower::CDATA_LEAF_PREFIX;
 use skull_mir::mir::*;
 
 use crate::visit::raw;
@@ -432,6 +433,7 @@ struct Body<'a> {
     func: &'a MirFunc,
     keys: RefCell<Vec<Interned>>,
     ids: RefCell<FxHashMap<KeyData, Key>>,
+    cdata_keys: LocalCell<bool>,
 }
 
 #[derive(Clone, Copy)]
@@ -512,6 +514,7 @@ impl<'a> Body<'a> {
             func,
             keys: RefCell::new(values.chain(cells).collect()),
             ids: RefCell::default(),
+            cdata_keys: LocalCell::new(false),
         }
     }
 
@@ -524,7 +527,12 @@ impl<'a> Body<'a> {
                 let of = |k: Key| keys[k.0 as usize].mentions;
                 let mentions = match data {
                     KeyData::Global(_) => Mentions::kinds(GLOBAL),
-                    KeyData::Field(base, _) => of(base).union(Mentions::kinds(FIELD)),
+                    KeyData::Field(base, field) => {
+                        if !self.cdata_keys.get() && field.as_str().starts_with(CDATA_LEAF_PREFIX) {
+                            self.cdata_keys.set(true);
+                        }
+                        of(base).union(Mentions::kinds(FIELD))
+                    }
                     KeyData::Elem(a, b) => of(a).union(of(b)).union(Mentions::kinds(ELEM)),
                     KeyData::Scale(base, _) => of(base),
                     KeyData::Sum(a, b) | KeyData::Product(a, b) => of(a).union(of(b)),
@@ -573,6 +581,28 @@ fn value_key(func: &Body<'_>, id: Idx<Inst>) -> Key {
         Inst::Const(Lit::Int(n)) => func.key(KeyData::Const(n)),
         _ => func.key(KeyData::Value(id)),
     }
+}
+
+fn cdata_path_mentions(path: &str, field: &str) -> bool {
+    let hex = b"0123456789abcdef";
+    let field = field.as_bytes();
+    let mut offset = 0;
+    let mut equal = true;
+    for pair in path.trim_start_matches('_').as_bytes().chunks_exact(2) {
+        if pair == b"2e" {
+            if equal && offset == field.len() {
+                return true;
+            }
+            offset = 0;
+            equal = true;
+        } else {
+            equal &= field
+                .get(offset)
+                .is_some_and(|byte| pair == [hex[(byte >> 4) as usize], hex[(byte & 15) as usize]]);
+            offset += 1;
+        }
+    }
+    equal && offset == field.len()
 }
 
 fn place_of(func: &Body<'_>, id: Idx<Inst>) -> Option<Key> {
@@ -668,11 +698,29 @@ impl Facts {
     }
 
     fn forget_field(&mut self, func: &Body<'_>, field: Ustr) {
-        self.forget(
-            func,
-            Mentions::kinds(FIELD),
-            |k| matches!(k, KeyData::Field(_, f) if f == field),
-        );
+        let read_aliases = func.cdata_keys.get();
+        let name = field.as_str();
+        let written_path = name.strip_prefix(CDATA_LEAF_PREFIX);
+        let fields = Mentions::kinds(FIELD);
+        if !read_aliases && written_path.is_none() {
+            self.forget(
+                func,
+                fields,
+                |k| matches!(k, KeyData::Field(_, f) if f == field),
+            );
+            return;
+        }
+        self.forget(func, fields, |k| match k {
+            KeyData::Field(_, f) => {
+                f == field
+                    || (read_aliases
+                        && f.as_str()
+                            .strip_prefix(CDATA_LEAF_PREFIX)
+                            .is_some_and(|path| cdata_path_mentions(path, name)))
+                    || written_path.is_some_and(|path| cdata_path_mentions(path, f.as_str()))
+            }
+            _ => false,
+        });
     }
 
     fn forget_elems(&mut self, func: &Body<'_>) {
