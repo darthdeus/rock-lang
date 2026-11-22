@@ -2386,7 +2386,6 @@ fn lower_fn_body_into(
             }
         }
     }
-    ctx.body.root_scope = Some(root_scope);
     ctx.body.param_bindings = range;
     ctx.body.param_defaults = param_defaults;
 
@@ -3427,7 +3426,6 @@ pub fn lower_decorator_def(
     let (param_defaults, body_e) = lowered?;
 
     ctx.body.root = Some(body_e);
-    ctx.body.root_scope = Some(root_scope);
     ctx.body.param_bindings = params_range;
     ctx.body.param_defaults = param_defaults;
     ctx.body.deco_target = Some(target);

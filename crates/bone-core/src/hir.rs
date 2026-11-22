@@ -265,7 +265,6 @@ pub struct Body {
     pub spread_args: FxHashSet<Idx<Expr>>,
 
     pub root: Option<Idx<Expr>>,
-    pub root_scope: Option<Idx<Scope>>,
 
     pub param_bindings: IdxRange<BindingInfo>,
     pub param_defaults: Vec<Option<Idx<Expr>>>,
