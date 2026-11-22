@@ -524,15 +524,15 @@ pub(crate) fn segment_target_def(ws: &Workspace, target: hir::SegmentTarget) -> 
 pub(crate) fn segments_naming(
     ws: &Workspace,
     target: hir::SegmentTarget,
-) -> Vec<hir::PathSegmentRef> {
-    let mut out = Vec::new();
-    for m in ws.modules.iter() {
-        out.extend(m.path_segments.iter().filter(|s| s.target == target));
-        for body in m.bodies.values() {
-            out.extend(body.path_segments.iter().filter(|s| s.target == target));
-        }
-    }
-    out
+) -> impl Iterator<Item = &hir::PathSegmentRef> {
+    ws.modules
+        .iter()
+        .flat_map(|m| {
+            m.path_segments
+                .iter()
+                .chain(m.bodies.values().flat_map(|b| &b.path_segments))
+        })
+        .filter(move |site| site.target == target)
 }
 
 fn is_source_definition(ws: &Workspace, key: Ustr) -> bool {
@@ -541,16 +541,6 @@ fn is_source_definition(ws: &Workspace, key: Ustr) -> bool {
             .iter()
             .any(|(mid, fid)| !ws.module(*mid).functions[*fid].is_synthetic)
     })
-}
-
-pub(crate) fn v1_def_declared_at(ws: &Workspace, decl: &Span) -> Option<Ustr> {
-    ws.defs
-        .keys()
-        .copied()
-        .filter(|key| is_source_definition(ws, *key))
-        .find(|key| {
-            segment_target_def(ws, hir::SegmentTarget::Def(*key)).is_some_and(|d| d == *decl)
-        })
 }
 
 pub(crate) fn v1_def_named_at(ws: &Workspace, file: Ustr, offset: usize) -> Option<Ustr> {
@@ -678,8 +668,7 @@ pub fn references<'t>(
     text_of: TextOf<'_, 't>,
     fn_scope: FnRefScope,
 ) -> Vec<RefSite> {
-    ResolvedPosition::new(ws, mid, Some(inf), offset, NodePolicy::Narrowest)
-        .and_then(|at| at.symbol(text_of))
+    RefTarget::at(ws, mid, inf, offset, text_of)
         .map_or_else(Vec::new, |symbol| symbol.sites(ws, text_of, fn_scope))
 }
 
@@ -702,25 +691,55 @@ pub(crate) enum RenameSubject {
     Other,
 }
 
-pub(crate) fn rename_subject<'t>(
-    ws: &Workspace,
-    mid: ModuleId,
-    inf: &InferenceResult,
-    offset: usize,
-    text_of: TextOf<'_, 't>,
-) -> RenameSubject {
-    match ResolvedPosition::new(ws, mid, Some(inf), offset, NodePolicy::Narrowest)
-        .and_then(|at| at.symbol(text_of))
-    {
-        Some(RefTarget::Binding(..)) => RenameSubject::Binding,
-        Some(RefTarget::Function(fmid, fid)) => {
-            RenameSubject::Function(ws.module(fmid).functions[fid].name)
+impl RefTarget {
+    pub(crate) fn at<'t>(
+        ws: &Workspace,
+        mid: ModuleId,
+        inf: &InferenceResult,
+        offset: usize,
+        text_of: TextOf<'_, 't>,
+    ) -> Option<Self> {
+        ResolvedPosition::new(ws, mid, Some(inf), offset, NodePolicy::Narrowest)?.symbol(text_of)
+    }
+
+    pub(crate) fn definition_key(self, ws: &Workspace) -> Option<Ustr> {
+        let key = match self {
+            Self::Function(mid, fn_id) => ws.module(mid).functions[fn_id].name,
+            Self::Global(key) | Self::Struct(key) | Self::Enum(key) | Self::Newtype(key) => key,
+            _ => return None,
+        };
+        (ws.defs.contains_key(&key) && is_source_definition(ws, key)).then_some(key)
+    }
+
+    pub(crate) fn from_definition_key(ws: &Workspace, key: Ustr) -> Option<Self> {
+        use bone_core::modules::DefKind;
+        Some(match ws.defs.get(&key)?.kind {
+            DefKind::Callable => {
+                let &(mid, fn_id) = ws.functions_by_name.get(&key)?.first()?;
+                Self::Function(mid, fn_id)
+            }
+            DefKind::Global => Self::Global(key),
+            DefKind::Type => match ws.nominals.get(&key)? {
+                Nominal::Struct(_) => Self::Struct(key),
+                Nominal::Enum(_) => Self::Enum(key),
+                Nominal::Newtype(_) => Self::Newtype(key),
+            },
+            DefKind::Decorator => return None,
+        })
+    }
+
+    pub(crate) fn rename_subject(self, ws: &Workspace) -> RenameSubject {
+        match self {
+            Self::Binding(..) => RenameSubject::Binding,
+            Self::Function(fmid, fid) => {
+                RenameSubject::Function(ws.module(fmid).functions[fid].name)
+            }
+            Self::Global(name) => RenameSubject::Global(name),
+            Self::Field(RecordType::Struct(_), _) => RenameSubject::Field,
+            Self::Enum(_) => RenameSubject::Type(None),
+            Self::Struct(name) => RenameSubject::Type(Some(name)),
+            _ => RenameSubject::Other,
         }
-        Some(RefTarget::Global(name)) => RenameSubject::Global(name),
-        Some(RefTarget::Field(RecordType::Struct(_), _)) => RenameSubject::Field,
-        Some(RefTarget::Enum(_)) => RenameSubject::Type(None),
-        Some(RefTarget::Struct(name)) => RenameSubject::Type(Some(name)),
-        _ => RenameSubject::Other,
     }
 }
 

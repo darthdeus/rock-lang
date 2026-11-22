@@ -553,6 +553,40 @@ fn renaming_declarations_updates_all_references() {
 }
 
 #[test]
+fn every_overload_renames_the_import_target_and_keeps_the_alias() {
+    let shapes =
+        "mod shapes;\npub fn area(n: int) -> int { n * n }\npub fn area(s: string) -> int { 5 }\n";
+    let project = Project::new(&[
+        (
+            "stick.toml",
+            "[package]\nname = \"app\"\ntype = \"bin\"\n[language]\nmodules = \"v1\"\n",
+        ),
+        (
+            "main.rock",
+            "use shapes::area as surface;\nfn main() { print(surface(\"a\")) }\n",
+        ),
+        ("shapes.rock", shapes),
+    ]);
+    let (bone, diags) = project.open("main.rock");
+    assert_no_errors(&diags);
+    let path = project.path("shapes.rock");
+    let wanted = [("main.rock", 0), ("shapes.rock", 1), ("shapes.rock", 2)].map(|(file, line)| {
+        (
+            file.to_string(),
+            line,
+            "area".to_string(),
+            "volume".to_string(),
+        )
+    });
+    for overload in 0..2 {
+        assert_eq!(
+            rename_edits(&bone, &path, pos_of(shapes, "area", overload, 1), "volume"),
+            wanted
+        );
+    }
+}
+
+#[test]
 fn renaming_an_alias_renames_only_that_files_uses_of_it() {
     let project = V1Project::new();
     let bone = project.open();

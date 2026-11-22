@@ -41,7 +41,7 @@ use crate::completion::rank::*;
 use crate::completion::select::*;
 use crate::completion::sources::*;
 use crate::query::{
-    FnRefScope, RefSite, RenameSubject, SymCat, clean_match, span_contains, span_text,
+    FnRefScope, RefSite, RefTarget, RenameSubject, SymCat, clean_match, span_contains, span_text,
 };
 use crate::rank_key::RankKey;
 
@@ -1291,11 +1291,11 @@ impl BoneWorkspace {
     }
 
     fn v1_rename_sites(
-        &self,
         proj: &BoneProject,
         path: &str,
         mid: ModuleId,
         offset: usize,
+        symbol: Option<RefTarget>,
     ) -> Option<Vec<RefSite>> {
         use bone_semantic::hir::{PathSegmentRef, SegmentTarget};
         let ws = proj.session.workspace();
@@ -1316,18 +1316,9 @@ impl BoneWorkspace {
             }) => (key, None),
             Some(_) => return None,
             None => {
-                let key =
-                    crate::query::v1_def_named_at(ws, Ustr::from(path), offset).or_else(|| {
-                        let text_of = |f: &str| proj.texts.get(f).map(|s| s.as_str());
-                        let def = crate::query::definition_at(
-                            ws,
-                            mid,
-                            ws.inference(mid)?,
-                            offset,
-                            &text_of,
-                        )?;
-                        crate::query::v1_def_declared_at(ws, &def)
-                    })?;
+                let key = symbol
+                    .and_then(|s| s.definition_key(ws))
+                    .or_else(|| crate::query::v1_def_named_at(ws, Ustr::from(path), offset))?;
                 let src = proj.texts.get(path)?;
                 let (start, end) = crate::completion::classify::ident_range_around(src, offset);
                 let word = &src[start..end];
@@ -1338,22 +1329,16 @@ impl BoneWorkspace {
             }
         };
         let name = ws.defs.get(&key)?.name;
-        let decl = crate::query::segment_target_def(ws, SegmentTarget::Def(key))?;
-        // Path segments are added separately: a walk reports a qualified call by the
-        // whole path's span, which the spelling check below drops.
-        let mut sites: Vec<Span> = self
-            .all_reference_spans(
-                proj,
-                decl.file.as_str(),
-                decl.offset_range().0,
-                FnRefScope::AllOverloads,
-                "rename",
-            )
+        let target = symbol
+            .filter(|s| s.definition_key(ws) == Some(key))
+            .or_else(|| RefTarget::from_definition_key(ws, key))?;
+        let text_of = |f: &str| proj.texts.get(f).map(String::as_str);
+        let mut sites: Vec<_> = target
+            .sites(ws, &text_of, FnRefScope::AllOverloads)
             .into_iter()
             .map(|site| site.span)
             .collect();
         let segments: Vec<_> = crate::query::segments_naming(ws, SegmentTarget::Def(key))
-            .into_iter()
             .filter(|seg| alias.is_some() || !seg.alias)
             .map(|seg| seg.span)
             .filter(|span| {
@@ -1475,26 +1460,16 @@ impl BoneWorkspace {
         let ws = proj.session.workspace();
         let text_of = |file: &str| proj.texts.get(file).map(String::as_str);
         let mid = user_module_for_path(ws, path);
-        let inferred = mid.and_then(|mid| Some((mid, ws.inference(mid)?)));
-        let subject = inferred.map_or(RenameSubject::Other, |(mid, inf)| {
-            crate::query::rename_subject(ws, mid, inf, offset, &text_of)
-        });
-        // A local or a parameter (from a named-argument label too) is never a
-        // module-level definition.
+        let symbol =
+            mid.and_then(|mid| RefTarget::at(ws, mid, ws.inference(mid)?, offset, &text_of));
+        let subject = symbol.map_or(RenameSubject::Other, |target| target.rename_subject(ws));
         let sites = mid
             .filter(|_| subject != RenameSubject::Binding)
-            .and_then(|mid| self.v1_rename_sites(proj, path, mid, offset))
+            .and_then(|mid| Self::v1_rename_sites(proj, path, mid, offset, symbol))
             .or_else(|| macro_parameter_sites(ast.as_ref(), offset))
             .unwrap_or_else(|| {
-                inferred.map_or_else(Vec::new, |(mid, inf)| {
-                    crate::query::references(
-                        ws,
-                        mid,
-                        inf,
-                        offset,
-                        &text_of,
-                        FnRefScope::AllOverloads,
-                    )
+                symbol.map_or_else(Vec::new, |target| {
+                    target.sites(ws, &text_of, FnRefScope::AllOverloads)
                 })
             });
         let spelled = |span: &Span| text_of(span.file.as_str()).and_then(|t| span_text(t, span));

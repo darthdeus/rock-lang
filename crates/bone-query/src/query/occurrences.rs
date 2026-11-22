@@ -750,7 +750,7 @@ impl RefTarget {
 
     /// Every site of the symbol by file and position; the first sighting of a
     /// token wins.
-    pub(super) fn sites<'t>(
+    pub(crate) fn sites<'t>(
         self,
         ws: &Workspace,
         text_of: TextOf<'_, 't>,
