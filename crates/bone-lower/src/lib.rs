@@ -35,32 +35,12 @@ pub fn record_use_paths(ctx: &mut LowerCtx) {
     }
     let root = ctx.fragment_scope().clone();
     let mut refs = Vec::new();
-    record_use_items(ctx, &a.items, &root.module_path, &root, &mut refs);
-    ctx.module.path_segments.extend(refs);
-}
-
-fn record_use_items(
-    ctx: &LowerCtx,
-    items: &[skull_parser::Item],
-    module_path: &[Ustr],
-    root: &bone_core::modules::FragmentScope,
-    out: &mut Vec<hir::PathSegmentRef>,
-) {
-    let mut frag = root.clone();
-    frag.module_path = module_path.to_vec();
-    for item in items {
-        match &item.kind {
-            skull_parser::ItemKind::Use(decl) => {
-                ctx.use_path_refs(&frag, decl, out);
-            }
-            skull_parser::ItemKind::Module(module) => {
-                let mut child = module_path.to_vec();
-                child.push(module.name.name);
-                record_use_items(ctx, &module.items, &child, root, out);
-            }
-            _ => {}
+    for item in &a.items {
+        if let skull_parser::ItemKind::Use(decl) = &item.kind {
+            ctx.use_path_refs(&root, decl, &mut refs);
         }
     }
+    ctx.module.path_segments.extend(refs);
 }
 
 fn member_segment_target(target: &resolve::MemberTarget) -> hir::SegmentTarget {

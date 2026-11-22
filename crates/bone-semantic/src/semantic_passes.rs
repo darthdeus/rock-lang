@@ -249,7 +249,7 @@ pub fn lower_modules_seeded(
                     ItemKind::CompilerDirective(_)
                     | ItemKind::Comment(_)
                     | ItemKind::MacroInvocation { .. } => return Ok(()),
-                    ItemKind::Use(_) | ItemKind::Module(_) => return Ok(()),
+                    ItemKind::Use(_) => return Ok(()),
                 };
                 let mut item_scope = fragment_scope.clone();
                 item_scope.module_path = path.to_vec();
@@ -979,22 +979,13 @@ pub fn semantic_pass_into(
     Ok(ws)
 }
 
-/// Walk every definition-bearing item, descending into inline mod blocks.
-/// `path` is the logical module path within the file's package.
 fn for_each_def_item<'a>(
     items: &'a [Item],
     path: &[ustr::Ustr],
     f: &mut impl FnMut(&'a Item, &[ustr::Ustr]) -> Result<(), CompilerError>,
 ) -> Result<(), CompilerError> {
     for item in items {
-        match &item.kind {
-            ItemKind::Module(m) => {
-                let mut child = path.to_vec();
-                child.push(m.name.name);
-                for_each_def_item(&m.items, &child, f)?;
-            }
-            _ => f(item, path)?,
-        }
+        f(item, path)?;
     }
     Ok(())
 }
@@ -1012,13 +1003,6 @@ pub struct FragmentContribution {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ScopeItem {
-    Module {
-        name: ustr::Ustr,
-        vis: Option<skull_parser::Visibility>,
-        item_span: Span,
-        block_span: Span,
-        items: Vec<ScopeItem>,
-    },
     Use(skull_parser::UseDecl),
     Def {
         name: ustr::Ustr,
@@ -1041,13 +1025,6 @@ fn scope_items(items: &[Item]) -> Vec<ScopeItem> {
     items
         .iter()
         .filter_map(|item| match &item.kind {
-            ItemKind::Module(m) => Some(ScopeItem::Module {
-                name: m.name.name,
-                vis: item.vis.clone(),
-                item_span: item.span,
-                block_span: m.span,
-                items: scope_items(&m.items),
-            }),
             ItemKind::Use(u) => Some(ScopeItem::Use(u.clone())),
             other => owned_name_and_kind(other).map(|(name, kind)| ScopeItem::Def {
                 name,
@@ -1265,11 +1242,6 @@ fn validate_use_items(
 ) -> Result<(), CompilerError> {
     for item in items {
         match item {
-            ScopeItem::Module { name, items, .. } => {
-                let mut child = path.to_vec();
-                child.push(*name);
-                validate_use_items(ws, frag, &child, items)?;
-            }
             ScopeItem::Use(decl) => {
                 for (local, target) in use_leaves(decl) {
                     let glob = local.is_none();
@@ -1446,50 +1418,6 @@ fn register_items(
 
     for item in items {
         match item {
-            ScopeItem::Module {
-                name: block_name,
-                vis: block_vis,
-                item_span,
-                items: block_items,
-                ..
-            } => {
-                let mut child = path.to_vec();
-                child.push(*block_name);
-                if path.is_empty() && block_name.as_str() == STD_PACKAGE_NAME {
-                    errs.push(CompilerError::new_with_label(
-                        *item_span,
-                        "the package-root module name `std` is reserved for the compiler-owned standard library".to_string(),
-                    ));
-                    continue;
-                }
-                {
-                    let parent = ensure_namespace_node(ws, pkg_id, path, node_key);
-                    if parent.owned(*block_name).is_some() {
-                        errs.push(CompilerError::new_with_label(
-                            *item_span,
-                            format!(
-                                "duplicate definition `{block_name}`{}",
-                                source_module_context(scope, path)
-                            ),
-                        ));
-                    } else {
-                        parent
-                            .children
-                            .insert(*block_name, NsPackage::path_key(&child));
-                    }
-                }
-                if let Some(vis) = block_vis {
-                    if let Err(error) =
-                        set_module_visibility(ws, pkg_id, &child, vis, *item_span, || {
-                            block_name.to_string()
-                        })
-                    {
-                        errs.push(error);
-                        continue;
-                    }
-                }
-                register_items(ws, pkg_id, file, &child, block_items, scope, errs);
-            }
             ScopeItem::Use(u) => flatten_use_decl(ws, pkg_id, path, scope, u, errs),
             ScopeItem::Def {
                 name: bare,
@@ -1893,7 +1821,7 @@ pub(crate) fn pass_lower_functions(ctx: &mut LowerCtx) -> Result<(), CompilerErr
             | ItemKind::Enum(_)
             | ItemKind::Newtype(_) => {}
 
-            ItemKind::Use(_) | ItemKind::Module(_) => {}
+            ItemKind::Use(_) => {}
 
             ItemKind::Global(g) => {
                 lower_global(ctx, g, reg_key(&g.name.name, path))?;

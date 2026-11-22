@@ -342,20 +342,6 @@ fn same_scope_items(
             .zip(right)
             .all(|(left, right)| match (left, right) {
                 (
-                    ScopeItem::Module {
-                        name: a,
-                        vis: va,
-                        items: ia,
-                        ..
-                    },
-                    ScopeItem::Module {
-                        name: b,
-                        vis: vb,
-                        items: ib,
-                        ..
-                    },
-                ) => a == b && va == vb && same_scope_items(ia, ib),
-                (
                     ScopeItem::Def {
                         name: a,
                         kind: ka,
@@ -433,7 +419,7 @@ fn item_prints(a: &Ast, text: &str) -> Vec<ItemPrint> {
                         .map(|value| a.e(&value).span.offset_range()),
                 ),
                 ItemKind::MacroInvocation { name, .. } => (ItemKindTag::Other, name.name, None),
-                ItemKind::CompilerDirective(_) | ItemKind::Use(_) | ItemKind::Module(_) => {
+                ItemKind::CompilerDirective(_) | ItemKind::Use(_) => {
                     (ItemKindTag::Other, Ustr::from(""), None)
                 }
                 ItemKind::Comment(_) => return None,

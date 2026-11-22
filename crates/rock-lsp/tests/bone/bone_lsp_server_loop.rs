@@ -162,8 +162,6 @@ fn did_open_publishes_errors_and_a_valid_change_clears_them() {
             "duplicate definition",
             1,
         ),
-        ("struct item {}\nmod item {}\n", "duplicate definition", 1),
-        ("mod child {}\nuse self as child;\n", "module `::`", 1),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let uri = uri_of(&dir.path().join("main.rock"));
@@ -182,6 +180,42 @@ fn did_open_publishes_errors_and_a_valid_change_clears_them() {
         assert!(
             diagnostics.iter().all(|d| d["severity"] != 1),
             "{diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn module_file_conflicts_publish_diagnostics_and_clear() {
+    for (child, source, message) in [
+        ("pub mod item;", "struct item {}\n", "duplicate definition"),
+        (
+            "pub mod child;",
+            "use self as child;\n",
+            "`use` binds `child` to module",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("stick.toml"),
+            "[package]\nname = \"p\"\ntype = \"lib\"\n[language]\nmodules = \"v1\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("child.rock"), child).unwrap();
+        let uri = uri_of(&dir.path().join("main.rock"));
+        let mut server = LspServer::new();
+        let out = roundtrip(&mut server, did_open(&uri, source));
+        let diagnostics = diagnostics_for(&out, &uri);
+        let errors: Vec<_> = diagnostics.iter().filter(|d| d["severity"] == 1).collect();
+        assert_eq!(errors.len(), 1, "{source}: {diagnostics:?}");
+        assert!(
+            errors[0]["message"].as_str().unwrap().contains(message),
+            "{errors:?}"
+        );
+        let out = roundtrip(&mut server, did_change(&uri, FIXED));
+        assert!(
+            diagnostics_for(&out, &uri)
+                .iter()
+                .all(|d| d["severity"] != 1)
         );
     }
 }

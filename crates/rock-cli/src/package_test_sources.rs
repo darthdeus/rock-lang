@@ -197,11 +197,6 @@ impl Fragment {
                     self.keep |= !literal_constant(ast, def);
                     def.name.name
                 }
-                ItemKind::Module(module) => {
-                    self.keep |= module.vis.is_some();
-                    self.read(ast, &module.items);
-                    continue;
-                }
                 ItemKind::Use(decl) => {
                     self.keep |= decl.vis.is_some();
                     continue;

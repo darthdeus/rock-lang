@@ -199,8 +199,7 @@ fn errors_and_warnings(src: &str) -> (Vec<String>, Vec<String>) {
 /// visible expression-hole warning.
 #[test]
 fn generated_function_stubs_resolve_the_call() {
-    let ambiguous = "mod a { pub fn hit() {} }\nmod b { pub global hit: int = 0 }\nuse a::*;\nuse b::*;\n\
-                     fn main() {\n    hit()\n    want(3)\n}\n";
+    let unrelated_error = "fn main() {\n    missing()\n    want(3)\n}\n";
     // (source, cursor, signature, error the stub leaves in place)
     for (src, (line, ch), signature, remaining_error) in [
         (
@@ -233,7 +232,12 @@ fn generated_function_stubs_resolve_the_call() {
             "fn label(arg0: int) -> string",
             None,
         ),
-        (ambiguous, (6, 6), "fn want(arg0: int)", Some("hit")),
+        (
+            unrelated_error,
+            (2, 6),
+            "fn want(arg0: int)",
+            Some("missing"),
+        ),
     ] {
         let actions = run(src, line, ch);
         let name = signature[3..].split('(').next().unwrap();

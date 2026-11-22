@@ -76,9 +76,9 @@ struct Foo { x: int }
 fn Foo() {}
 
 //- child_module_and_fn_same_name_reject @fail
+//-- util.rock @pkg=chess,1 @v1
+pub mod util;
 //-- lib.rock @pkg=chess,1 @v1
-pub mod util {
-}
 fn util() {}
 
 //- broken_import_does_not_fall_through_to_glob @fail
@@ -245,12 +245,11 @@ fn f() -> int {
     y
 }
 
-//- inline_mod_block_members_resolve
+//- module_file_members_resolve
+//-- util.rock @pkg=app,1 @v1
+pub mod util;
+pub fn heal() -> int { 7 }
 //-- app.rock @pkg=app,1 @v1
-pub mod util {
-    pub fn heal() -> int { 7 }
-}
-
 fn f() -> int {
     let n = self::util::heal()
     let m = n

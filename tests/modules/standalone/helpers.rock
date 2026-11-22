@@ -1,0 +1,3 @@
+mod helpers;
+
+pub fn answer() -> int { 42 }

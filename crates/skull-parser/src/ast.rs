@@ -731,8 +731,6 @@ pub enum ItemKind {
     Global(GlobalDef),
     CompilerDirective(CompilerDirective),
     Comment(Ustr),
-    /// `mod x { .. }`; reopening a module adds a fragment.
-    Module(ModBlock),
     Use(UseDecl),
     /// A top-level macro invocation. Expansion replaces it with the macro's spliced items
     /// (item-macro) or drops it; it never survives into a cooked module.
@@ -740,15 +738,6 @@ pub enum ItemKind {
         name: Ident,
         args: Vec<Idx<ExprData>>,
     },
-}
-
-/// `pub mod name { .. }` — an inline module block (v1 grammar).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ModBlock {
-    pub span: Span,
-    pub name: Ident,
-    pub vis: Option<Visibility>,
-    pub items: Vec<Item>,
 }
 
 /// One parsed module: the arenas backing every node plus the top-level

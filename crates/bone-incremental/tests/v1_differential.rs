@@ -287,13 +287,17 @@ fn overload_member_visibility_edit_rechecks_external_callers() {
 }
 
 #[test]
-fn an_inline_module_added_makes_a_path_into_it_resolve() {
-    let d1 = "mod d;\n\npub mod inner {\n    pub fn f() -> int {\n        1\n    }\n}\n\nfn far() -> int {\n    2\n}\n\nfn farther() -> int {\n    3\n}\n";
-    let c = "mod c;\n\nfn pick() -> int {\n    super::d::inner::f()\n}\n";
-    let mut h = V1Harness::new(vec![v1("c.rock", c), v1("d.rock", UNRELATED)]);
+fn changing_a_module_header_makes_a_path_into_it_resolve() {
+    let inner0 = "mod other;\n\npub fn f() -> int { 1 }\n";
+    let inner1 = "pub mod d::inner;\n\npub fn f() -> int { 1 }\n";
+    let c = "mod c;\n\nfn pick() -> int { super::d::inner::f() }\n";
+    let mut h = V1Harness::new(vec![
+        v1("c.rock", c),
+        v1("d.rock", UNRELATED),
+        v1("inner.rock", inner0),
+    ]);
     assert!(!h.diagnostics().is_empty());
-
-    h.edit("d.rock", d1).expect("inline module is added");
+    h.edit("inner.rock", inner1).expect("module header changes");
     h.assert_no_diagnostics();
     h.assert_call("c.rock", "d::inner::f");
 }

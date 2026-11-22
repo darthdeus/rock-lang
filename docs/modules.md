@@ -24,12 +24,10 @@ mod combat::casting;
 
 The path is relative to the package root, independent of the file's directory.
 Several files can contribute to the same module. `mod self;` names the root.
-A header is not a request to load a file. Inline `mod name { ... }` blocks
-contribute to a child of their enclosing module. Both forms can contribute to
-the same module. An explicit visibility on a header declares the visibility of
-its final module; conflicting explicit declarations are errors. A bare header
-can join an explicitly visible module. Exposing a child does not automatically
-expose its ancestors.
+A header is not a request to load a file. An explicit visibility on a header
+declares the visibility of its final module; conflicting explicit declarations
+are errors. A bare header can join an explicitly visible module. Exposing a
+child does not automatically expose its ancestors.
 
 `self::` names the current logical module and `super::` its parent; `super::`
 cannot escape the package. The package's own manifest name and each direct

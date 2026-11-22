@@ -79,11 +79,11 @@ fn malformed_source_is_rejected_with_its_diagnostic() {
             "parenthesize the ascription",
         ),
         ("fn f() {}\nmod combat;", "first item"),
-        ("mod a {}\nmod combat;", "first item"),
+        ("mod a {}\nmod combat;", "inline module blocks"),
         ("fn f() {}\nmod combat::casting;", "first item"),
         ("fn f() {}\npub mod combat;", "first item"),
-        ("mod a { mod b; }", "first item"),
-        ("mod a { mod b::c; }", "first item"),
+        ("mod a { mod b; }", "inline module blocks"),
+        ("mod a { mod b::c; }", "inline module blocks"),
         (
             "mod a;\nmod b;\n\nfn f() {}",
             "a file has one `mod path;` header",
@@ -102,6 +102,7 @@ fn malformed_source_is_rejected_with_its_diagnostic() {
             "bang-sigil macro calls are not supported",
         ),
         ("foo!(1)", "bang-sigil macro calls are not supported"),
+        ("mod child {}", "inline module blocks are not supported"),
         ("fn f<T: >() {}", ""),
         ("fn f<T = >() {}", ""),
         (

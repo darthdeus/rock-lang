@@ -427,12 +427,6 @@ fn inlay_hint_cases() {
             vec![": int"],
         ),
         (
-            "receiver types use their declaration spelling",
-            "struct Parcel<T, U> { data: T, index: U }\nfn Parcel<T, U>.describe<V>(self, value: V) {}\nfn int.inspect(self) {}\npub mod boxes { pub struct Crate {} }\nfn boxes::Crate.peek(self) {}\n",
-            lines(0, 5),
-            vec![": Parcel<T, U>", ": int", ": boxes::Crate"],
-        ),
-        (
             "only positional call args",
             "fn make(a: int, b: int, c: int, d: int) -> int { return a }\nfn r() -> int {\n    return make(1, b: 2, d: 4)\n}\n",
             lines(0, 4),
@@ -442,6 +436,32 @@ fn inlay_hint_cases() {
     for (case, src, range, want) in cases {
         assert_eq!(inlay_labels(src, range), want, "{case}");
     }
+}
+
+#[test]
+fn receiver_inlay_types_use_their_declaration_spelling() {
+    let src = "struct Parcel<T, U> { data: T, index: U }\nfn Parcel<T, U>.describe<V>(self, value: V) {}\nfn int.inspect(self) {}\nfn boxes::Crate.peek(self) {}\n";
+    let project = Project::new(&[
+        (
+            "stick.toml",
+            "[package]\nname = \"p\"\ntype = \"lib\"\n[language]\nmodules = \"v1\"\n",
+        ),
+        ("main.rock", src),
+        ("boxes.rock", "pub mod boxes;\npub struct Crate {}\n"),
+    ]);
+    let (bone, _) = project.open("main.rock");
+    let labels: Vec<_> = bone
+        .inlay_hints(
+            &project.path("main.rock"),
+            Range::new(Position::new(0, 0), Position::new(4, 0)),
+        )
+        .into_iter()
+        .map(|h| match h.label {
+            lsp_types::InlayHintLabel::String(s) => s,
+            _ => panic!("expected a string inlay label"),
+        })
+        .collect();
+    assert_eq!(labels, [": Parcel<T, U>", ": int", ": boxes::Crate"]);
 }
 
 #[test]

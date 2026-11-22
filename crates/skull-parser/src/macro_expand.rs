@@ -442,7 +442,7 @@ fn expand_item_macro(
     // declarations are rejected: file/module/import selection is
     // fixed before expansion, so generated ones would mis-scope output.
     for it in &items {
-        if let ItemKind::Use(_) | ItemKind::Module(_) = &it.kind {
+        if let ItemKind::Use(_) = &it.kind {
             ast.recovery_errors.push(CompilerError::new_with_label(
                 it.span,
                 "macro-generated `mod`/`use` is not supported".to_string(),

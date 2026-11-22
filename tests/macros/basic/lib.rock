@@ -64,12 +64,6 @@ macro ana_double() -> int {
     ^x * 2
 }
 
-mod pkg {
-    pub value Payload { value: int }
-    pub value Cell<T> { value: T }
-    pub fn source() -> int { 7 }
-}
-
 fn pkg::Payload.read<U>(self, _extra: U) -> int { self.value }
 
 macro holder(Prefix: ident) {

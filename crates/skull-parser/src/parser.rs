@@ -699,39 +699,6 @@ impl<'a> Parser<'a> {
         self.kind() == TokenKind::Operator && self.peek_kind() == TokenKind::OpenParen
     }
 
-    fn parse_mod_block(
-        &mut self,
-        start: Span,
-        vis: Option<Visibility>,
-        name: Ident,
-    ) -> PResult<Item> {
-        debug_assert!(self.kind() == TokenKind::OpenCurly);
-        self.advance(); // `{`
-        self.brace_depth += 1;
-        let mut items = Vec::new();
-        loop {
-            self.skip_comments_as_items();
-            if self.kind() == TokenKind::CloseCurly || self.at_end() {
-                break;
-            }
-            items.push(self.parse_item()?);
-        }
-        self.brace_depth -= 1;
-        let close = self.expect(TokenKind::CloseCurly)?;
-        let span = self.merge_spans(start, close);
-        Ok(Item {
-            annotations: Vec::new(),
-            vis: vis.clone(),
-            span,
-            kind: ItemKind::Module(ModBlock {
-                span,
-                name,
-                vis,
-                items,
-            }),
-        })
-    }
-
     fn at_mod_decl(&self) -> bool {
         matches!(self.kind(), TokenKind::Ident(n) if n.as_str() == "mod")
             && matches!(self.peek_kind(), TokenKind::Ident(_))
@@ -759,17 +726,16 @@ impl<'a> Parser<'a> {
             });
         }
         if self.at_mod_decl() {
-            self.advance(); // `mod`
-            let name = self.expect_ident()?;
+            self.advance();
+            self.expect_ident()?;
             if matches!(self.kind(), TokenKind::Semicolon | TokenKind::DoubleColon) {
-                return Err(self.err(
-                    "`mod path;` is a file header and must be the file's first item; inline module blocks use `{ .. }`",
-                ));
+                return Err(
+                    self.err("`mod path;` is a file header and must be the file's first item")
+                );
             }
-            if self.kind() != TokenKind::OpenCurly {
-                return Err(self.err("expected `{` after the inline module name"));
-            }
-            return self.parse_mod_block(item_start, mods.vis, name);
+            return Err(
+                self.err("inline module blocks are not supported; use a `mod path;` file header")
+            );
         }
         let mut annotations = self.parse_item_annotations()?;
         self.last_was_operator = false;

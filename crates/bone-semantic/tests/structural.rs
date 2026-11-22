@@ -649,7 +649,7 @@ fn annotation_resolution_errors(sources: &[(&str, &str)]) -> Vec<String> {
 fn nested_decorator_spelled_consume_is_not_the_builtin() {
     let errors = annotation_resolution_errors(&[(
         "main.rock",
-        "mod inner { deco init consume {} @consume struct Owned { item: int } }",
+        "mod inner; deco init consume {} @consume struct Owned { item: int }",
     )]);
     assert!(
         errors

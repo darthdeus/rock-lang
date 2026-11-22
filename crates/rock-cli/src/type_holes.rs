@@ -118,10 +118,6 @@ fn check_items(
     for item in items {
         let def = match &item.kind {
             ItemKind::Function(def) => def,
-            ItemKind::Module(block) => {
-                check_items(ws, mid, ast, &block.items, holes, failures);
-                continue;
-            }
             _ => continue,
         };
         let mut tests = item.annotations.iter().filter(|a| a.name.name == "test");

@@ -1,0 +1,5 @@
+pub mod pkg;
+
+pub value Payload { value: int }
+pub value Cell<T> { value: T }
+pub fn source() -> int { 7 }

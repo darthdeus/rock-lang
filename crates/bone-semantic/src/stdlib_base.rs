@@ -60,7 +60,6 @@ pub fn apart_from(warm: &WarmNames, ast: &Ast, contribution: &FragmentContributi
                 let bare = *kind == DefKind::Callable && name.as_str().starts_with("__op_");
                 !(bare && warm.contains(name))
             }
-            ScopeItem::Module { items, .. } => apart(items, warm),
             ScopeItem::Use(_) => true,
         })
     }
@@ -191,7 +190,6 @@ fn defines_operator(items: &[ScopeItem]) -> bool {
         ScopeItem::Def { name, kind, .. } => {
             *kind == DefKind::Callable && name.as_str().starts_with("__op_")
         }
-        ScopeItem::Module { items, .. } => defines_operator(items),
         ScopeItem::Use(_) => false,
     })
 }

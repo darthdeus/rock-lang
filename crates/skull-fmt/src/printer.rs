@@ -332,8 +332,7 @@ impl<'a> Printer<'a> {
             ItemKind::Decorator(_)
             | ItemKind::CompilerDirective(_)
             | ItemKind::MacroInvocation { .. }
-            | ItemKind::Use(_)
-            | ItemKind::Module(_) => self.raw(item.span),
+            | ItemKind::Use(_) => self.raw(item.span),
         };
         parts.push(body);
         let mut doc = Doc::concat(parts);

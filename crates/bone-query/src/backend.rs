@@ -260,32 +260,6 @@ fn qualified_prefix_before(src: &str, at: usize) -> Option<(bool, Vec<Ustr>)> {
 }
 
 fn module_declaration(session: &Session, package: u32, node: Ustr) -> Option<Span> {
-    fn inline_block(
-        items: &[bone_semantic::semantic_passes::ScopeItem],
-        path: &mut Vec<Ustr>,
-        node: Ustr,
-    ) -> Option<Span> {
-        for item in items {
-            if let bone_semantic::semantic_passes::ScopeItem::Module {
-                name,
-                item_span,
-                items,
-                ..
-            } = item
-            {
-                path.push(*name);
-                if bone_core::modules::NsPackage::path_key(path) == node {
-                    return Some(*item_span);
-                }
-                let found = inline_block(items, path, node);
-                path.pop();
-                if found.is_some() {
-                    return found;
-                }
-            }
-        }
-        None
-    }
     if node.is_empty() {
         return None;
     }
@@ -294,9 +268,8 @@ fn module_declaration(session: &Session, package: u32, node: Ustr) -> Option<Spa
         .values()
         .map(|uf| &uf.contribution)
         .filter(|c| c.package.as_ref().is_some_and(|p| p.id == package));
-    let mut block = None;
     for c in ours {
-        let mut path: Vec<Ustr> = c
+        let path: Vec<Ustr> = c
             .header
             .iter()
             .flat_map(|h| h.path.iter().map(|i| i.name))
@@ -306,11 +279,8 @@ fn module_declaration(session: &Session, package: u32, node: Ustr) -> Option<Spa
         {
             return Some(h.span);
         }
-        if block.is_none() {
-            block = inline_block(&c.items, &mut path, node);
-        }
     }
-    block
+    None
 }
 
 #[derive(Clone, Debug)]
