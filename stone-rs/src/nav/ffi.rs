@@ -684,6 +684,8 @@ pub extern "C" fn stone_nav_metric(handle: int, field: int) -> f64 {
     let n = nav.lock().unwrap();
     match field {
         0 => n.completed as f64,
+        // Profiling branches on these, so they would steer fixed-work runs by thread timing.
+        1 | 2 if crate::image_decode::fixed_perf_work() => 0.0,
         1 => n.worker_ms,
         2 => n.wait_ms,
         3 => n.area_work.derivations as f64,
@@ -828,6 +830,32 @@ pub(super) fn create_open_graph() -> Owned {
 #[cfg(test)]
 mod fork_tests {
     use super::*;
+
+    #[test]
+    fn fixed_perf_work_hides_native_navigation_durations() {
+        use crate::test_support::{assert_child_passes, child_test};
+        const TEST: &str =
+            "nav::ffi::fork_tests::fixed_perf_work_hides_native_navigation_durations";
+        const CHILD: &str = "STONE_NAV_FIXED_WORK_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            assert_child_passes(
+                child_test(TEST, CHILD, "1")
+                    .env("PERF_MODE", "1")
+                    .env("PERF_FIXED_WORK", "1"),
+                TEST,
+            );
+            return;
+        }
+        let nav = create_open_graph();
+        with_nav(nav.0, |nav| {
+            nav.completed = 3;
+            nav.worker_ms = 1.5;
+            nav.wait_ms = 2.5;
+            1
+        });
+        let metrics: Vec<f64> = (0..3).map(|field| stone_nav_metric(nav.0, field)).collect();
+        assert_eq!(metrics, [3.0, 0.0, 0.0]);
+    }
 
     #[test]
     fn fork_preserves_pending_budget_and_isolates_edits_and_retirement() {

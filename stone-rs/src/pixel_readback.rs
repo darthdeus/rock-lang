@@ -337,10 +337,21 @@ fn poll_ring_free_index(in_flight: &[usize]) -> Option<usize> {
 // This submits work without waiting for GPU completion.
 fn fence_wait_status(fence: Option<glow::Fence>) -> Option<u32> {
     let fence = fence?;
+    let timeout = fence_wait_timeout_ns();
     with_gl(|gl| unsafe {
         gl.flush();
-        gl.client_wait_sync(fence, 0, 0)
+        gl.client_wait_sync(fence, 0, timeout)
     })
+}
+
+/// Fixed-work perf runs wait for each answer, so GPU timing cannot choose the
+/// frame on which Lua sees it.
+fn fence_wait_timeout_ns() -> i32 {
+    if crate::image_decode::fixed_perf_work() {
+        1_000_000_000
+    } else {
+        0
+    }
 }
 
 fn delete_fence(fence: Option<glow::Fence>) {
@@ -1078,9 +1089,9 @@ fn pixel_readback_submit(id: u64, canvas_handle: u64, x: c_int, y: c_int, reques
 mod tests {
     use super::{
         buffer_from_name, canvas_capture_size, centered_read_rect, copy_rgba_rows_top_down,
-        landed_prefix, nearest_int_id, poll_answer_landed, poll_ring_free_index,
-        readback_fence_ready, release_all, requested_side, CanvasCapture, ReadRect, ReadShape,
-        CANVAS_CAPTURES,
+        fence_wait_timeout_ns, landed_prefix, nearest_int_id, poll_answer_landed,
+        poll_ring_free_index, readback_fence_ready, release_all, requested_side, CanvasCapture,
+        ReadRect, ReadShape, CANVAS_CAPTURES,
     };
 
     #[test]
@@ -1252,6 +1263,27 @@ mod tests {
         assert_eq!(requested_side(shape, Some(12)), Some(12));
         assert_eq!(requested_side(shape, Some(13)), None);
         assert_eq!(requested_side(shape, Some(0)), None);
+    }
+
+    #[test]
+    fn only_fixed_perf_work_waits_for_readback_fences() {
+        use crate::test_support::{assert_child_passes, child_test};
+        const TEST: &str = "pixel_readback::tests::only_fixed_perf_work_waits_for_readback_fences";
+        const CHILD: &str = "STONE_READBACK_FIXED_WORK_TEST_CHILD";
+        match std::env::var("PERF_FIXED_WORK").as_deref() {
+            _ if std::env::var_os(CHILD).is_none() => {
+                for fixed in ["0", "1"] {
+                    assert_child_passes(
+                        child_test(TEST, CHILD, "1")
+                            .env("PERF_MODE", "1")
+                            .env("PERF_FIXED_WORK", fixed),
+                        TEST,
+                    );
+                }
+            }
+            Ok("1") => assert!(fence_wait_timeout_ns() > 0),
+            _ => assert_eq!(fence_wait_timeout_ns(), 0),
+        }
     }
 
     #[test]

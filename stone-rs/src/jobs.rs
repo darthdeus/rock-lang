@@ -196,24 +196,29 @@ impl<W: Send + 'static, R: Send + 'static> Jobs<W, R> {
         }
     }
 
+    /// Fixed-work perf runs never see a job pending, so worker timing cannot
+    /// steer what the caller does next.
+    fn lock_settled(&self, handle: u64, wait: bool) -> MutexGuard<'_, State<W, R>> {
+        let wait = wait || crate::image_decode::fixed_perf_work();
+        let mut state = self.lock();
+        while wait && state.status(handle) == 0 {
+            state = self.wake.wait(state).unwrap();
+        }
+        state
+    }
+
     /// -1 when the handle is unknown or cancelled, 0 while pending, 1 when ready.
     pub(crate) fn poll(&self, handle: u64) -> i32 {
-        self.lock().status(handle)
+        self.lock_settled(handle, false).status(handle)
     }
 
     pub(crate) fn wait(&self, handle: u64) -> i32 {
-        let mut state = self.lock();
-        loop {
-            match state.status(handle) {
-                0 => state = self.wake.wait(state).unwrap(),
-                status => return status,
-            }
-        }
+        self.lock_settled(handle, true).status(handle)
     }
 
     /// Removes a ready result when `accept` approves it.
     pub(crate) fn take(&self, handle: u64, accept: impl FnOnce(&R) -> bool) -> Taken<R> {
-        let mut state = self.lock();
+        let mut state = self.lock_settled(handle, false);
         match state.status(handle) {
             -1 => Taken::Missing,
             0 => Taken::Pending,
@@ -285,6 +290,31 @@ mod tests {
         drop(GATE.lock().unwrap());
         (!cancelled.load(Ordering::Acquire)).then_some(work * 2)
     });
+
+    #[test]
+    fn fixed_perf_work_sees_each_job_finished() {
+        use crate::test_support::{assert_child_passes, child_test};
+        const TEST: &str = "jobs::tests::fixed_perf_work_sees_each_job_finished";
+        const CHILD: &str = "STONE_JOBS_FIXED_WORK_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            assert_child_passes(
+                child_test(TEST, CHILD, "1")
+                    .env("PERF_MODE", "1")
+                    .env("PERF_FIXED_WORK", "1"),
+                TEST,
+            );
+            return;
+        }
+        static SLOW: Jobs<u32, u32> = Jobs::new("stone-test-slow-jobs", 2, 10, true, |work, _| {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            Some(work)
+        });
+        let polled = SLOW.submit(1, 0).ok().unwrap();
+        let taken = SLOW.submit(2, 0).ok().unwrap();
+        assert_eq!(SLOW.poll(polled), 1);
+        assert!(matches!(SLOW.take(taken, |_| true), Taken::Ready(2)));
+        SLOW.shutdown();
+    }
 
     #[test]
     fn bounded_cancellable_jobs_restart_after_shutdown() {

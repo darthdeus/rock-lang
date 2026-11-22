@@ -94,6 +94,22 @@ class RuntimePairTests(unittest.TestCase):
                                          "PERF_FIXED_WORK": "0", "ROCK_PERF_CAPTURE_SITES": "0"},
                        check=True)
 
+    @unittest.skipUnless(os.getenv("ROCK_TEST_DETERMINISTIC_LUAJIT"), "requires deterministic VM")
+    def test_deterministic_runs_read_a_virtual_cpu_clock(self):
+        probe = """
+            local before = os.clock() * 2^20
+            _G.__rock_allocation_activation_frame_begin()
+            _G.__rock_allocation_activation_frame_begin()
+            io.write(before, " ", os.clock() * 2^20)
+        """
+        output = subprocess.check_output(
+            [os.environ["ROCK_TEST_DETERMINISTIC_LUAJIT"], "-e", probe],
+            env=os.environ | {"LUA_INIT": Path(__file__).with_name("measurement.lua").read_text(),
+                              "ROCK_PERF_DETERMINISTIC": "1", "PERF_FIXED_WORK": "1",
+                              "ROCK_PERF_CAPTURE_SITES": "0"},
+            text=True)
+        self.assertEqual(output, "1 32770")
+
     def test_counters_default_to_the_deterministic_vm_and_fixed_work(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

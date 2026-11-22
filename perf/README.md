@@ -176,8 +176,11 @@ GC paused and collects every 32 frames, so the size of the loaded program
 cannot move the collector into or out of a trace on an arbitrary frame.
 It also replaces the Lua FFI binding of `stone_get_time` with a virtual
 monotonic clock. The clock advances to the 1/64-second frame boundary when it is ahead
-of the current tick. Each read advances the clock by 2^-20 seconds. Profiling and time-budget
-branches see the same inputs when the same work runs. The launch watchdog
+of the current tick. Each read advances the clock by 2^-20 seconds. `os.clock`
+reads a similar clock that the hook advances per frame. Under fixed work,
+Stone finishes a background job or pixel readback before Lua first polls it
+and reports navigation worker and wait times as zero. Profiling, log throttle
+and time-budget branches see the same inputs when the same work runs. The launch watchdog
 continues to use wall time. Read frame and CPU timings from a separate
 `--timing` run.
 

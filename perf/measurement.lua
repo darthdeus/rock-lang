@@ -13,7 +13,13 @@ end
 
 local deterministic = os.getenv("ROCK_PERF_DETERMINISTIC") == "1"
 local clock_frame
+local virtual_frame, clock_reads = 0, 0
 if deterministic then
+    -- Log throttles and collector step budgets branch on CPU time.
+    os.clock = function()
+        clock_reads = clock_reads + 1
+        return virtual_frame / 64 + clock_reads * 2^-20
+    end
     local ffi = require("ffi")
     ffi.cdef[[
         int luaJIT_rock_deterministic(void);
@@ -31,6 +37,7 @@ if os.getenv("PERF_FIXED_WORK") == "1" then
     local frame = 0
     _G.__rock_allocation_activation_frame_begin = function()
         frame = frame + 1
+        virtual_frame = frame
         if clock_frame then clock_frame(frame) end
         if frame == 3 then
             jit.flush()
