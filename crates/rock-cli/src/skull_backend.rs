@@ -1720,7 +1720,7 @@ fn skull_emit_project_with_inputs(
     }
     let emits_main = emission.emits_main;
     let lua = std::mem::take(&mut emission.lua);
-    crate::bone_backend::log_compile_stats(&sources, &ws, compile, compile, None);
+    crate::bone_backend::log_compile_stats(&sources, &ws, compile);
 
     let lua = GameProgram::new(lua, &ws);
     #[cfg(not(feature = "sequential"))]

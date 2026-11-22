@@ -406,7 +406,7 @@ fn bone_check_project(path: &str, iters: usize) -> Result<()> {
 
     let ws = last_ws.expect("a successful iteration must have set last_ws");
     let compile = Duration::from_secs_f64(agg.total().as_secs_f64() / iters as f64);
-    log_compile_stats(&sources, &ws, compile, compile, None);
+    log_compile_stats(&sources, &ws, compile);
 
     if iters > 1 {
         report_phase_timing(path, &agg, iters);
@@ -499,33 +499,40 @@ fn check_noalloc(
     Ok(ws)
 }
 
-fn bone_loc_stats(sources: &SourceFiles) -> rock_core::CompileStats {
-    let mut stats = rock_core::CompileStats::default();
-    for file in &sources.files {
-        let f = file.borrow();
-        stats.files += 1;
-        stats.total_lines += f.contents.lines().count();
-        stats.bytes += f.contents.len();
+fn format_throughput(lines: usize, elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs_f64();
+    let lines_per_second = if seconds == 0.0 {
+        0.0
+    } else {
+        lines as f64 / seconds
+    };
+    if lines_per_second >= 10_000.0 {
+        format!("{:.1}k loc/sec", lines_per_second / 1000.0)
+    } else if lines_per_second >= 1000.0 {
+        format!("{:.2}k loc/sec", lines_per_second / 1000.0)
+    } else {
+        format!("{:.0} loc/sec", lines_per_second)
     }
-    for f in rock_stdlib::stdlib_files().iter() {
-        stats.files += 1;
-        stats.total_lines += f.contents.lines().count();
-        stats.bytes += f.contents.len();
-    }
-    stats
 }
 
 pub(crate) fn log_compile_stats(
     sources: &SourceFiles,
     ws: &bone_semantic::inference::Workspace,
     compile: Duration,
-    total: Duration,
-    output: Option<&str>,
 ) {
     if !log::log_enabled!(target: "COMPILE", log::Level::Debug) {
         return;
     }
-    let stats = bone_loc_stats(sources);
+    let lines: usize = sources
+        .files
+        .iter()
+        .map(|file| file.borrow().contents.lines().count())
+        .chain(
+            rock_stdlib::stdlib_files()
+                .iter()
+                .map(|file| file.contents.lines().count()),
+        )
+        .sum();
     let symbols: usize = ws
         .modules
         .iter()
@@ -534,15 +541,9 @@ pub(crate) fn log_compile_stats(
         })
         .sum();
     let compile_ms = compile.as_secs_f64() * 1000.0;
-    let total_ms = total.as_secs_f64() * 1000.0;
-    match output {
-        Some(out) => log::debug!(target: "COMPILE",
-            "done in {:.2}ms (compile {:.2}ms, {} symbols, {} lines, {}) -> {}",
-            total_ms, compile_ms, symbols, stats.total_lines, stats.format_throughput(compile), out),
-        None => log::debug!(target: "COMPILE",
-            "done in {:.2}ms (compile {:.2}ms, {} symbols, {} lines, {})",
-            total_ms, compile_ms, symbols, stats.total_lines, stats.format_throughput(compile)),
-    }
+    log::debug!(target: "COMPILE",
+        "done in {compile_ms:.2}ms (compile {compile_ms:.2}ms, {symbols} symbols, {lines} lines, {})",
+        format_throughput(lines, compile));
 }
 
 fn report_phase_timing(label: &str, agg: &BonePhaseTimes, iters: usize) {
@@ -575,6 +576,18 @@ pub(crate) fn short_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compile_throughput_units() {
+        for (lines, elapsed, expected) in [
+            (1_000, Duration::ZERO, "0 loc/sec"),
+            (50_000, Duration::from_secs(1), "50.0k loc/sec"),
+            (2_500, Duration::from_secs(1), "2.50k loc/sec"),
+            (100, Duration::from_secs(1), "100 loc/sec"),
+        ] {
+            assert_eq!(format_throughput(lines, elapsed), expected);
+        }
+    }
 
     #[test]
     fn a_diagnostic_spanned_into_stdlib_renders_its_snippet() {
