@@ -6,7 +6,7 @@
 use std::{
     cmp, fmt,
     hash::{Hash, Hasher},
-    iter::{Enumerate, FusedIterator},
+    iter::FusedIterator,
     marker::PhantomData,
     ops::{Index, IndexMut, Range, RangeInclusive},
 };
@@ -365,12 +365,6 @@ impl<T> Arena<T> {
     }
 }
 
-impl<T> AsMut<[T]> for Arena<T> {
-    fn as_mut(&mut self) -> &mut [T] {
-        self.data.as_mut()
-    }
-}
-
 impl<T> Default for Arena<T> {
     fn default() -> Self {
         Self::new()
@@ -394,15 +388,6 @@ impl<T> IndexMut<Idx<T>> for Arena<T> {
     }
 }
 
-impl<T> Index<IdxRange<T>> for Arena<T> {
-    type Output = [T];
-    fn index(&self, range: IdxRange<T>) -> &[T] {
-        let start = range.range.0 as usize;
-        let end = range.range.1 as usize;
-        &self.data[start..end]
-    }
-}
-
 impl<T> FromIterator<T> for Arena<T> {
     fn from_iter<I>(iter: I) -> Self
     where
@@ -410,36 +395,6 @@ impl<T> FromIterator<T> for Arena<T> {
     {
         Arena {
             data: Vec::from_iter(iter),
-        }
-    }
-}
-
-/// An iterator over the arena’s elements.
-pub struct IntoIter<T>(Enumerate<std::vec::IntoIter<T>>);
-
-impl<T> Iterator for IntoIter<T> {
-    type Item = (Idx<T>, T);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let (idx, value) = self.0.next()?;
-        Some((Idx::from_raw(RawIdx(idx as u32)), value))
-    }
-}
-
-impl<T> IntoIterator for Arena<T> {
-    type Item = (Idx<T>, T);
-
-    type IntoIter = IntoIter<T>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        IntoIter(self.data.into_iter().enumerate())
-    }
-}
-
-impl<T> Extend<T> for Arena<T> {
-    fn extend<II: IntoIterator<Item = T>>(&mut self, iter: II) {
-        for t in iter {
-            self.alloc(t);
         }
     }
 }
