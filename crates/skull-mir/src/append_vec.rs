@@ -19,12 +19,6 @@ pub struct AppendVec<T> {
 unsafe impl<T: Send> Send for AppendVec<T> {}
 unsafe impl<T: Send + Sync> Sync for AppendVec<T> {}
 
-impl<T> Default for AppendVec<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 fn locate(index: usize) -> (usize, usize) {
     let block = index / FIRST + 1;
     let segment = (usize::BITS - 1 - block.leading_zeros()) as usize;

@@ -191,12 +191,8 @@ impl std::fmt::Debug for InstanceIndex {
 }
 
 impl InstanceIndex {
-    pub fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.ids.read().expect("instance index poisoned").len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 
     pub fn id(&self, inst: &Instance) -> InstanceId {
