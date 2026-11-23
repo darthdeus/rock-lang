@@ -230,6 +230,8 @@ fn finish_body_chunk(
     let tv = Instant::now();
     skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
     skull_transform::body_chain::debug_verify(
+        ws,
+        scx.target(),
         &mf,
         skull_mir::verify::Stage::EMIT_READY,
         &"the residual-bound-call gate",

@@ -96,11 +96,13 @@ fn emit_test_program(
                 });
             }
             Ok(Err(e)) => skips.push((t.name.clone(), all_reasons(&e))),
+            // A panic is a compiler bug, such as failed MIR verification, not a
+            // missing JS feature.
             Err(panic) => {
                 let msg = crate::common::panic_message(&*panic);
-                skips.push((
-                    t.name.clone(),
-                    vec![format!("panic during JS emission: {msg}")],
+                return Err(UnitFailure::new(
+                    format!("panic during JS emission of `{}`", t.name),
+                    msg,
                 ));
             }
         }

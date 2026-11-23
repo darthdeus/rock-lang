@@ -20,9 +20,13 @@ representation decisions. The command-line pipeline starts in
 
 MIR is a typed control-flow graph: mutable variables are cells, instructions
 produce indexed results, and blocks end in terminators. Shared decisions belong
-in MIR or its plans, so definitions, callers and backends agree. The structural
+in MIR or its plans, so definitions, callers and backends agree. The MIR
 verifier can be enabled with `ROCK_MIR_CHECKS=1`; the CLI leaves it off by
-default. See [testing](testing.md) for running compiler tests.
+default. Besides the structure of each body, it checks that writers and readers
+agree on physical layouts: a keyed access on a record or value box whose layout
+the body determines must name a key that layout stores, a constructor must write
+its layout's keys, and no transform may move a field store into a temporary
+that nothing reads. See [testing](testing.md) for running compiler tests.
 
 `ROCK_MIR_DISABLE=pass1,pass2` turns optimizer passes off for differential
 testing: `sroa`, `copyprop`, `foldcmp`, `foldbr`, `inline`, `lambda`, `forl`,

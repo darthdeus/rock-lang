@@ -1,5 +1,6 @@
 use rustc_hash::FxHashSet as HashSet;
 
+use bone_core::hir::FnBackend;
 use bone_core::prelude::CompilerError;
 use bone_core::workspace::Workspace;
 use skull_mir::concrete::ConcretePlans;
@@ -76,6 +77,7 @@ impl Inliner<'_> {
         obs: &mut dyn PassObserver,
     ) -> Result<HashSet<FuncRef>, ChainError> {
         obs.begin(pass, mf);
+        let read_stores = read_stores(mf);
         let (callees, splices, copied_instructions) = crate::inline_functions_with_plans(
             ws,
             self.scx,
@@ -87,20 +89,37 @@ impl Inliner<'_> {
         .map_err(|error| ChainError { pass, error })?;
         obs.inlined(pass, splices, copied_instructions);
         obs.end(pass, mf);
-        verify_after(mf, stage, pass);
+        verify_after(ws, self.scx.target(), mf, stage, pass);
+        no_lost_writes(mf, read_stores, pass);
         Ok(callees)
     }
 }
 
 #[inline(always)]
-pub fn debug_verify(mf: &MirFunc, stage: Stage, what: &dyn std::fmt::Display) {
+pub fn debug_verify(
+    ws: &Workspace,
+    target: FnBackend,
+    mf: &MirFunc,
+    stage: Stage,
+    what: &dyn std::fmt::Display,
+) {
     if skull_mir::verify::checks_enabled() {
-        skull_mir::verify::assert_verified(mf, stage, what);
+        skull_mir::verify::assert_verified(ws, target, mf, stage, what);
     }
 }
 
-fn verify_after(mf: &MirFunc, stage: Stage, pass: BodyPass) {
-    debug_verify(mf, stage, &format_args!("{pass:?}"));
+fn verify_after(ws: &Workspace, target: FnBackend, mf: &MirFunc, stage: Stage, pass: BodyPass) {
+    debug_verify(ws, target, mf, stage, &format_args!("{pass:?}"));
+}
+
+fn read_stores(mf: &MirFunc) -> Option<skull_mir::verify::ReadStores> {
+    skull_mir::verify::checks_enabled().then(|| skull_mir::verify::read_stores(mf))
+}
+
+fn no_lost_writes(mf: &MirFunc, before: Option<skull_mir::verify::ReadStores>, pass: BodyPass) {
+    if let Some(before) = before {
+        skull_mir::verify::assert_no_lost_writes(mf, &before, &format_args!("{pass:?}"));
+    }
 }
 
 pub struct ChainError {
@@ -116,7 +135,7 @@ pub fn prepare_body(
     opts: &ChainOptions<'_>,
     obs: &mut dyn PassObserver,
 ) -> Result<HashSet<FuncRef>, ChainError> {
-    debug_verify(mf, Stage::LOWERED, &"lowering");
+    debug_verify(ws, opts.target, mf, Stage::LOWERED, &"lowering");
     let mut spliced = inliner.run(ws, mf, BodyPass::Inline, Stage::LOWERED, obs)?;
     convert(ws, mf, name, opts, obs)?;
     if opts.inline_hoisted {
@@ -132,7 +151,7 @@ pub fn convert_body(
     opts: &ChainOptions<'_>,
     obs: &mut dyn PassObserver,
 ) -> Result<(), ChainError> {
-    debug_verify(mf, Stage::LOWERED, &"lowering");
+    debug_verify(ws, opts.target, mf, Stage::LOWERED, &"lowering");
     convert(ws, mf, name, opts, obs)
 }
 
@@ -143,9 +162,9 @@ fn convert(
     opts: &ChainOptions<'_>,
     obs: &mut dyn PassObserver,
 ) -> Result<(), ChainError> {
-    cleanup(ws, mf, BodyPass::Cleanup, obs)?;
+    cleanup(ws, opts.target, mf, BodyPass::Cleanup, obs)?;
     if crate::lambda_inline::inline_lambda_calls(mf) {
-        cleanup(ws, mf, BodyPass::Cleanup, obs)?;
+        cleanup(ws, opts.target, mf, BodyPass::Cleanup, obs)?;
     }
     obs.begin(BodyPass::Closure, mf);
     let named = mf.nested_fns.len();
@@ -155,7 +174,7 @@ fn convert(
     }
     crate::convert_named_nested_closures(&mut mf.nested_fns[..named], opts.reserve);
     obs.end(BodyPass::Closure, mf);
-    verify_after(mf, Stage::CONVERTED, BodyPass::Closure);
+    verify_after(ws, opts.target, mf, Stage::CONVERTED, BodyPass::Closure);
     if opts.counted_loops != CountedLoops::Skip {
         recover_and_elide(ws, mf, opts, obs);
         if opts.counted_loops == CountedLoops::RootAndNested {
@@ -176,21 +195,23 @@ fn recover_and_elide(
     obs.begin(BodyPass::CountedLoop, mf);
     crate::recover_counted_loops(ws, mf);
     obs.end(BodyPass::CountedLoop, mf);
-    verify_after(mf, Stage::CONVERTED, BodyPass::CountedLoop);
+    verify_after(ws, opts.target, mf, Stage::CONVERTED, BodyPass::CountedLoop);
     obs.begin(BodyPass::Bounds, mf);
     let count = crate::elide_bounds_checks_for_target(Some(ws), mf, opts.target);
     obs.bounds_elided(count);
     obs.end(BodyPass::Bounds, mf);
-    verify_after(mf, Stage::CONVERTED, BodyPass::Bounds);
+    verify_after(ws, opts.target, mf, Stage::CONVERTED, BodyPass::Bounds);
 }
 
 fn cleanup(
     ws: &Workspace,
+    target: FnBackend,
     mf: &mut MirFunc,
     pass: BodyPass,
     obs: &mut dyn PassObserver,
 ) -> Result<(), ChainError> {
     obs.begin(BodyPass::Cleanup, mf);
+    let read_stores = read_stores(mf);
     crate::cleanup_with_nobox(ws, mf).map_err(|error| ChainError { pass, error })?;
     obs.end(BodyPass::Cleanup, mf);
     // A hoisted body's cleanup runs after closure conversion.
@@ -198,7 +219,8 @@ fn cleanup(
         BodyPass::HoistedInline => Stage::CONVERTED,
         _ => Stage::LOWERED,
     };
-    verify_after(mf, stage, pass);
+    verify_after(ws, target, mf, stage, pass);
+    no_lost_writes(mf, read_stores, BodyPass::Cleanup);
     Ok(())
 }
 
@@ -216,7 +238,7 @@ fn inline_hoisted(
         }
         let pass = BodyPass::HoistedInline;
         spliced.extend(inliner.run(ws, nf, pass, Stage::CONVERTED, obs)?);
-        cleanup(ws, nf, pass, obs)?;
+        cleanup(ws, inliner.scx.target(), nf, pass, obs)?;
         inline_hoisted(ws, inliner, &mut nf.nested_fns, spliced, obs)?;
     }
     Ok(())

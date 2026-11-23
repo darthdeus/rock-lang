@@ -39,7 +39,8 @@ without running it.
 `@test(backends = "lua")` limits a backend-specific test; accepted names are
 `lua`, `js`, and `glsl`. Shared language behavior should run on both LuaJIT
 and JS. Tests that JS cannot compile are reported as skips; CI caps their
-count with `JS_MAX_SKIPS` in `.github/workflows/ci.yml`.
+count with `JS_MAX_SKIPS` in `.github/workflows/ci.yml`. A compiler panic
+during JS emission, such as failed MIR verification, fails the file.
 
 `@test(mir_checks = true)` runs only when MIR checks are enabled with
 `ROCK_MIR_CHECKS=1`. Use `@test(mir_checks = false)` for a test that requires

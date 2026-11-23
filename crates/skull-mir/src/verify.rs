@@ -103,8 +103,45 @@ pub fn verify(mf: &MirFunc, stage: Stage) -> Vec<Violation> {
     out
 }
 
-pub fn assert_verified(mf: &MirFunc, stage: Stage, what: &dyn std::fmt::Display) {
-    let violations = verify(mf, stage);
+mod layout;
+
+/// The structural checks plus the physical-layout checks, which need the
+/// workspace's plans for `target`.
+pub fn verify_with_layouts(
+    ws: &bone_core::workspace::Workspace,
+    target: bone_core::hir::FnBackend,
+    mf: &MirFunc,
+    stage: Stage,
+) -> Vec<Violation> {
+    let mut out = verify(mf, stage);
+    layout::verify_layout(ws, target, mf, &mut out);
+    out
+}
+
+/// Field stores a pass must keep on storage that is read; see [`assert_no_lost_writes`].
+pub struct ReadStores(Vec<Idx<Inst>>);
+
+pub fn read_stores(mf: &MirFunc) -> ReadStores {
+    ReadStores(layout::stores_into_read_cells(mf))
+}
+
+pub fn assert_no_lost_writes(mf: &MirFunc, before: &ReadStores, pass: &dyn std::fmt::Display) {
+    let mut violations = Vec::new();
+    layout::lost_writes(mf, &before.0, pass, &mut violations);
+    report_violations(&violations, pass);
+}
+
+pub fn assert_verified(
+    ws: &bone_core::workspace::Workspace,
+    target: bone_core::hir::FnBackend,
+    mf: &MirFunc,
+    stage: Stage,
+    what: &dyn std::fmt::Display,
+) {
+    report_violations(&verify_with_layouts(ws, target, mf, stage), what);
+}
+
+fn report_violations(violations: &[Violation], what: &dyn std::fmt::Display) {
     if violations.is_empty() {
         return;
     }

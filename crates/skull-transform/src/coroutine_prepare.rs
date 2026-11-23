@@ -43,12 +43,19 @@ pub fn prepare_coroutine(
     source_func: &bone_core::hir::Function,
     plan: &CoroutinePlan,
     func: &MirFunc,
+    target: bone_core::hir::FnBackend,
     reserve: &dyn Fn(&str),
 ) -> Result<PreparedCoroutine, CompilerError> {
     let sites = crate::closure::lambda_sites(func);
     let channel = plan.channel.as_ref();
     let mut lowered = crate::transform_coroutine(func, channel, plan.has_return_value());
-    crate::body_chain::debug_verify(&lowered.step, Stage::LOWERED, &"the coroutine transform");
+    crate::body_chain::debug_verify(
+        ws,
+        target,
+        &lowered.step,
+        Stage::LOWERED,
+        &"the coroutine transform",
+    );
     reserve(&plan.resume());
     if let Some(advance) = plan.advance() {
         reserve(&advance);
@@ -135,9 +142,21 @@ pub fn prepare_coroutine(
             crate::cleanup_with_nobox(ws, nf)?;
         }
     }
-    crate::body_chain::debug_verify(&lowered.step, Stage::EMIT_READY, &"coroutine preparation");
+    crate::body_chain::debug_verify(
+        ws,
+        target,
+        &lowered.step,
+        Stage::EMIT_READY,
+        &"coroutine preparation",
+    );
     for aux in defers.iter().chain(hooks.iter().map(|(_, aux)| aux)) {
-        crate::body_chain::debug_verify(aux, Stage::CONVERTED, &"coroutine preparation");
+        crate::body_chain::debug_verify(
+            ws,
+            target,
+            aux,
+            Stage::CONVERTED,
+            &"coroutine preparation",
+        );
     }
     let volatile_vars = &ws.comptime_inputs.volatile_vars;
     let mut code_artifact =

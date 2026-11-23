@@ -50,10 +50,17 @@ pub(crate) fn emit_coroutine_with_artifact(
         return Err(noalloc::reject_generated(source_func, site));
     }
     let interner = scx.interner();
-    let prepared =
-        skull_transform::prepare_coroutine(ws, interner, source_func, plan, func, &|name| {
+    let prepared = skull_transform::prepare_coroutine(
+        ws,
+        interner,
+        source_func,
+        plan,
+        func,
+        scx.target(),
+        &|name| {
             ctx.mint_synthetic(name.to_string());
-        })?;
+        },
+    )?;
     let constructor = emit_constructor(
         plan,
         &prepared,

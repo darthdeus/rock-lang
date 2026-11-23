@@ -191,6 +191,10 @@ pub struct RepPlan {
 }
 
 impl RepPlan {
+    pub fn target(&self) -> FnBackend {
+        self.target
+    }
+
     pub fn use_context(&self) -> RepUse {
         self.use_context
     }
@@ -525,6 +529,13 @@ impl Default for TypeFacts {
             reps: std::array::from_fn(|_| std::sync::atomic::AtomicU32::new(0)),
             containers: std::array::from_fn(|_| OnceLock::new()),
         }
+    }
+}
+
+impl RepArena {
+    /// Unique per arena, so worker-local caches can key on it.
+    pub(crate) fn id(&self) -> u64 {
+        self.arena_id
     }
 }
 

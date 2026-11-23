@@ -1,6 +1,4 @@
-use bone_core::hir::{FnBackend, StructDef};
 use rustc_hash::FxHashMap;
-use skull_mir::lower::{nobox_leaf_paths, struct_field_plan};
 use ustr::Ustr;
 
 use super::{CodegenCtx, ContainerKind, Emitter, Idx, Inst, Lit, Workspace, write_lua_string};
@@ -17,8 +15,7 @@ pub(super) fn plan(ws: &Workspace) -> RecordSlots {
         .flat_map(|module| module.structs.values())
         .filter(|s| !s.is_value && !s.is_nobox && !s.lua_named && !s.fields.is_empty())
         .filter_map(|s| {
-            let mut fields = Vec::new();
-            record_fields(ws, s, "", &mut fields, &mut Vec::new())?;
+            let fields = skull_mir::lower::record_keys(ws, s)?;
             let slots = fields
                 .iter()
                 .enumerate()
@@ -27,56 +24,6 @@ pub(super) fn plan(ws: &Workspace) -> RecordSlots {
             Some((s.name, RecordLayout { fields, slots }))
         })
         .collect()
-}
-
-fn record_fields(
-    ws: &Workspace,
-    def: &StructDef,
-    prefix: &str,
-    out: &mut Vec<Ustr>,
-    visiting: &mut Vec<Ustr>,
-) -> Option<()> {
-    if visiting.contains(&def.name) {
-        return None;
-    }
-    visiting.push(def.name);
-    let key = |name: Ustr| {
-        if prefix.is_empty() {
-            name
-        } else {
-            Ustr::from(&format!("{prefix}{name}"))
-        }
-    };
-    for field in &def.fields {
-        let plan =
-            struct_field_plan(ws, FnBackend::Lua, def.name, field.name, !prefix.is_empty()).ok()?;
-        if let Some((name, nullable)) = plan.embed() {
-            if let Some(leaves) = nobox_leaf_paths(ws, name) {
-                let field = key(field.name);
-                out.extend(
-                    leaves
-                        .iter()
-                        .map(|leaf| Ustr::from(&format!("{field}.{leaf}"))),
-                );
-                if nullable {
-                    out.push(field);
-                }
-                continue;
-            }
-            let id = ws.nominals.struct_id(name)?;
-            let child = &ws.module(id.module).structs[id.def];
-            record_fields(ws, child, &format!("{}.", key(field.name)), out, visiting)?;
-            if nullable {
-                out.push(key(field.name));
-            }
-        } else if let Some(fields) = plan.flat_storage_keys(field.name) {
-            out.extend(fields.into_iter().map(key));
-        } else {
-            out.push(key(field.name));
-        }
-    }
-    visiting.pop();
-    Some(())
 }
 
 impl CodegenCtx {

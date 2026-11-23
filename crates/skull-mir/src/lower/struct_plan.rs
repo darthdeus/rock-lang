@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use bone_core::hir::{FnBackend, TypeCtor, TypeExpr};
+use bone_core::hir::{FnBackend, StructDef, TypeCtor, TypeExpr};
 use bone_core::prelude::TyId;
 use bone_core::workspace::Workspace;
 use ustr::Ustr;
@@ -531,4 +531,63 @@ pub fn gc_table_fields(
             })
         })
         .collect()
+}
+
+/// A heap record's physical keys in slot order: declared fields, an inline
+/// child's dotted leaves and presence tag, and a flat enum's slots. `None` for
+/// a self-embedding record.
+pub fn record_keys(ws: &Workspace, def: &StructDef) -> Option<Vec<Ustr>> {
+    let mut keys = Vec::new();
+    record_fields(ws, def, "", &mut keys, &mut Vec::new())?;
+    Some(keys)
+}
+
+fn record_fields(
+    ws: &Workspace,
+    def: &StructDef,
+    prefix: &str,
+    out: &mut Vec<Ustr>,
+    visiting: &mut Vec<Ustr>,
+) -> Option<()> {
+    if visiting.contains(&def.name) {
+        return None;
+    }
+    visiting.push(def.name);
+    let key = |name: Ustr| {
+        if prefix.is_empty() {
+            name
+        } else {
+            Ustr::from(&format!("{prefix}{name}"))
+        }
+    };
+    for field in &def.fields {
+        let plan =
+            struct_field_plan(ws, FnBackend::Lua, def.name, field.name, !prefix.is_empty()).ok()?;
+        if let Some((name, nullable)) = plan.embed() {
+            if let Some(leaves) = nobox_leaf_paths(ws, name) {
+                let field = key(field.name);
+                out.extend(
+                    leaves
+                        .iter()
+                        .map(|leaf| Ustr::from(&format!("{field}.{leaf}"))),
+                );
+                if nullable {
+                    out.push(field);
+                }
+                continue;
+            }
+            let id = ws.nominals.struct_id(name)?;
+            let child = &ws.module(id.module).structs[id.def];
+            record_fields(ws, child, &format!("{}.", key(field.name)), out, visiting)?;
+            if nullable {
+                out.push(key(field.name));
+            }
+        } else if let Some(fields) = plan.flat_storage_keys(field.name) {
+            out.extend(fields.into_iter().map(key));
+        } else {
+            out.push(key(field.name));
+        }
+    }
+    visiting.pop();
+    Some(())
 }

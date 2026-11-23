@@ -3,6 +3,7 @@ mod abi_plan;
 mod common;
 mod gpu_layout;
 mod instance_identity;
+mod layout_verify;
 mod lower_concrete;
 mod monoty;
 mod projection_demand;

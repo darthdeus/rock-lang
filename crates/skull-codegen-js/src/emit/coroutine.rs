@@ -33,7 +33,15 @@ pub(super) fn emit_coroutine_js(
         hooks,
         code_artifact,
         keys,
-    } = skull_transform::prepare_coroutine(ws, interner, source_func, plan, mf, &|_| {})?;
+    } = skull_transform::prepare_coroutine(
+        ws,
+        interner,
+        source_func,
+        plan,
+        mf,
+        bone_core::hir::FnBackend::Js,
+        &|_| {},
+    )?;
     let mut hoisted = hoisted.clone();
     let regions: Vec<&MirFunc> = std::iter::once(&lowered.step)
         .chain(defers.iter())
