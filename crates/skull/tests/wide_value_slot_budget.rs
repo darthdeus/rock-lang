@@ -36,14 +36,36 @@ fn four_live_fifty_leaf_values_are_a_spanned_compile_error() {
     assert!(message.contains("`@/<test>::run`"));
     assert!(message.contains("LuaJIT"));
     assert!(message.contains("LJ_MAX_LOCVAR") || message.contains("LJ_MAX_SLOTS"));
-    assert!(message.contains("nobox"));
-    assert!(message.contains("cannot be boxed"));
+    assert!(message.contains("nobox `W`: cannot be boxed"));
+    assert!(message.contains("remove `nobox`"));
+    assert!(message.contains("materialize"));
     let label = err.labels.first().expect("a spanned label");
     assert_eq!(label.span.file.as_str(), "<test>");
     assert_eq!(err.location.file.as_str(), "<test>");
     let lua = emit_module_without_frame_limits(&fixture(50, 4));
     let load = luajit_loads(&lua).expect_err("must not load");
     assert!(load.contains("more than 200 local variables") || load.contains("too complex"));
+}
+
+#[test]
+fn the_wide_signature_diagnostic_names_nobox_parameters() {
+    let params = (0..5)
+        .map(|i| format!("v{i}: W"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let uses = (0..5)
+        .map(|i| format!("    let w{i} = v{i}\n    total += w{i}.f0\n"))
+        .collect::<String>();
+    let args = ["mk(1.0)"; 5].join(", ");
+    let source = format!(
+        "{}fn run({params}) -> float {{\n    let total = 0.0\n{uses}    return total\n}}\n\
+         fn main() {{ print(\"{{run({args})}}\") }}",
+        wide_decls(50)
+    );
+    let error = try_emit_module(&source).expect_err("250 lanes cannot fit");
+    assert!(error.message.contains("parameter `v0`"));
+    assert!(error.message.contains("nobox `W`: cannot be boxed"));
+    assert!(error.message.contains("remove `nobox`"));
 }
 
 fn verdicts_agree(tag: &str, src: &str) -> bool {

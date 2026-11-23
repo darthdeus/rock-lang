@@ -18,6 +18,7 @@ write `materialize(point)` explicitly. Materialization permits boxing; an
 optimizer may eliminate a box whose allocation is not observable. Some
 otherwise unboxed uses may still be rejected when their representation is not
 supported.
+The compiler rejects Lua output when live `nobox` lanes would exceed LuaJIT's local or register limit.
 
 ## Operators and references
 

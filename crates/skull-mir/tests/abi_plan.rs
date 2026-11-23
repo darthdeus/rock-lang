@@ -351,10 +351,8 @@ fn safe_caller(v: Sample?) -> float { return v?.demand_method() ?? 0.0 }
     let abi = nested.abi_plan.as_ref().expect("nested parameter ABI");
     let rep = abi.rep_plan(abi.representation().params()[0]);
     assert!(rep.nobox());
-    assert!(
-        !rep.boxable(),
-        "transport omits fields required for a complete box"
-    );
+    let paths = rep.leaf_paths().expect("nobox transport has leaves");
+    assert_eq!(paths, ["kept.x", "kept.y"].map(Ustr::from));
 
     for (caller, callee, width) in [
         ("leaf_caller", "leaf", 1),

@@ -186,9 +186,8 @@ pub struct RepPlan {
     storage: Option<ValueStorage>,
     column_eligible: bool,
     nobox: bool,
-    /// False when boxing would implicitly materialize a `nobox` child, which the
-    /// `nobox` guarantee forbids; the lane budget must leave such a value scalar.
-    boxable: bool,
+    /// Passing a narrow GC box may allocate its ordinary children in hot calls.
+    prefer_scalar: bool,
 }
 
 impl RepPlan {
@@ -210,10 +209,6 @@ impl RepPlan {
 
     pub fn nobox(&self) -> bool {
         self.nobox
-    }
-
-    pub fn boxable(&self) -> bool {
-        self.boxable
     }
 
     /// A direct, nonnullable value can rebuild its leaf ctor from these fields.
@@ -590,19 +585,15 @@ impl Eq for RepArena {}
 
 fn value_shape_facts(ws: &Workspace, name: Ustr) -> (Option<ValueStorage>, bool, bool) {
     let Some(plan) = super::shape::planned_value(ws, name) else {
-        return (None, false, true);
+        return (None, false, false);
     };
     let column_eligible = super::shape::is_value_struct(ws, name)
         && (plan.scalarizable || crate::lower::is_nobox_nominal(ws, name));
-    (
-        Some(plan.storage),
-        column_eligible,
-        !plan.box_materializes_nobox,
-    )
+    (Some(plan.storage), column_eligible, plan.gc_contains_nobox)
 }
 
-/// Ordinary values with more than this many payload leaves use one boxed slot
-/// on Lua call wires; `nobox` values stay scalar at every width.
+/// Ordinary values above this width can use one boxed slot on Lua call wires.
+/// GC boxes containing inline nobox children count their physical keys.
 pub const WIDE_VALUE_PAYLOAD_LEAF_CUT: usize = 48;
 
 /// Maximum scalar lanes across a signature, counting every parameter and
@@ -614,15 +605,23 @@ fn payload_leaf_count(shape: &ValueShape) -> usize {
     shape.leaf_count() - usize::from(shape.nullable)
 }
 
-/// Cdata and leaf-table boxes flatten child leaves; GC tables keep declared keys,
-/// so boxing one would materialize a `nobox` child.
-fn box_would_materialize_nobox(ws: &Workspace, name: Ustr) -> bool {
-    super::shape::planned_value(ws, name).is_some_and(|plan| plan.box_materializes_nobox)
+fn wide_gc_box(ws: &Workspace, target: FnBackend, name: Ustr) -> bool {
+    super::shape::gc_table_inline_fields(ws, target, name)
+        .ok()
+        .flatten()
+        .is_some_and(|fields| {
+            fields
+                .iter()
+                .map(|field| field.inline.as_ref().map_or(1, ValueShape::leaf_count))
+                .sum::<usize>()
+                > WIDE_VALUE_PAYLOAD_LEAF_CUT
+        })
 }
 
-/// `None` is an opaque slot. Storage width does not affect the ABI.
+/// `None` uses one opaque slot. Declared nobox values always use scalar lanes.
 fn wire_value_shape(
     ws: &Workspace,
+    target: FnBackend,
     ty: &crate::monoty::MonoTy,
     use_context: RepUse,
     guarantees: RepGuarantees,
@@ -636,7 +635,8 @@ fn wire_value_shape(
     let shape = crate::lower::mono_value_shape(ws, ty)?;
     if matches!(use_context, RepUse::Parameter | RepUse::Return)
         && payload_leaf_count(&shape) > WIDE_VALUE_PAYLOAD_LEAF_CUT
-        && !box_would_materialize_nobox(ws, shape.name)
+        && (!super::shape::planned_value(ws, shape.name).is_some_and(|plan| plan.gc_contains_nobox)
+            || wide_gc_box(ws, target, shape.name))
     {
         return None;
     }
@@ -730,9 +730,7 @@ impl RepArena {
     }
 
     fn intern(&self, target: FnBackend, use_context: RepUse, layout: RepLayout) -> RepId {
-        // Only `intern_value_shape_plan` mints `Leaves` plans, so boxability is vacuous
-        // here.
-        self.intern_with_facts(target, use_context, layout, None, false, false, true)
+        self.intern_with_facts(target, use_context, layout, None, false, false, false)
     }
 
     fn intern_with_facts(
@@ -743,7 +741,7 @@ impl RepArena {
         storage: Option<ValueStorage>,
         column_eligible: bool,
         nobox: bool,
-        boxable: bool,
+        prefer_scalar: bool,
     ) -> RepId {
         let key = RepKey::Layout(target, use_context, layout, storage, column_eligible, nobox);
         REP_READ_CACHE.with(|cache| {
@@ -780,7 +778,7 @@ impl RepArena {
                             storage,
                             column_eligible,
                             nobox,
-                            boxable,
+                            prefer_scalar,
                         });
                         by_key.insert(key.clone(), id);
                         id
@@ -804,7 +802,7 @@ impl RepArena {
             return id;
         }
         // The facts read only the nominal name, so every worker records the same answer.
-        let (storage, column_eligible, boxable) = value_shape_facts(ws, shape.name);
+        let (storage, column_eligible, prefer_scalar) = value_shape_facts(ws, shape.name);
         let nobox = crate::lower::is_nobox_nominal(ws, shape.name);
         let id = self.intern_with_facts(
             target,
@@ -813,7 +811,7 @@ impl RepArena {
             storage,
             column_eligible,
             nobox,
-            boxable,
+            prefer_scalar,
         );
         self.intern_nested_value_plans(ws, target, &shape);
         self.alias_key(key, id);
@@ -1196,7 +1194,7 @@ impl RepArena {
                 ctor: MonoCtor::Nominal(_),
                 ..
             } => {
-                let shape = wire_value_shape(ws, ty, use_context, guarantees);
+                let shape = wire_value_shape(ws, target, ty, use_context, guarantees);
                 if let Some(shape) = shape {
                     return Ok(self.intern_value_shape_plan(ws, target, use_context, shape));
                 }
@@ -1246,7 +1244,9 @@ impl RepArena {
                 .chain(result.map(|id| (params.len(), id, RepUse::Return)))
                 .filter(|(_, id, _)| {
                     let plan = self.get(*id);
-                    matches!(plan.layout(), RepLayout::Leaves(_)) && !plan.nobox() && plan.boxable()
+                    matches!(plan.layout(), RepLayout::Leaves(_))
+                        && !plan.nobox()
+                        && !plan.prefer_scalar
                 })
                 .max_by_key(|(index, id, _)| (lanes(id), std::cmp::Reverse(*index)));
             let Some((index, _, use_context)) = widest else {
@@ -1948,7 +1948,7 @@ impl BackendFnAbiPlan {
                 rep.storage,
                 false,
                 rep.nobox,
-                false,
+                rep.prefer_scalar,
             );
         }
     }
@@ -2022,7 +2022,7 @@ impl BackendFnAbiPlan {
                             rep.storage,
                             false,
                             rep.nobox,
-                            false,
+                            rep.prefer_scalar,
                         );
                     }
                 }

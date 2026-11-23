@@ -525,11 +525,15 @@ impl Families {
         escape_loads: &[(Idx<Inst>, Idx<Cell>)],
         chained_roots: &HashSet<usize>,
     ) {
-        // A chained family that also escapes would rebuild its value at every
-        // escaping use, which can cost more than the one copy it replaces.
+        // A chained family that escapes can cost more to rebuild than to copy.
+        // A wide family would hold all of its fields live until the escape.
         for (_, c) in escape_loads {
             let root = self.leaf_root(raw(*c));
-            if chained_roots.contains(&root) {
+            if chained_roots.contains(&root)
+                || self.value_order.get(&root).is_some_and(|(fields, _, _)| {
+                    fields.len() > skull_mir::lower::WIDE_VALUE_PAYLOAD_LEAF_CUT
+                })
+            {
                 self.disq[root] = true;
             }
         }

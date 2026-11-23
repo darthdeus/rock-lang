@@ -30,10 +30,10 @@ functions retain their declared names; raw target code that calls a Rock
 function by that name needs that guarantee.
 
 The ABI planner chooses one representation for each definition and its calls.
-Ordinary values can be split into scalar lanes or boxed to fit Lua frame limits;
-`nobox` values and values containing a nested `nobox` child cannot be implicitly
-boxed. Function values and opaque calls have their own boundary plans. Value
-copy semantics and layouts must hold regardless of the chosen wire format.
+Ordinary values can be split into scalar lanes or boxed to fit Lua frame limits.
+A boxed ordinary value stores its `nobox` children inline. A `nobox` value uses
+scalar lanes in the Lua call ABI. Function values and opaque calls have their own
+boundary plans. Value copy semantics and layouts hold across wire formats.
 Immutable call and return boundaries may reuse existing boxed value children,
 including an immutable local selected by `if` or `match` from proven immutable
 bindings; mutable, borrowed, stored and foreign sources keep their snapshots.

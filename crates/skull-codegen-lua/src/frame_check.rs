@@ -145,27 +145,35 @@ fn frame_limit_error(
             overflow.cost.wire_values,
         ));
     }
-    let mut contributors: Vec<String> = Vec::new();
-    for &call in &overflow.wide_calls {
-        for line in wide_call_contributors(ws, func, call) {
-            if !contributors.contains(&line) {
-                contributors.push(line);
-            }
-        }
-    }
-    contributors.truncate(3);
-    let nobox = contributors.iter().any(|c| c.contains("nobox"));
+    let mut contributors: Vec<_> = func
+        .abi_plan
+        .iter()
+        .chain(
+            overflow
+                .wide_calls
+                .iter()
+                .filter_map(|id| func.call_abi_plans.get(id)),
+        )
+        .flat_map(|abi| signature_contributors(ws, abi))
+        .collect();
+    contributors.sort_by_key(|(nobox, width, _)| std::cmp::Reverse((*nobox, *width)));
+    let nobox = contributors.first().is_some_and(|(nobox, _, _)| *nobox);
     if !contributors.is_empty() {
-        message.push_str("\n  widest values live across a call in it:");
+        message.push_str("\n  widest values on the relevant Lua call signatures:");
     }
-    for line in &contributors {
+    let mut seen = HashSet::default();
+    for (_, _, line) in contributors
+        .iter()
+        .filter(|(_, _, line)| seen.insert(line.as_str()))
+        .take(3)
+    {
         message.push_str("\n    ");
         message.push_str(line);
     }
     if nobox {
         message.push_str(
-            "\n  a `nobox value` cannot be boxed automatically -- keep fewer wide values \
-             live across one call, or split this function",
+            "\n  remove `nobox` from a wide type, pass an explicit `materialize(value)` box \
+             through a boxed parameter, or split this function",
         );
     } else {
         message.push_str("\n  keep fewer values live across one call, or split this function");
@@ -185,61 +193,48 @@ fn frame_limit_error(
     err
 }
 
-/// The widest values on the wire of the call at `id`, as message lines. Read
-/// Read from the ABI plan the call lowering used, so the lane counts match
-/// the emitted argument list.
-pub(crate) fn wide_call_contributors(ws: &Workspace, func: &MirFunc, id: Idx<Inst>) -> Vec<String> {
-    let Some(abi) = func.call_abi_plans.get(&id) else {
-        return Vec::new();
+fn signature_contributors(
+    ws: &Workspace,
+    abi: &skull_mir::lower::BackendFnAbiPlan,
+) -> Vec<(bool, usize, String)> {
+    use skull_mir::lower::RepLayout;
+
+    let callee = func_of(ws, abi.decl());
+    let mut lines = Vec::new();
+    let mut append = |rep, width, subject: String| {
+        if width < 2 {
+            return;
+        }
+        let plan = abi.rep_plan(rep);
+        let suffix = match plan.layout() {
+            RepLayout::Leaves(shape) if plan.nobox() => format!(
+                " (nobox `{}`: cannot be boxed)",
+                bone_core::modules::display_name(shape.name().as_str())
+            ),
+            _ => String::new(),
+        };
+        lines.push((
+            plan.nobox(),
+            width,
+            format!(
+                "{subject} of `{}` is {width} scalar lanes{suffix}",
+                callee.name
+            ),
+        ));
     };
-    let decl = abi.decl();
-    let callee = func_of(ws, decl);
-    let callee_name = callee.name;
-    let mut lines: Vec<(usize, String)> = Vec::new();
+
     if let Some(widths) = abi.param_leaf_widths() {
-        let reps = abi.representation().params();
-        for (i, width) in widths.iter().copied().enumerate() {
-            if width < 2 {
-                continue;
-            }
-            let nobox = reps.get(i).is_some_and(|r| abi.rep_plan(*r).nobox());
+        for (i, (&rep, width)) in abi.representation().params().iter().zip(widths).enumerate() {
             let param = callee
                 .param_decls
                 .get(i)
                 .map(|p| p.name.to_string())
                 .unwrap_or_else(|| format!("#{i}"));
-            lines.push((
-                width,
-                format!(
-                    "parameter `{param}` of `{callee_name}` is {width} scalar lanes{}",
-                    if nobox {
-                        " (nobox: cannot be boxed)"
-                    } else {
-                        ""
-                    }
-                ),
-            ));
+            append(rep, width, format!("parameter `{param}`"));
         }
     }
-    let result_lanes = abi.result_lanes();
-    if result_lanes > 1 {
-        let nobox = abi
-            .representation()
-            .result()
-            .is_some_and(|r| abi.rep_plan(r).nobox());
-        lines.push((
-            result_lanes,
-            format!(
-                "the return of `{callee_name}` is {result_lanes} scalar lanes{}",
-                if nobox {
-                    " (nobox: cannot be boxed)"
-                } else {
-                    ""
-                }
-            ),
-        ));
+    if let Some(rep) = abi.representation().result() {
+        append(rep, abi.result_lanes(), "the return".to_string());
     }
-    lines.sort_by_key(|x| std::cmp::Reverse(x.0));
-    lines.truncate(3);
-    lines.into_iter().map(|(_, line)| line).collect()
+    lines
 }

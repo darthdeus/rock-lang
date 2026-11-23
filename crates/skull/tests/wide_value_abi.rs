@@ -116,6 +116,30 @@ fn main() {{ print(\"{{roundtrip(0.0)}}\") }}
     assert_eq!(function_params(&lua, "with_anchor").len(), 5);
 }
 
+#[test]
+fn a_narrow_gc_box_keeps_its_wide_scalar_call_wire() {
+    let payload = WIDE_VALUE_PAYLOAD_LEAF_CUT + 2;
+    let source = format!(
+        "value Payload {{ {fields} }}
+         nobox value Child {{ x: float }}
+         value Narrow {{ label: string, child: Child, payload: Payload }}
+         fn make(x: float) -> Narrow {{
+             return Narrow {{ label: \"narrow\", child: Child {{ x: x }}, payload: Payload {{ {inits} }} }}
+         }}
+         fn read(v: Narrow) -> float {{
+             let alias = v
+             return alias.payload.f{last} + alias.child.x
+         }}
+         fn main() {{ print(\"{{read(make(1.0))}}\") }}",
+        fields = float_fields(payload),
+        inits = float_inits(payload, "x"),
+        last = payload - 1,
+    );
+    let lua = emit_module(&source);
+    assert_eq!(function_params(&lua, "read").len(), payload + 2);
+    assert_eq!(run_main(&lua), (payload + 1).to_string());
+}
+
 fn cut_fixture(payload: usize, nullable: bool) -> String {
     let q = if nullable { "?" } else { "" };
     let read = if nullable {
@@ -261,4 +285,36 @@ fn main() {{
     assert_eq!(function_params(&lua, "forward").len(), 1);
     assert_eq!(body.matches("_ct(").count(), 0);
     assert_eq!(run_main(&lua), "3 9");
+}
+
+#[test]
+fn a_wide_table_value_boxes_its_nobox_child_as_inline_leaves() {
+    let src = format!(
+        r#"
+nobox value Child {{ {} }}
+value Wide {{ label: string, child: Child? }}
+struct Holder {{ wide: Wide }}
+fn make(label: string, x: float) -> Wide {{
+    return Wide {{ label: label, child: Child {{ {} }} }}
+}}
+fn read(w: Wide) -> float {{
+    if let child = w.child {{ return child.f0 + child.f49 }}
+    return -1.0
+}}
+fn main() {{
+    let a = make("a", 1.0)
+    let b = make("b", 2.0)
+    let c = make("c", 3.0)
+    let h = Holder {{ wide: make("d", 4.0) }}
+    h.wide.child = null
+    print("{{read(a)}} {{read(b)}} {{read(c)}} {{read(h.wide)}}")
+}}
+"#,
+        float_fields(50),
+        float_inits(50, "x")
+    );
+    let lua = emit_module(&src);
+    assert_eq!(function_params(&lua, "read").len(), 1);
+    assert!(!function_body(&lua, "make").contains("Child_ct("));
+    assert_eq!(run_main(&lua), "51 53 55 -1");
 }

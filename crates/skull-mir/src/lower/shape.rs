@@ -386,6 +386,10 @@ pub(crate) enum FieldShape {
 }
 
 impl ValueShape {
+    pub fn name(&self) -> Ustr {
+        self.name
+    }
+
     /// Total primitive-leaf count: the scalar-ABI arity.
     pub(crate) fn leaf_count(&self) -> usize {
         self.fields
@@ -419,7 +423,7 @@ pub(crate) struct PlannedValue {
     shape: ValueShape,
     cdata: Option<CLayout>,
     pub(crate) scalarizable: bool,
-    pub(crate) box_materializes_nobox: bool,
+    pub(crate) gc_contains_nobox: bool,
     contains_flat_enum: bool,
 }
 
@@ -463,7 +467,7 @@ fn planned_value_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Op
             storage: ValueStorage::CData,
             cdata: Some(layout),
             scalarizable: true,
-            box_materializes_nobox: false,
+            gc_contains_nobox: false,
             contains_flat_enum: false,
         });
     }
@@ -478,7 +482,7 @@ fn planned_value_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Op
     let mut cdata = (sd.generics.is_empty() || handle).then(CLayout::new);
     let mut scalarizable = true;
     let mut contains_flat_enum = false;
-    let mut box_materializes_nobox = false;
+    let mut gc_contains_nobox = false;
     let mut fields = Vec::with_capacity(sd.fields.len());
 
     for field in &sd.fields {
@@ -516,8 +520,7 @@ fn planned_value_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Op
                 {
                     scalarizable &= plan.scalarizable;
                     contains_flat_enum |= plan.contains_flat_enum;
-                    box_materializes_nobox |=
-                        plan.box_materializes_nobox || is_nobox_nominal(ws, child);
+                    gc_contains_nobox |= plan.gc_contains_nobox || is_nobox_nominal(ws, child);
                     plan.shape.nullable = nullable;
                     if !nullable {
                         member = plan.cdata.map(|layout| CMember::Aggregate(child, layout));
@@ -557,7 +560,7 @@ fn planned_value_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Op
         },
         cdata,
         scalarizable,
-        box_materializes_nobox: storage == ValueStorage::GcTable && box_materializes_nobox,
+        gc_contains_nobox: storage == ValueStorage::GcTable && gc_contains_nobox,
         contains_flat_enum,
     })
 }
