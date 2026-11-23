@@ -1101,6 +1101,16 @@ pub extern "C" fn stone_ensure_font_atlas_instance(font_id: c_uint, pixel_size: 
     .unwrap_or(0)
 }
 
+/// The same lookup as a Lua number: LuaJIT boxes a `u64` result in a cdata
+/// whenever the call runs in the interpreter, and instance ids are far below 2^53.
+#[no_mangle]
+pub extern "C" fn stone_ensure_font_atlas_instance_number(
+    font_id: c_uint,
+    pixel_size: c_int,
+) -> f64 {
+    stone_ensure_font_atlas_instance(font_id, pixel_size) as f64
+}
+
 #[no_mangle]
 pub extern "C" fn stone_font_atlas_instance_count(font_id: c_uint) -> c_int {
     font(font_id, |entry| entry.instances.len() as c_int).unwrap_or(0)

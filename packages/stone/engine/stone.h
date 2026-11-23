@@ -533,6 +533,7 @@ int64_t stone_font_data_len(uint32_t font_id);
 uint8_t stone_font_release_coverage(uint32_t font_id);
 bool stone_get_glyph_info(uint32_t font_id, int face, int char_code, float* out);
 uint64_t stone_ensure_font_atlas_instance(uint32_t font_id, int pixel_size);
+double stone_ensure_font_atlas_instance_number(uint32_t font_id, int pixel_size);
 uint64_t stone_get_font_instance_image(uint64_t instance_id);
 int stone_get_font_atlas_instance_pixel_size(uint32_t font_id, uint32_t index);
 uint64_t stone_get_font_atlas_instance_image_at(uint32_t font_id, int index);

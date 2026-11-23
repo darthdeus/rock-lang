@@ -11,6 +11,10 @@ fn font_residency_live_bytes() -> int {
     return stone_get_live_image_bytes() + stone_get_live_mip_bytes()
 }
 
+inline(lua) fn font_residency_lookup_is_lua_number(font_id: int, pixel_size: int) -> bool = "return type(stone.stone_ensure_font_atlas_instance_number(font_id, pixel_size)) == 'number'"
+
+inline(lua) fn font_residency_native_lookup(font_id: int, pixel_size: int) -> int = "return tonumber(stone.stone_ensure_font_atlas_instance(font_id, pixel_size))"
+
 fn font_residency_fixture(body: fn(Font, int) -> ()) {
     text_test_host()
     load_pending_shader_sources()
@@ -31,6 +35,10 @@ fn font_release_coverage_drops_the_atlas_and_keeps_the_face() {
             "the compat alias is live before the release")
         let bucket_id = stone_ensure_font_atlas_instance_ffi(backend, 48)
         assert(bucket_id != 0, "the demand bucket ensures")
+        assert(font_residency_lookup_is_lua_number(backend, 48),
+            "the lookup hands Lua a number, not a boxed 64-bit integer")
+        assert_eq(font_residency_native_lookup(backend, 48), bucket_id,
+            "the number lookup names the same instance as the native integer API")
         let bucket = Image(stone_get_font_instance_image_ffi(bucket_id))
         assert(bucket.0 != 0 && bucket.0 != compat.0, "the bucket owns its alias")
         assert_eq(stone_font_atlas_instance_count_ffi(backend), 2,

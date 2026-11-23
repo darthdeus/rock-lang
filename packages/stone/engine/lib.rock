@@ -1328,9 +1328,8 @@ extern(ffi, "stone") fn stone_get_font_slot_count(font_id: int) -> int
 extern(ffi, "stone") fn stone_get_font_slot_codepoint(font_id: int, slot: int) -> int
 extern(ffi, "stone") fn stone_get_font_atlas_size(font_id: int, width: Ptr<int>, height: Ptr<int>) -> bool
 
-pub @inline inline(lua) fn stone_ensure_font_atlas_instance_ffi(font_id: int, pixel_size: int) -> int = "tonumber(stone.stone_ensure_font_atlas_instance(font_id, pixel_size))"
+pub extern(lua, "stone.stone_ensure_font_atlas_instance_number") fn stone_ensure_font_atlas_instance_ffi(font_id: int, pixel_size: int) -> int
 pub @inline inline(lua) fn stone_get_font_instance_image_ffi(instance_id: int) -> int = "tonumber(stone.stone_get_font_instance_image(instance_id))"
-extern(ffi, "stone") fn stone_ensure_font_atlas_instance(font_id: int, pixel_size: int) -> int
 extern(ffi, "stone") fn stone_get_font_instance_image(instance_id: int) -> int
 extern(ffi, "stone") fn stone_get_font_atlas_instance_pixel_size(font_id: int, index: int) -> int
 pub extern(ffi, "stone") fn stone_get_font_atlas_instance_image_at(font_id: int, index: int) -> int
