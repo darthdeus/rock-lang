@@ -1594,18 +1594,13 @@ impl EnumFlatShape {
         1 + self.tuple_width() + self.record_fields.len()
     }
 
-    /// The leaf names are nominal: `pack` and `cdata_leaves` use box semantics.
+    /// The leaves a holder keys under the field: tag, then payload slots.
     pub(crate) fn value_shape(&self) -> ValueShape {
-        let mut fields = vec![(crate::names::ustr("__tag"), FieldShape::Prim)];
-        for i in 0..self.tuple_width() {
-            fields.push((crate::names::indexed("_", "", i), FieldShape::Prim));
-        }
-        for rf in self.record_fields.iter() {
-            fields.push((*rf, FieldShape::Prim));
-        }
         ValueShape {
             name: self.name,
-            fields,
+            fields: super::flat_leaf_names(self.tuple_width(), &self.record_fields)
+                .map(|leaf| (leaf, FieldShape::Prim))
+                .collect(),
             nullable: false,
         }
     }

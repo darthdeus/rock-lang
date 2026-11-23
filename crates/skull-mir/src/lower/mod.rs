@@ -123,25 +123,28 @@ fn prefixed(field: Ustr, leaves: Vec<(Ustr, Idx<Inst>)>) -> Vec<(Ustr, Idx<Inst>
 /// Flat enum slots use dotted keys on the parent: `sig.#` holds the variant
 /// name, `sig.0` and `shape.r` the payloads.
 fn flat_tag_slot(field: Ustr) -> Ustr {
-    crate::names::ustr(format!("{field}.#").as_str())
+    crate::names::concat(&[field.as_str(), ".#"])
 }
 
 fn flat_payload_slot(field: Ustr, i: usize) -> Ustr {
-    crate::names::ustr(format!("{field}.{i}").as_str())
+    crate::names::indexed(field.as_str(), ".", i)
 }
 
 fn flat_named_slot(field: Ustr, rec_field: Ustr) -> Ustr {
-    crate::names::ustr(format!("{field}.{rec_field}").as_str())
+    crate::names::concat(&[field.as_str(), ".", rec_field.as_str()])
+}
+
+/// A flat enum's leaves: `#` for the tag, the position for a tuple slot and
+/// the name for a record slot.
+fn flat_leaf_names(width: usize, fields: &[Ustr]) -> impl Iterator<Item = Ustr> + '_ {
+    std::iter::once(crate::names::ustr("#"))
+        .chain((0..width).map(|i| crate::names::indexed("", "", i)))
+        .chain(fields.iter().copied())
 }
 
 fn flat_keys(prefix: Ustr, width: usize, fields: &[Ustr]) -> impl Iterator<Item = Ustr> + '_ {
-    std::iter::once(flat_tag_slot(prefix))
-        .chain((0..width).map(move |i| flat_payload_slot(prefix, i)))
-        .chain(
-            fields
-                .iter()
-                .map(move |&name| flat_named_slot(prefix, name)),
-        )
+    flat_leaf_names(width, fields)
+        .map(move |leaf| crate::names::concat(&[prefix.as_str(), ".", leaf.as_str()]))
 }
 
 fn flat_slot_names(field: Ustr, shape: &EnumFlatShape) -> Vec<Ustr> {
