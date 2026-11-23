@@ -66,3 +66,143 @@ fn font_hot_reload_rerasterizes_into_the_same_backend() {
         let _ = remove_file(tmp)
     })
 }
+
+inline(lua) fn with_reload_hold_path(path: string, body: fn()) = """
+    local getenv = os.getenv
+    os.getenv = function(name)
+        if name == "STONE_RELOAD_CONTROL" then return path end
+        return getenv(name)
+    end
+    local ok, err = pcall(body)
+    os.getenv = getenv
+    if not ok then error(err, 0) end
+"""
+
+inline(lua) fn with_reload_marker_failure(marker: string, phase: string, body: fn()) = """
+    local open = io.open
+    io.open = function(path, mode)
+        if path ~= marker then return open(path, mode) end
+        if phase == "open" then return nil, "permission denied", 13 end
+        return {
+            read = function() return "request" end,
+            close = function() return nil, "close failed" end,
+        }
+    end
+    local ok, err = pcall(body)
+    io.open = open
+    if not ok then error(err, 0) end
+"""
+
+inline(lua) fn reload_hold_io_error(path: string) -> string = """
+    local file, open_error = io.open(path, "r")
+    if not file then return open_error end
+    local _, read_error = file:read("*a")
+    assert(file:close())
+    return assert(read_error)
+"""
+
+fn expect_reload_hold_error(path: string, cause: string) {
+    assert_error_logs(["[HOTRELOAD] cannot read reload marker {path}: {cause}"], () => {
+        assert_eq(stone_reload_hold_status(), "holding")
+    })
+}
+
+@test
+fn reload_hold_request_open_failure_pauses_publication() {
+    let root = test_tmp_dir("reload-open-request")
+    let request = "{root}/reload.hold"
+    with_reload_hold_path(request, () => {
+        with_reload_marker_failure(request, "open", () => {
+            expect_reload_hold_error(request, "permission denied")
+        })
+        assert_eq(stone_reload_hold_status(), "watching")
+    })
+}
+
+@test
+fn reload_hold_ack_open_failure_reports_the_cause() {
+    let root = test_tmp_dir("reload-open-ack")
+    let request = "{root}/reload.hold"
+    let ack = "{root}/reload.held"
+    with_reload_hold_path(request, () => {
+        assert_eq(stone_reload_hold_status(), "watching")
+        assert(stone_reload_hold(true))
+        assert_eq(stone_reload_hold_status(), "holding")
+        with_reload_marker_failure(ack, "open", () => {
+            expect_reload_hold_error(ack, "permission denied")
+        })
+        assert(stone_file_write(ack, "stale"))
+        assert_eq(stone_reload_hold_status(), "holding")
+        assert(stone_file_write(ack, stone_file_read(request).unwrap()))
+        assert_eq(stone_reload_hold_status(), "held")
+        assert(stone_reload_hold(false))
+        assert_eq(stone_reload_hold_status(), "watching")
+    })
+}
+
+@test
+fn reload_hold_two_unreadable_markers_never_match() {
+    let root = test_tmp_dir("reload-read-request")
+    let request = "{root}/reload.hold"
+    let ack = "{root}/reload.held"
+    assert(stone_create_directory(request) && stone_create_directory(ack))
+    with_reload_hold_path(request, () => {
+        expect_reload_hold_error(request, reload_hold_io_error(request))
+    })
+}
+
+@test
+fn reload_hold_unreadable_ack_reports_the_cause() {
+    let root = test_tmp_dir("reload-read-ack")
+    let request = "{root}/reload.hold"
+    let ack = "{root}/reload.held"
+    assert(stone_file_write(request, "request") && stone_create_directory(ack))
+    with_reload_hold_path(request, () => {
+        expect_reload_hold_error(ack, reload_hold_io_error(ack))
+    })
+}
+
+@test
+fn reload_hold_marker_close_failures_never_acknowledge() {
+    let root = test_tmp_dir("reload-close-marker")
+    let request = "{root}/reload.hold"
+    let ack = "{root}/reload.held"
+    assert(stone_file_write(request, "request") && stone_file_write(ack, "request"))
+    with_reload_hold_path(request, () => {
+        for marker in [request, ack] {
+            with_reload_marker_failure(marker, "close", () => {
+                expect_reload_hold_error(marker, "close failed")
+            })
+        }
+        assert_eq(stone_reload_hold_status(), "held")
+    })
+}
+
+inline(lua) fn with_reload_remove_failure(marker: string, body: fn()) = """
+    local remove = os.remove
+    os.remove = function(path)
+        if path == marker then return nil, "permission denied", 13 end
+        return remove(path)
+    end
+    local ok, err = pcall(body)
+    os.remove = remove
+    if not ok then error(err, 0) end
+"""
+
+@test
+fn reload_hold_release_failure_leaves_the_game_running() {
+    let root = test_tmp_dir("reload-remove-request")
+    let request = "{root}/reload.hold"
+    with_reload_hold_path(request, () => {
+        assert(stone_reload_hold(false))
+        assert(stone_reload_hold(true))
+        with_reload_remove_failure(request, () => {
+            assert_error_logs(["[HOTRELOAD] cannot remove reload marker {request}: permission denied"], () => {
+                assert(!stone_reload_hold(false))
+            })
+        })
+        assert_eq(stone_reload_hold_status(), "holding")
+        assert(stone_reload_hold(false))
+        assert_eq(stone_reload_hold_status(), "watching")
+    })
+}

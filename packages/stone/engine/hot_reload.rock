@@ -23,24 +23,53 @@ pub inline(lua) fn stone_reload_hold(held: bool) -> bool = """
         _G.__stone_reload_request_seq = (_G.__stone_reload_request_seq or 0) + 1
         assert(f:write(tostring(_G.__stone_reload_request_seq))); assert(f:close())
     else
-        local f = io.open(path, "r")
-        if f then f:close(); assert(os.remove(path)) end
+        local removed, cause, errno = os.remove(path)
+        if not removed and errno ~= 2 then -- ENOENT
+            _log_once_impl(0, "HOTRELOAD", "cannot remove reload marker " .. path .. ": " .. cause,
+                "stone_reload_hold:release:" .. path)
+            return false
+        end
     end
     return true
+"""
+
+@nomangle
+inline(lua) fn __stone_reload_marker_error(path: string, cause: string) -> string = """
+    _log_once_impl(0, "HOTRELOAD", "cannot read reload marker " .. path .. ": " .. cause,
+        "stone_reload_hold_status:" .. path)
+    return "holding"
+"""
+
+// Only inspect the acknowledgement while a hold request is present.
+@nomangle
+inline(lua) fn __stone_reload_read_hold(path: string, file: any) -> string = """
+    local requested, cause = file:read("*a")
+    local closed, close_error = file:close()
+    if not requested or not closed then
+        return __stone_reload_marker_error(path, cause or close_error)
+    end
+
+    local ack_path = path:gsub("%.hold$", ".held")
+    local ack, open_error, errno = io.open(ack_path, "r")
+    if not ack then
+        if errno == 2 then return "holding" end -- ENOENT
+        return __stone_reload_marker_error(ack_path, open_error)
+    end
+    local acknowledged, read_error = ack:read("*a")
+    closed, close_error = ack:close()
+    if not acknowledged or not closed then
+        return __stone_reload_marker_error(ack_path, read_error or close_error)
+    end
+    return acknowledged == requested and "held" or "holding"
 """
 
 pub inline(lua) fn stone_reload_hold_status() -> string = """
     local path = os.getenv("STONE_RELOAD_CONTROL")
     if not path then return "unavailable" end
-    local f = io.open(path, "r")
-    if not f then return "watching" end
-    local requested = f:read("*a")
-    f:close()
-    local ack = io.open(path:gsub("%.hold$", ".held"), "r")
-    if not ack then return "holding" end
-    local acknowledged = ack:read("*a")
-    ack:close()
-    return acknowledged == requested and "held" or "holding"
+    local file, cause, errno = io.open(path, "r")
+    if file then return __stone_reload_read_hold(path, file) end
+    if errno == 2 then return "watching" end -- ENOENT
+    return __stone_reload_marker_error(path, cause)
 """
 
 // The identity is escaped on line 1 of the chunk; unescape before comparing.
