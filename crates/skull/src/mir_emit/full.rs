@@ -819,21 +819,33 @@ pub(super) fn emit_full_build(
 
     let graph_records = (build.lifetime() == CacheLifetime::OneShot).then(|| graph.take_records());
     let spec_queue = SpecQueue::new(ws, &scx, graph_records.as_ref().unwrap_or(&graph), None);
-    let (chunks, ((early, early_window), (shader_result, shader_window))) = parallel_join(
+    // Run the graph's last reader first when there is no worker to steal it.
+    let ((shader_result, shader_window), (chunks, (early, early_window))) = parallel_join(
         || {
-            emit_full_chunks(
+            let lane = shader_lane(
                 ws,
-                &cg,
-                &scx,
-                spec_queue,
-                &concrete,
-                &lua_view,
-                attribution,
-                &mut setup_phases,
-            )
+                graph_records.as_ref().unwrap_or(&graph),
+                &shader_programs,
+                &shader_collection,
+                std::sync::Arc::clone(&concrete.plans),
+            );
+            drop(graph_records);
+            lane
         },
         || {
             parallel_join(
+                || {
+                    emit_full_chunks(
+                        ws,
+                        &cg,
+                        &scx,
+                        spec_queue,
+                        &concrete,
+                        &lua_view,
+                        attribution,
+                        &mut setup_phases,
+                    )
+                },
                 || {
                     let started = Instant::now();
                     let early = prepare_early_assembly(
@@ -845,19 +857,6 @@ pub(super) fn emit_full_build(
                         global_accessors,
                     );
                     (early, started.elapsed())
-                },
-                || {
-                    let lane = shader_lane(
-                        ws,
-                        graph_records.as_ref().unwrap_or(&graph),
-                        &shader_programs,
-                        &shader_collection,
-                        std::sync::Arc::clone(&concrete.plans),
-                    );
-                    if let Some(records) = graph_records {
-                        drop_in_background(records);
-                    }
-                    lane
                 },
             )
         },
