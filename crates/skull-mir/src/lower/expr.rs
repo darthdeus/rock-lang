@@ -1072,6 +1072,29 @@ impl<'a> Builder<'a> {
         Ok((owner, key, shape))
     }
 
+    fn guarded_physical_field_place(
+        &mut self,
+        base: Idx<Expr>,
+        field: Ustr,
+        absent: Idx<Block>,
+    ) -> Result<(Idx<Inst>, Ustr, Option<ValueShape>), CompilerError> {
+        let mut guards = Vec::new();
+        let (holder, key, shape, _) =
+            self.physical_field_layout_with_guards(base, field, Some(&mut guards))?;
+        let owner = self.lower_place_base_with_guard(holder, Some(absent))?;
+        for guard in guards {
+            if let Some(key) = guard {
+                let flag = self.read_field(owner, key);
+                let present = self.f.new_block();
+                self.branch_to(flag, present, absent);
+                self.cur = present;
+            } else {
+                self.guard_place_receiver(owner, absent);
+            }
+        }
+        Ok((owner, key, shape))
+    }
+
     pub(crate) fn lower_place_base(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
         self.lower_place_base_with_guard(e, None)
     }
@@ -1110,9 +1133,13 @@ impl<'a> Builder<'a> {
                 let place = self.guard_flat_projection(&flat, guards, join)?;
                 return self.read_place(&Place::Flat(place));
             }
-            let recv = self.lower_place_base_with_guard(base, absent)?;
-            self.guard_place_receiver(recv, join);
-            return self.read_place(&Place::Field(recv, field));
+            if self.expr_is_shared_struct(e) && self.expr_is_value_struct(base) {
+                let receiver = self.lower_expr(e)?;
+                self.guard_place_receiver(receiver, join);
+                return Ok(receiver);
+            }
+            let (owner, key, _) = self.guarded_physical_field_place(base, field, join)?;
+            return self.read_place(&Place::Field(owner, key));
         }
         if let Expr::FieldAccess { base, field } = *syntax {
             let flat = self
@@ -1273,9 +1300,12 @@ impl<'a> Builder<'a> {
             let place = self.guard_flat_projection(&flat, guards, join)?;
             self.write_flat_field(place, flat.selection, write)?;
         } else {
-            let recv = self.lower_place_base_with_guard(base, Some(join))?;
-            self.guard_place_receiver(recv, join);
-            self.write_scalar(Place::Field(recv, field), None, write)?;
+            let place = self.guarded_physical_field_place(base, field, join)?;
+            if let Write::Assign(value) = write {
+                self.store_field_at(target, base, field, value, place)?;
+            } else {
+                self.write_scalar(Place::Field(place.0, place.1), None, write)?;
+            }
         }
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = join;
@@ -1545,16 +1575,26 @@ impl<'a> Builder<'a> {
         field: Ustr,
         value: Idx<Expr>,
     ) -> Result<(), CompilerError> {
+        let place = self.physical_field_place(base, field, None)?;
+        self.store_field_at(target, base, field, value, place)
+    }
+
+    fn store_field_at(
+        &mut self,
+        target: Idx<Expr>,
+        base: Idx<Expr>,
+        field: Ustr,
+        value: Idx<Expr>,
+        (b, key, projected_shape): (Idx<Inst>, Ustr, Option<ValueShape>),
+    ) -> Result<(), CompilerError> {
         // A whole embedded field has no slot of its own, so write its leaves.
         let embed_plan = self.field_plan(base, field, false)?;
         if let Some((cname, nullable)) = embed_plan.as_ref().and_then(|p| p.embed()) {
-            let (b, key, _) = self.physical_field_place(base, field, None)?;
             self.store_embed(b, key, cname, nullable, value)?;
             return Ok(());
         }
         // An embed leaf write composes to one dotted key on the parent
         // (`h.p.x = 9` -> `h["p.x"] = 9`).
-        let (b, key, projected_shape) = self.physical_field_place(base, field, None)?;
         if let Some(sname) = self.leaf_table_base(base)?
             && self.leaf_table_value_child(sname, field)?.is_some()
         {

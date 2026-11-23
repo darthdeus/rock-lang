@@ -32,3 +32,20 @@ fn wrap(member: Member) -> Outer { return Outer { member: member, t: 4.0 } }
     wrap(member).member.z = 8
     assert_eq(member.z, 8)
 }
+
+global OPTIONAL: Outer? = null
+
+fn write_optional_member(z: int) {
+    OPTIONAL?.member?.z = z
+}
+
+@test fn guarded_write_through_a_nullable_nobox_global() {
+    let member = Member { k: 1, z: 3 }
+    OPTIONAL = wrap(member)
+    write_optional_member(8)
+    assert_eq(member.z, 8)
+
+    OPTIONAL = null
+    write_optional_member(9)
+    assert_eq(member.z, 8)
+}

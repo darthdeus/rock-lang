@@ -1,0 +1,57 @@
+nobox value Point { x: int, y: int }
+struct Body { pos: Point? }
+value Handle { body: Body }
+
+global writes: int = 0
+
+fn next_x() -> int {
+    writes += 1
+    return 8
+}
+
+fn update_field(h: Handle) {
+    h.body.pos?.x = next_x()
+    h.body.pos?.x += 2
+}
+
+fn update_chain(body: Body?) {
+    body?.pos?.x = next_x()
+    body?.pos?.x += 2
+}
+
+@test fn guarded_write_uses_the_shared_structs_physical_fields() {
+    writes = 0
+    let body = Body { pos: Point { x: 1, y: 2 } }
+    update_field(Handle { body })
+    assert_eq(body.pos?.x ?? -1, 10)
+    assert_eq(body.pos?.y ?? -1, 2)
+
+    update_field(Handle { body: Body { pos: null } })
+    assert_eq(writes, 1)
+}
+
+@test fn guarded_chain_skips_absent_structs_and_embedded_values() {
+    writes = 0
+    let body = Body { pos: Point { x: 1, y: 2 } }
+    update_chain(body)
+    assert_eq(body.pos?.x ?? -1, 10)
+    assert_eq(body.pos?.y ?? -1, 2)
+
+    update_chain(null)
+    update_chain(Body { pos: null })
+    assert_eq(writes, 1)
+}
+
+fn replace_position(body: Body?, pos: Point?) {
+    body?.pos = pos
+}
+
+@test fn guarded_write_replaces_the_whole_embedded_value() {
+    let body = Body { pos: null }
+    replace_position(body, Point { x: 1, y: 2 })
+    assert_eq(body.pos?.x ?? -1, 1)
+    assert_eq(body.pos?.y ?? -1, 2)
+    replace_position(body, null)
+    assert(body.pos == null)
+    replace_position(null, Point { x: 3, y: 4 })
+}

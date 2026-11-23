@@ -43,6 +43,15 @@ impl<'a> Builder<'a> {
         base: Idx<Expr>,
         field: Ustr,
     ) -> Result<(Idx<Expr>, Ustr, Option<ValueShape>, bool), CompilerError> {
+        self.physical_field_layout_with_guards(base, field, None)
+    }
+
+    pub(super) fn physical_field_layout_with_guards(
+        &self,
+        base: Idx<Expr>,
+        field: Ustr,
+        guards: Option<&mut Vec<Option<Ustr>>>,
+    ) -> Result<(Idx<Expr>, Ustr, Option<ValueShape>, bool), CompilerError> {
         if field.as_str() == "len"
             && matches!(
                 self.concrete_expr_ty(base).map(|ty| ty.peel_nullable().0),
@@ -52,16 +61,23 @@ impl<'a> Builder<'a> {
                 })
             )
         {
+            if let Some(guards) = guards {
+                guards.push(None);
+            }
             return Ok((base, self.vec_length_field(base)?, None, false));
         }
         let mut parts = vec![field];
         let mut cur = base;
         let mut physical = (base, field, None, false);
-        while let Expr::FieldAccess {
-            base: owner,
-            field: child_field,
-        } = self.body.expr_arena[cur]
-        {
+        let guarded = guards.is_some();
+        let mut guard_receiver = guarded;
+        let mut presence = Vec::new();
+        loop {
+            let (owner, child_field, safe) = match self.body.expr_arena[cur] {
+                Expr::FieldAccess { base, field } => (base, field, false),
+                Expr::SafeNav { base, field } if guarded => (base, field, true),
+                _ => break,
+            };
             if self.swizzle_of(owner, child_field).is_some() {
                 break;
             }
@@ -72,7 +88,8 @@ impl<'a> Builder<'a> {
             else {
                 break;
             };
-            if self.scx.target == bone_core::hir::FnBackend::Lua
+            if !guarded
+                && self.scx.target == bone_core::hir::FnBackend::Lua
                 && !self.scx.values_first_class
                 && self.is_value_struct(sname)
                 && self.is_mutable_place(owner)?
@@ -129,10 +146,33 @@ impl<'a> Builder<'a> {
                         projected,
                         false,
                     );
+                    if guard_receiver && plan.nullable() {
+                        presence.push(parts.len());
+                    }
                 }
             }
+            if guarded && physical.0 != owner {
+                break;
+            }
+            guard_receiver = safe;
             parts.push(child_field);
             cur = owner;
+        }
+        if let Some(guards) = guards {
+            // A boxed receiver uses nil, while an embedded child uses its
+            // presence bit in the same holder as the selected field.
+            if guard_receiver {
+                guards.push(None);
+            }
+            for index in presence.into_iter().rev() {
+                let key = parts[index..]
+                    .iter()
+                    .rev()
+                    .map(|p| p.as_str())
+                    .collect::<Vec<_>>()
+                    .join(".");
+                guards.push(Some(crate::names::ustr(&key)));
+            }
         }
         Ok(physical)
     }
