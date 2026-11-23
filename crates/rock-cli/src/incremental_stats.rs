@@ -120,20 +120,14 @@ pub(crate) fn incremental_stats(
     if !dir.is_dir() {
         anyhow::bail!("incremental-stats expects a project directory, got `{path}`");
     }
-    let dir_str = fs_err::canonicalize(dir)?.to_string_lossy().into_owned();
-    let proj_marker = format!(
-        "{}/",
-        Path::new(&dir_str)
-            .file_name()
-            .map(|f| f.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.to_string())
-    );
+    let dir = fs_err::canonicalize(dir)?;
+    let dir_str = dir.to_string_lossy();
 
     // Use the live compiler's source selection so every ranked candidate is editable.
     let sources = crate::live_project::project_sources(&dir_str, false)?;
     let session = crate::bone_backend::bone_session(&sources)
         .map_err(|e| anyhow::anyhow!("bone session warm failed: {}", e.message))?;
-    let (_mods, fns) = collect_stats(&session, &proj_marker)?;
+    let (_mods, fns) = collect_stats(&session, &dir)?;
     drop(session);
     if fns.is_empty() {
         anyhow::bail!("no editable project functions found under `{path}`");

@@ -34,6 +34,18 @@ fn backend_stats_reports_phase_means_as_json() {
     assert!(emit.contains_key("lower hir->mir"), "{emit:?}");
 }
 
+#[test]
+fn lsp_survey_accepts_the_current_directory() {
+    let root = project();
+    let report = json_report(root.path(), "lsp-survey", "15", "0");
+    let edits = report["candidates"].as_array().unwrap();
+    assert!(
+        edits
+            .iter()
+            .any(|e| e["kind"] == "body" && e["name"].as_str().unwrap().ends_with("::bump"))
+    );
+}
+
 /// Larger than any body of the project, so an edit that picked test-only
 /// sources would pick this one.
 const SIM: &str = r#"

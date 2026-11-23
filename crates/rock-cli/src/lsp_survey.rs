@@ -169,7 +169,7 @@ fn require_expected_survey_update<T, E: std::fmt::Display>(
 /// excluded) from a warm Session's workspace.
 pub(crate) fn collect_stats(
     session: &bone_incremental::session::Session,
-    proj_marker: &str,
+    project_root: &Path,
 ) -> Result<(Vec<ModStat>, Vec<FnStat>)> {
     let ws = &session.ws;
 
@@ -188,7 +188,7 @@ pub(crate) fn collect_stats(
     let mut fns = Vec::new();
     for module in ws.modules.iter() {
         let file = module.file.as_str().to_string();
-        if session.warm_mids.contains(&module.id) || !file.contains(proj_marker) {
+        if session.warm_mids.contains(&module.id) || !Path::new(&file).starts_with(project_root) {
             continue;
         }
         let text = read_survey_source(&file)?;
@@ -328,20 +328,15 @@ pub(crate) fn lsp_survey(
     if !dir.is_dir() {
         anyhow::bail!("lsp-survey expects a project directory, got `{path}`");
     }
-    let proj_marker = format!(
-        "{}/",
-        dir.file_name()
-            .map(|f| f.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.to_string())
-    );
+    let dir = fs_err::canonicalize(dir)?;
 
     // Discover the whole compilation unit (project + stick.toml deps) and warm a
     // Session (for stats + tier ground-truth) + a BoneWorkspace (for LSP timing).
-    let sources = rock_host::compilation_units::load_sources_for_project(dir)?;
+    let sources = rock_host::compilation_units::load_sources_for_project(&dir)?;
     let mut session = crate::bone_backend::bone_session(&sources)
         .map_err(|e| anyhow::anyhow!("bone session warm failed: {}", e.message))?;
 
-    let (mut mods, mut fns) = collect_stats(&session, &proj_marker)?;
+    let (mut mods, mut fns) = collect_stats(&session, &dir)?;
     if fns.is_empty() {
         anyhow::bail!("no editable project functions found under `{path}`");
     }
