@@ -1110,6 +1110,27 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    /// A binding that writes through its box (a field write or `ref` borrow) gets
+    /// its own copy; every other binding may share its source's box, which no one
+    /// else writes: copies and fresh constructors are owned, and tuple and newtype
+    /// contents are immutable.
+    pub(crate) fn owned_binding_value(
+        &mut self,
+        b: Idx<BindingInfo>,
+        value: Idx<Inst>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        if self.binding_is_ref(b)
+            || !self.binding_ref_borrowed(b)
+            || matches!(self.f.insts[value], Inst::MakeValueStruct { .. })
+        {
+            return Ok(value);
+        }
+        match self.binding_ty(b).and_then(|ty| self.concrete_ty_id(ty)) {
+            Some(ty) => self.copied_value_box(ty, value),
+            None => Ok(value),
+        }
+    }
+
     pub(crate) fn bind_for_pattern(
         &mut self,
         vars: &BindingPattern,
@@ -1117,6 +1138,7 @@ impl<'a> Builder<'a> {
     ) -> Result<(), CompilerError> {
         match vars {
             BindingPattern::Leaf(b) => {
+                let value = self.owned_binding_value(*b, value)?;
                 let cell = self.new_binding_cell(
                     *b,
                     self.body.binding_arena[*b].name,
@@ -1146,17 +1168,6 @@ impl<'a> Builder<'a> {
                         base: value,
                         index: i,
                     });
-                    // The tuple box can be shared, so a value element the binding writes through
-                    // is its own copy.
-                    let elem = match sub {
-                        BindingPattern::Leaf(b) if !self.binding_stays_unwritten(*b) => {
-                            match self.binding_ty(*b).and_then(|ty| self.concrete_ty_id(ty)) {
-                                Some(ty) => self.copied_value_box(ty, elem)?,
-                                None => elem,
-                            }
-                        }
-                        _ => elem,
-                    };
                     self.bind_for_pattern(sub, elem)?;
                 }
             }

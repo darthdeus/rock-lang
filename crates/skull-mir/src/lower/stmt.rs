@@ -379,14 +379,7 @@ impl<'a> Builder<'a> {
                         && let Pattern::Bind(var) = self.body.pattern_arena[sub]
                     {
                         let v = self.lower_expr(value)?;
-                        let cell = self.new_binding_cell(
-                            var,
-                            self.body.binding_arena[var].name,
-                            self.binding_ty(var),
-                            crate::names::ustr(""),
-                        );
-                        self.store_cell(cell, v);
-                        self.binds.insert(raw(var), cell);
+                        self.bind_for_pattern(&BindingPattern::Leaf(var), v)?;
                         continue;
                     }
                     let name = match binding_view(self.body, pattern) {

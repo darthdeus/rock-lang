@@ -154,15 +154,9 @@ impl<'a> Builder<'a> {
                 {
                     return self.bind_loop_element_repr(&BindingPattern::Leaf(b), repr.clone());
                 }
-                let mut val = self.scrut_value(scrut);
-                // The scrutinee's storage still holds the bound box; a binder a ref borrow
-                // can write through gets its own copy.
-                if !self.binding_is_ref(b)
-                    && self.binding_ref_borrowed(b)
-                    && let Some(ty) = self.binding_ty(b).and_then(|ty| self.concrete_ty_id(ty))
-                {
-                    val = self.copied_value_box(ty, val)?;
-                }
+                // The scrutinee's storage still holds the bound box.
+                let val = self.scrut_value(scrut);
+                let val = self.owned_binding_value(b, val)?;
                 let cell =
                     self.new_binding_cell(b, name, self.binding_ty(b), crate::names::ustr(""));
                 self.store_cell(cell, val);

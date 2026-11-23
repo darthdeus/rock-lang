@@ -44,22 +44,57 @@ fn bump(c: ref TCell) {
     c.hp += 1
 }
 
-// Unwrapping a newtype over a value struct binds a COPY: mutating the
-// unwrapped value, directly or through a `ref` borrow, never writes back
-// into the wrapper.
-@test(output = "1
-1")
-fn newtype_unwrap_keeps_value_semantics() {
-    let w = BoxedCell(TCell { hp: 1 })
+fn boxed(n: int) -> BoxedCell {
+    return BoxedCell(TCell { hp: n })
+}
+
+fn unwrap_forms(w: BoxedCell) {
     let BoxedCell(inner) = w
     inner.hp = 99
     let BoxedCell(a) = w
     print(a.hp)
-
     let BoxedCell(borrow_me) = w
     bump(borrow_me)
-    let BoxedCell(b) = w
-    print(b.hp)
+    let projected = w.0
+    projected.hp = 98
+    let captured = () => {
+        let BoxedCell(c) = w
+        c.hp = 97
+    }
+    captured()
+    let cells: [TCell] = []
+    cells.push(w.0)
+    cells[0].hp = 96
+    print(w.0.hp)
+}
+
+// Every unwrap of a newtype over a value struct (`let`, `for` and `match`
+// patterns, `.0`, inside a closure, into a container) binds a COPY: mutating it,
+// directly or through a `ref` borrow, never writes back into the wrapper.
+@test(output = "1
+1
+2
+2
+2")
+fn newtype_unwrap_keeps_value_semantics() {
+    let w = boxed(1)
+    unwrap_forms(w)
+    let ws = [boxed(2)]
+    let BoxedCell(y) = ws[0]
+    y.hp = 7
+    print(ws[0].0.hp)
+    let indexed = ws[0].0
+    indexed.hp = 6
+    for BoxedCell(z) in ws {
+        z.hp = 8
+    }
+    print(ws[0].0.hp)
+    match ws[0] {
+        BoxedCell(m) => {
+            bump(m)
+        }
+    }
+    print(ws[0].0.hp)
 }
 
 // --- Newtype ABI: one plain value through calls, returns and `.0` unwraps ---

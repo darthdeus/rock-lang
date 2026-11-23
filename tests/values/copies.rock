@@ -366,3 +366,29 @@ fn identical_constant_value_constructors_do_not_alias_on_write() {
     assert_eq(const_sum(Pt { x: 20, y: 22 }), 42)
     assert_eq(const_sum(Pt { x: first.p.x, y: 3 }), 8)
 }
+
+value Pair { a: int, b: int }
+
+fn pair(n: int) -> Pair { return Pair { a: n, b: n + 1 } }
+
+// Destructuring a fresh tuple literal copies a value element its binding writes,
+// also in a unit function's tail block, where a return value would be lent.
+@test(output = "9\n3\n2")
+fn tuple_destructure_copies_written_element() {
+    {
+        let x = pair(8)
+        let z = pair(7)
+        let set = () => { z = x }
+        set()
+        let (t, _) = (z, 35)
+        t.b = 35
+        print(z.b)
+        let q = pair(2)
+        let (u, _) = (q, 1)
+        u.b = 40
+        print(q.b)
+        let (v, _) = (pair(1), 1)
+        v.b = 41
+        print(pair(1).b)
+    }
+}

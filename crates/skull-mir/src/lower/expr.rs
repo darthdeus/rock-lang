@@ -523,7 +523,20 @@ impl<'a> Builder<'a> {
             Expr::TupleIndex { tuple, .. } => {
                 // A transparent newtype's runtime value is its inner value, not a table.
                 if self.expr_is_newtype(tuple) {
-                    return self.lower_expr(tuple);
+                    let inner = self.lower_expr(tuple)?;
+                    // Newtype contents are immutable, so the inner box is lent until it lands
+                    // somewhere writable.
+                    if !self.scx.values_first_class
+                        && self
+                            .value_struct_of(e)
+                            .is_some_and(|name| !self.is_nobox_struct(name))
+                        && let Some(ty) = self.concrete_expr_ty(e)
+                    {
+                        self.borrowed_value_children
+                            .insert(inner, std::borrow::Cow::Borrowed(ty));
+                        self.shareable_value_boxes.insert(inner);
+                    }
+                    return Ok(inner);
                 }
                 let r = self.lower_expr_repr(e)?.into_value();
                 self.pack_maybe_absent(r)
