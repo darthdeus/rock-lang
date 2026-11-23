@@ -443,15 +443,17 @@ fn col_mat_object(
         parts.push(format!("{}: v[{col}][i]", js_key(f)));
     }
     for (head, sub) in &groups {
-        let child = nested_field_struct_name(ws, name, head.as_str())?
+        let child = nested_field_nominal_name(ws, name, head.as_str())?
             .filter(|child| {
                 ws.nominals
                     .struct_id(*child)
                     .is_some_and(|sid| ws.module(sid.module).structs[sid.def].is_value)
+                    || skull_mir::lower::EnumPlan::for_name(ws, *child)
+                        .is_some_and(|plan| plan.cdata().is_some())
             })
             .ok_or_else(|| {
                 err(format!(
-                    "JS subset: column element `{name}` field `{head}` is not a value struct"
+                    "JS subset: column element `{name}` field `{head}` has no inline value layout"
                 ))
             })?;
         let sub: Vec<ustr::Ustr> = sub.iter().map(|(p, ())| *p).collect();
@@ -489,6 +491,15 @@ pub(super) fn nested_field_struct_name(
     parent: ustr::Ustr,
     field: &str,
 ) -> Result<Option<ustr::Ustr>, CompilerError> {
+    Ok(nested_field_nominal_name(ws, parent, field)?
+        .filter(|child| ws.nominals.struct_id(*child).is_some()))
+}
+
+fn nested_field_nominal_name(
+    ws: &Workspace,
+    parent: ustr::Ustr,
+    field: &str,
+) -> Result<Option<ustr::Ustr>, CompilerError> {
     let sid = ws
         .nominals
         .struct_id(parent)
@@ -505,9 +516,7 @@ pub(super) fn nested_field_struct_name(
         false,
     )
     .map_err(|e| err(e.message))?;
-    Ok(plan
-        .child()
-        .filter(|child| ws.nominals.struct_id(*child).is_some()))
+    Ok(plan.child())
 }
 
 /// Matched by declared name: a modules-v1 entry's key is `<package>::main`.

@@ -1,0 +1,11 @@
+enum Quantity { Some(int), Empty }
+value CountRow { id: int, qty: Quantity }
+
+@test fn column_value_materializer_accepts_inline_cdata_enum() {
+    let rows = [CountRow { id: 3, qty: Quantity::Some(7) }]
+    let m: Map<int, CountRow> = map_new()
+    m[1] = rows[0]
+    assert(m[1] == rows[0])
+    assert(m[1].qty == Quantity::Some(7))
+    assert(m[1].qty != Quantity::Some(8))
+}
