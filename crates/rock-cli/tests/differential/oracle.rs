@@ -285,6 +285,7 @@ fn check_json_value(want: JsonValue, got: JsonValue) {
             assert(actual.len() == fields.len(), "JSON object length oracle")
             for key in fields.keys() { check_json_value(fields[key], actual[key]) }
         },
+        Raw(text) => check_json_value(json_decode(text).unwrap(), got),
     }
 }
 "#,
