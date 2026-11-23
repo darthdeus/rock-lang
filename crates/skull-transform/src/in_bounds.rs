@@ -592,7 +592,7 @@ fn cdata_path_mentions(path: &str, field: &str) -> bool {
     let field = field.as_bytes();
     let mut offset = 0;
     let mut equal = true;
-    for pair in path.trim_start_matches('_').as_bytes().chunks_exact(2) {
+    for pair in path.trim_start_matches('_').as_bytes().as_chunks::<2>().0 {
         if pair == b"2e" {
             if equal && offset == field.len() {
                 return true;
@@ -600,9 +600,9 @@ fn cdata_path_mentions(path: &str, field: &str) -> bool {
             offset = 0;
             equal = true;
         } else {
-            equal &= field
-                .get(offset)
-                .is_some_and(|byte| pair == [hex[(byte >> 4) as usize], hex[(byte & 15) as usize]]);
+            equal &= field.get(offset).is_some_and(|byte| {
+                *pair == [hex[(byte >> 4) as usize], hex[(byte & 15) as usize]]
+            });
             offset += 1;
         }
     }

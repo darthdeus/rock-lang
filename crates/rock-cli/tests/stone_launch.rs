@@ -793,7 +793,7 @@ fn main() {
         .chunks_exact(width as usize * 4)
         .skip(y0)
         .take(y1 - y0)
-        .flat_map(|row| row[x0 * 4..x1 * 4].chunks_exact(4))
+        .flat_map(|row| row[x0 * 4..x1 * 4].as_chunks::<4>().0)
         .filter(|pixel| pixel[..3].iter().all(|channel| *channel >= 100))
         .count();
     assert!(
