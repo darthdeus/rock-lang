@@ -42,5 +42,7 @@ fn stored_bodies_and_inferences_hold_no_spare_capacity() {
     assert!(!typed.is_empty());
     for body in typed {
         assert_eq!(body.ty_arena.capacity(), body.ty_arena.len());
+        assert!(body.ty_spans.iter().next().is_none());
+        assert_eq!(body.trail.capacity(), 0);
     }
 }

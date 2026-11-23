@@ -1644,6 +1644,11 @@ pub fn check_module_incremental(
                     );
                 }
                 errors.extend(crate::consume::check(ws, body, &inference, function));
+                if ws.skip_session_facts {
+                    // Type spans serve editor queries. Rollback history ends with checking.
+                    inference.ty_spans = Default::default();
+                    inference.trail = Vec::new();
+                }
                 inference.shrink_to_fit();
                 result.per_fn.insert(owner, inference);
                 if !errors.is_empty() {
