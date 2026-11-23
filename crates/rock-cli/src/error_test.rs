@@ -252,7 +252,7 @@ fn run_case(tc: &ErrorTestCase) -> ErrorTestResult {
 /// verify rejection identically. The error-KIND suffix is rock-specific (bone
 /// diagnostics mostly carry no kind), so this asserts REJECTION only.
 pub(crate) fn run_error_suite(path: &Path, verbose: bool) -> Result<usize> {
-    let Some(dir) = find_error_test_dir(path) else {
+    let Some(dir) = find_error_test_dir(path)? else {
         return Ok(0);
     };
     println!(
@@ -266,13 +266,10 @@ pub(crate) fn run_error_suite(path: &Path, verbose: bool) -> Result<usize> {
 
     // Fixture files in walk order; a file that does not parse is a failure.
     let mut fixtures: Vec<(PathBuf, Result<ErrorTest>)> = Vec::new();
-    for entry in WalkDir::new(&dir)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in WalkDir::new(&dir).follow_links(true) {
+        let entry = entry?;
         let p = entry.path();
-        if is_error_test_file(p) {
+        if entry.file_type().is_file() && has_error_fixture_suffix(p) {
             fixtures.push((p.to_owned(), ErrorTest::from_file(p)));
         }
     }
@@ -349,47 +346,85 @@ pub(crate) fn run_error_suite(path: &Path, verbose: bool) -> Result<usize> {
     Ok(failed)
 }
 
-fn is_error_test_file(path: &Path) -> bool {
-    path.is_file()
-        && path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .is_some_and(|n| n.ends_with(".rock.err"))
+fn has_error_fixture_suffix(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|s| s.to_str())
+        .is_some_and(|n| n.ends_with(".rock.err"))
 }
 
-fn contains_error_tests(dir: &Path) -> bool {
-    WalkDir::new(dir)
-        .into_iter()
-        .flatten()
-        .any(|e| is_error_test_file(e.path()))
-}
-
-fn find_error_test_dir(path: &Path) -> Option<PathBuf> {
-    if path.ends_with("errors") && path.is_dir() {
-        return Some(path.to_path_buf());
+fn optional_metadata(path: &Path) -> Result<Option<std::fs::Metadata>> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error.into()),
     }
-    if let Some(parent) = path
-        .parent()
-        .filter(|p| p.ends_with("errors") && p.is_dir())
+}
+
+fn is_dir(path: &Path) -> Result<bool> {
+    Ok(optional_metadata(path)?.is_some_and(|metadata| metadata.is_dir()))
+}
+
+fn is_error_test_file(path: &Path) -> Result<bool> {
+    Ok(has_error_fixture_suffix(path)
+        && optional_metadata(path)?.is_some_and(|metadata| metadata.is_file()))
+}
+
+fn contains_error_tests(dir: &Path) -> Result<bool> {
+    for entry in WalkDir::new(dir) {
+        let entry = entry?;
+        if is_error_test_file(entry.path())? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn find_error_test_dir(path: &Path) -> Result<Option<PathBuf>> {
+    if path.ends_with("errors") && is_dir(path)? {
+        return Ok(Some(path.to_path_buf()));
+    }
+    if let Some(parent) = path.parent().filter(|p| p.ends_with("errors"))
+        && is_dir(parent)?
     {
-        let selects_fixtures = is_error_test_file(path)
-            || path.join("errors").exists()
-            || (path.is_dir() && contains_error_tests(path));
-        return selects_fixtures.then(|| parent.to_path_buf());
+        let selects_fixtures = is_error_test_file(path)?
+            || optional_metadata(&path.join("errors"))?.is_some()
+            || (is_dir(path)? && contains_error_tests(path)?);
+        return Ok(selects_fixtures.then(|| parent.to_path_buf()));
     }
     let errors_subdir = path.join("errors");
-    if errors_subdir.is_dir() {
-        return Some(errors_subdir);
+    if is_dir(&errors_subdir)? {
+        return Ok(Some(errors_subdir));
     }
-    if is_error_test_file(path) {
-        return path.parent().map(|p| p.to_path_buf());
-    }
-    None
+    Ok(if is_error_test_file(path)? {
+        path.parent().map(Path::to_path_buf)
+    } else {
+        None
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn fixture_walk_reports_a_symlink_loop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let errors = tmp.path().join("errors");
+        fs::create_dir(&errors).unwrap();
+        let fixture = errors.join("loop.rock.err");
+        std::os::unix::fs::symlink(&fixture, &fixture).unwrap();
+
+        let error = run_error_suite(&errors, false).unwrap_err();
+        assert!(format!("{error:#}").contains("loop.rock.err"), "{error:#}");
+    }
 
     #[test]
     fn fixture_sections_keep_explicit_files_and_diagnostic_expectations() {
