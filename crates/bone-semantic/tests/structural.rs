@@ -323,6 +323,374 @@ fn arena_value_borrows_reject_detected_invalidation() {
 }
 
 #[test]
+fn arena_value_borrows_across_indirect_invalidation() {
+    const HOST: &str = r#"
+@lua_named struct Host { flag: int }
+global HELD: Entity<BorrowCell> = CELLS.insert(BorrowCell { n: 10 })
+global REPLACEMENT: Entity<BorrowCell>? = null
+@nomangle fn replace_held() {
+    HELD.remove()
+    REPLACEMENT = CELLS.insert(BorrowCell { n: 20 })
+}
+inline(lua) fn make_host() -> Host = """
+    local function replace()
+        replace_held()
+        return 0
+    end
+    return setmetatable({}, { __index = replace, __newindex = replace })
+"""
+"#;
+    let cases = [
+        (
+            "guarded compound operator",
+            r#"
+global HELD: Entity<BorrowCell> = CELLS.insert(BorrowCell { n: 0 })
+operator +(a: BorrowCell, b: int) -> BorrowCell { invalidate(HELD); BorrowCell { n: b } }
+fn probe(row: BorrowRow?) {
+    let r: ref BorrowCell = CELLS.borrow(HELD).unwrap()
+    row?.cell += 1
+    r.n = 1
+}
+"#,
+        ),
+        (
+            "resume",
+            r#"
+co fn worker(h: Entity<BorrowCell>) -> Coroutine<int> { invalidate(h); yield 0 }
+fn probe(h: Entity<BorrowCell>) {
+    let c = worker(h)
+    let r: ref BorrowCell = CELLS.borrow(h).unwrap()
+    c.resume()
+    r.n = 1
+}
+"#,
+        ),
+        (
+            "parameter default",
+            r#"
+global HELD: Entity<BorrowCell> = CELLS.insert(BorrowCell { n: 0 })
+fn probe(i: int = {
+    let r: ref BorrowCell = CELLS.borrow(HELD).unwrap()
+    invalidate(HELD)
+    r.n = 1
+    0
+}) {}
+"#,
+        ),
+        (
+            "iterator",
+            r#"
+struct Remover { h: Entity<BorrowCell> }
+fn next(it: Remover) -> (bool, int) { invalidate(it.h); (false, 0) }
+fn probe(h: Entity<BorrowCell>) {
+    let r: ref BorrowCell = CELLS.borrow(h).unwrap()
+    for _ in (Remover { h: h }) {}
+    r.n = 1
+}
+"#,
+        ),
+        (
+            "defer in nested block",
+            r#"
+fn probe(h: Entity<BorrowCell>) {
+    let r: ref BorrowCell = CELLS.borrow(h).unwrap()
+    if h.get() != null { defer invalidate(h) }
+    r.n = 1
+}
+"#,
+        ),
+        (
+            "defer stack",
+            r#"
+fn probe(h: Entity<BorrowCell>) {
+    let r: ref BorrowCell = CELLS.borrow(h).unwrap()
+    defer { r.n = 1 }
+    defer invalidate(h)
+}
+"#,
+        ),
+        (
+            "match guard fallback",
+            r#"
+fn retire(h: Entity<BorrowCell>) -> bool { invalidate(h); false }
+fn probe(h: Entity<BorrowCell>) {
+    let r: ref BorrowCell = CELLS.borrow(h).unwrap()
+    match 0 {
+        0 if retire(h) => (),
+        _ => { r.n = 1 },
+    }
+}
+"#,
+        ),
+        (
+            "ref returned through a defer",
+            r#"
+fn probe(h: Entity<BorrowCell>) -> ref BorrowCell {
+    defer invalidate(h)
+    return CELLS.borrow(h).unwrap()
+}
+"#,
+        ),
+        (
+            "ref returned through a defer by a function tail",
+            r#"
+fn probe(h: Entity<BorrowCell>) -> ref BorrowCell {
+    defer invalidate(h)
+    CELLS.borrow(h).unwrap()
+}
+"#,
+        ),
+        (
+            "struct default effect",
+            r#"
+global HELD: Entity<BorrowCell>? = null
+fn retire_default() -> int { invalidate(HELD.unwrap()); 0 }
+struct Payload { i: int = retire_default() }
+fn probe(h: Entity<BorrowCell>) {
+    HELD = h
+    let r: ref BorrowCell = CELLS.borrow(h).unwrap()
+    let _ = Payload {}
+    r.n = 1
+}
+"#,
+        ),
+        (
+            "erased host property",
+            r#"
+@lua_named struct Host { flag: int? }
+global HELD: Entity<BorrowCell> = CELLS.insert(BorrowCell { n: 10 })
+@nomangle fn replace_held() { HELD.remove(); CELLS.insert(BorrowCell { n: 20 }) }
+inline(lua) fn arm_host(host: any) = """
+    setmetatable(host, { __index = function() replace_held(); return 0 end })
+"""
+fn probe() {
+    let host = Host { flag: null }
+    let erased: any = host
+    arm_host(erased)
+    let r: ref BorrowCell = CELLS.borrow(HELD).unwrap()
+    let _ = host.flag
+    r.n = 99
+}
+"#,
+        ),
+        (
+            "host global property",
+            r#"
+@lua_named struct Host { flag: int? }
+global HELD: Entity<BorrowCell> = CELLS.insert(BorrowCell { n: 10 })
+global HOST: Host = Host { flag: null }
+@nomangle fn replace_held() { HELD.remove(); CELLS.insert(BorrowCell { n: 20 }) }
+inline(lua) fn arm_host() = """
+    local host = __rock_global_get(assert(__rock_global_entry("HOST")))
+    setmetatable(host, { __index = function() replace_held(); return 0 end })
+"""
+fn probe() {
+    arm_host()
+    let r: ref BorrowCell = CELLS.borrow(HELD).unwrap()
+    let _ = HOST.flag
+    r.n = 99
+}
+"#,
+        ),
+        (
+            "host record inside a global enum",
+            r#"
+@lua_named struct Host { flag: int? }
+global FIRST: Entity<BorrowCell> = CELLS.insert(BorrowCell { n: 10 })
+global REPLACEMENT: Entity<BorrowCell>? = null
+enum HostContainer { Wrapped(Host) }
+global HOST: HostContainer = HostContainer::Wrapped(Host { flag: null })
+
+@nomangle fn replace_held() {
+    FIRST.remove()
+    REPLACEMENT = CELLS.insert(BorrowCell { n: 20 })
+}
+
+inline(lua) fn arm_host() = """
+    local record = __rock_global_get(assert(__rock_global_entry("HOST")))
+    local host = nil
+    for k, v in pairs(record) do
+        if type(v) == "table" then host = v end
+    end
+    assert(host, "missing record payload")
+    setmetatable(host, { __index = function()
+        replace_held()
+        return 0
+    end })
+"""
+
+fn probe() {
+    arm_host()
+    let r: ref BorrowCell = CELLS.borrow(FIRST).unwrap()
+    match HOST { HostContainer::Wrapped(host) => { let _ = host.flag; r.n = 99 } }
+    print(FIRST.get() == null)
+    print(REPLACEMENT.unwrap().get().unwrap().n)
+}
+"#,
+        ),
+        (
+            "global initializer",
+            r#"
+global HELD: Entity<BorrowCell> = CELLS.insert(BorrowCell { n: 0 })
+global PROBE: int = {
+    let r: ref BorrowCell = CELLS.borrow(HELD).unwrap()
+    invalidate(HELD)
+    r.n = 1
+    0
+}
+"#,
+        ),
+    ];
+    let property_cases = [
+        "let _ = host.flag",
+        "host.flag = 1",
+        "let _ = table_get(host, \"flag\")",
+        "table_set(host, \"flag\", 1)",
+        "match host { Host { flag: 0 } => (), _ => () }",
+    ].map(|access| {
+        let body = format!("{HOST}fn probe() {{ let host = make_host(); let r: ref BorrowCell = CELLS.borrow(HELD).unwrap(); {access}; r.n = 99 }}");
+        (access, body)
+    });
+    let missed: Vec<_> = cases
+        .into_iter()
+        .map(|(name, body)| (name, body.to_string()))
+        .chain(property_cases)
+        .filter_map(|(name, body)| {
+            let errors = arena_borrow_errors(&body);
+            (!errors
+                .iter()
+                .any(|error| error.contains("Arena value borrow")))
+            .then_some((name, errors))
+        })
+        .collect();
+    assert!(missed.is_empty(), "missed Arena invalidation: {missed:#?}");
+    let plain = format!(
+        "{HOST}fn probe() {{ let host = Host {{ flag: 0 }}; let r: ref BorrowCell = CELLS.borrow(HELD).unwrap(); let _ = host.flag; r.n = 99 }}"
+    );
+    assert_eq!(arena_borrow_errors(&plain), Vec::<String>::new());
+}
+
+#[test]
+fn arena_value_borrows_track_foreign_collection_origins() {
+    const HOST: &str = r#"
+global HELD: Entity<BorrowCell> = CELLS.insert(BorrowCell { n: 10 })
+@nomangle fn replace_held() { HELD.remove(); CELLS.insert(BorrowCell { n: 20 }) }
+
+inline(lua) fn make_host() -> Map<string, int> = """
+    return setmetatable({}, { __index = function() replace_held(); return 0 end })
+"""
+
+inline(lua) fn arm_host(map: Map<string, int>) = """
+    setmetatable(map, { __index = function() replace_held(); return 0 end })
+"""
+
+@lua_named struct HostMap { map: Map<string, int> }
+inline(lua) fn arm_record(record: HostMap) = """
+    setmetatable(record.map, { __index = function() replace_held(); return 0 end })
+"""
+inline(lua) fn arm_callback(get_map: fn() -> Map<string, int>) = """
+    setmetatable(get_map(), { __index = function() replace_held(); return 0 end })
+"""
+
+fn assign(record: HostMap, map: Map<string, int>) { record.map = map }
+inline(lua) fn arm_nested(outer: Map<string, Map<string, int>>) = """
+    setmetatable(outer.nested, { __index = function() replace_held(); return 0 end })
+"""
+
+global ESCAPED: Map<string, int> = map_new()
+fn publish(map: Map<string, int>) { ESCAPED = map }
+fn arm(map: Map<string, int>) { arm_host(map) }
+fn forward(map: Map<string, int>) -> Map<string, int> { map }
+fn read(map: Map<string, int>) -> int { map["flag"] }
+fn read_vec(vec: [int]) -> int { vec[0] }
+"#;
+    for (setup, access, rejected) in [
+        ("let map = make_host()", r#"let _ = map["flag"]"#, true),
+        (
+            "let map = make_host(); let alias = map",
+            r#"let _ = alias.get("flag")"#,
+            true,
+        ),
+        ("let map = make_host()", "let _ = read(map)", true),
+        (
+            "let map: Map<string, int> = map_new(); let alias = map; arm_host(alias)",
+            r#"let _ = map["flag"]"#,
+            true,
+        ),
+        (
+            "let map: Map<string, int> = map_new(); let alias = forward(map); arm(alias)",
+            r#"let _ = map["flag"]"#,
+            true,
+        ),
+        (
+            "let map: Map<string, int> = map_new(); let record = HostMap { map: map }; arm_record(record)",
+            r#"let _ = map["flag"]"#,
+            true,
+        ),
+        (
+            "let map: Map<string, int> = map_new(); arm_callback(() => map)",
+            r#"let _ = map["flag"]"#,
+            true,
+        ),
+        (
+            "let map: Map<string, int> = map_new(); let record = HostMap { map: map_new() }; record.map = map; arm_record(record)",
+            r#"let _ = map["flag"]"#,
+            true,
+        ),
+        (
+            "let map: Map<string, int> = map_new(); publish(map); arm_host(ESCAPED)",
+            r#"let _ = map["flag"]"#,
+            true,
+        ),
+        (
+            "let map: Map<string, int> = map_new(); let record = HostMap { map: map_new() }; assign(record, map); arm_record(record)",
+            r#"let _ = map["flag"]"#,
+            true,
+        ),
+        (
+            r#"let map: Map<string, int> = map_new(); let outer: Map<string, Map<string, int>> = map_new(); outer.insert("nested", map); arm_nested(outer)"#,
+            r#"let _ = map["flag"]"#,
+            true,
+        ),
+        (
+            r#"let map: Map<string, int> = map_new(); map["flag"] = 0"#,
+            r#"let _ = read(map); let _ = map.get("flag")"#,
+            false,
+        ),
+        ("let xs = [0]", "let _ = read_vec(xs)", false),
+    ] {
+        let body = format!(
+            "{HOST}fn probe() {{ {setup}; let r: ref BorrowCell = CELLS.borrow(HELD).unwrap(); {access}; r.n = 99 }}"
+        );
+        let errors = arena_borrow_errors(&body);
+        assert_eq!(
+            errors
+                .iter()
+                .any(|error| error.contains("Arena value borrow")),
+            rejected,
+            "{setup}; {access}: {errors:?}",
+        );
+        if !rejected {
+            assert!(errors.is_empty(), "{errors:?}");
+        }
+    }
+    let later_escape = format!(
+        r#"{HOST}
+fn probe() {{
+    let map: Map<string, int> = map_new()
+    map["flag"] = 0
+    let r: ref BorrowCell = CELLS.borrow(HELD).unwrap()
+    let _ = map["flag"]
+    r.n = 99
+    arm_host(map)
+}}
+"#
+    );
+    let errors = arena_borrow_errors(&later_escape);
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
 fn arena_borrow_checks_preserve_separate_storage_and_fresh_reborrows() {
     for body in [
         "fn probe(h: Entity<BorrowCell>) { let r: ref BorrowCell = CELLS.borrow(h).unwrap(); r.n = 1 }",

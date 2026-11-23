@@ -12,6 +12,14 @@ pub trait SuspensionPolicy {
         matches!(body.expr_arena[at], Expr::Yield(_) | Expr::YieldDelegate(_))
     }
 
+    fn crosses_iteration(&self, _binding: Idx<BindingInfo>, _iter: Idx<Expr>) -> bool {
+        false
+    }
+
+    fn crosses_return(&self, _value: Idx<Expr>, _at: Idx<Expr>, _iteration: bool) -> bool {
+        false
+    }
+
     fn crosses_binding(&self, _binding: Idx<BindingInfo>, _at: Idx<Expr>) -> bool {
         true
     }
@@ -40,7 +48,10 @@ pub fn uses_after_suspension_in(
     params: impl IntoIterator<Item = Idx<BindingInfo>>,
     policy: &impl SuspensionPolicy,
 ) -> Vec<Idx<Expr>> {
-    let mut flow = Flow::default();
+    let mut flow = Flow {
+        reachable: true,
+        ..Flow::default()
+    };
     for binding in params {
         if policy.binding_holds_frame_data(binding, None) {
             flow.live.insert(binding);
@@ -51,7 +62,10 @@ pub fn uses_after_suspension_in(
         policy,
         reported: FxHashSet::default(),
         loops: Vec::new(),
-        unwound: Flow::default(),
+        root,
+        defers: Vec::new(),
+        defer_floor: 0,
+        returning: None,
     };
     walk.expr(root, &mut flow);
     let mut found: Vec<_> = walk.reported.into_iter().collect();
@@ -61,6 +75,7 @@ pub fn uses_after_suspension_in(
 
 #[derive(Clone, Default)]
 struct Flow {
+    reachable: bool,
     live: FxHashSet<Idx<BindingInfo>>,
     crossed: FxHashSet<Idx<BindingInfo>>,
 }
@@ -78,6 +93,7 @@ impl Flow {
     }
 
     fn merge(&mut self, other: Flow) {
+        self.reachable |= other.reachable;
         self.live.extend(other.live);
         self.crossed.extend(other.crossed);
     }
@@ -101,12 +117,15 @@ struct Walk<'a, P> {
     reported: FxHashSet<Idx<Expr>>,
     /// Flows leaving each enclosing loop by `break` and by `continue`.
     loops: Vec<LoopExits>,
-    /// Flows that left a block early; its defers still run on them.
-    unwound: Flow,
+    root: Idx<Expr>,
+    defers: Vec<Vec<Idx<Expr>>>,
+    defer_floor: usize,
+    returning: Option<Idx<Expr>>,
 }
 
 #[derive(Default)]
 struct LoopExits {
+    defer_depth: usize,
     breaks: Flow,
     continues: Flow,
 }
@@ -114,7 +133,7 @@ struct LoopExits {
 enum Exit {
     Break,
     Continue,
-    Return,
+    Return(Option<Idx<Expr>>),
 }
 
 impl<P: SuspensionPolicy> Walk<'_, P> {
@@ -142,23 +161,24 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
     /// for every iteration.
     fn loop_body(
         &mut self,
-        cond: Option<Idx<Expr>>,
         vars: &[Idx<BindingInfo>],
         body: Idx<Expr>,
         flow: &mut Flow,
+        mut advance: impl FnMut(&mut Self, &mut Flow),
     ) {
         let mut head = flow.clone();
         let mut exit = Flow::default();
         loop {
             let mut pass = head.clone();
-            if let Some(cond) = cond {
-                self.expr(cond, &mut pass);
-            }
+            advance(self, &mut pass);
             exit.merge(pass.clone());
             for &binding in vars {
                 self.bind(binding, None, &mut pass);
             }
-            self.loops.push(LoopExits::default());
+            self.loops.push(LoopExits {
+                defer_depth: self.defers.len(),
+                ..LoopExits::default()
+            });
             self.expr(body, &mut pass);
             let exits = self.loops.pop().expect("pushed above");
             pass.merge(exits.continues);
@@ -175,15 +195,22 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
     /// Ends the current path: nothing after a `break`, `continue` or
     /// `return` runs on it.
     fn exit(&mut self, exit: Exit, flow: &mut Flow) {
-        let taken = std::mem::take(flow);
-        self.unwound.merge(taken.clone());
-        let Some(exits) = self.loops.last_mut() else {
-            return;
+        let depth = match exit {
+            Exit::Return(_) => 0,
+            Exit::Break | Exit::Continue => self.loops.last().map_or(0, |l| l.defer_depth),
         };
-        match exit {
-            Exit::Break => exits.breaks.merge(taken),
-            Exit::Continue => exits.continues.merge(taken),
-            Exit::Return => {}
+        let returning = match exit {
+            Exit::Return(value) => value,
+            _ => None,
+        };
+        self.run_defers(depth, returning, flow);
+        let taken = std::mem::take(flow);
+        if let Some(exits) = self.loops.last_mut() {
+            match exit {
+                Exit::Break => exits.breaks.merge(taken),
+                Exit::Continue => exits.continues.merge(taken),
+                Exit::Return(_) => {}
+            }
         }
     }
 
@@ -203,6 +230,9 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
     }
 
     fn stmt(&mut self, stmt: Idx<Statement>, flow: &mut Flow) {
+        if !flow.reachable {
+            return;
+        }
         match &self.body.statement_arena[stmt] {
             Statement::Let {
                 pattern,
@@ -227,10 +257,10 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
                 if let Some(value) = value {
                     self.expr(*value, flow);
                 }
-                self.exit(Exit::Return, flow);
+                self.exit(Exit::Return(*value), flow);
             }
             Statement::Expr(expr) => self.expr(*expr, flow),
-            Statement::Defer(_) => {}
+            Statement::Defer(expr) => self.defers.last_mut().expect("block").push(*expr),
             Statement::For {
                 pattern,
                 iter,
@@ -238,9 +268,14 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
             } => {
                 self.expr(*iter, flow);
                 let vars = self.body.pattern_bindings(*pattern);
-                self.loop_body(None, &vars, *body, flow);
+                self.loop_body(&vars, *body, flow, |walk, pass| {
+                    pass.suspend(|binding| walk.policy.crosses_iteration(binding, *iter));
+                    walk.check_return(*iter, true);
+                });
             }
-            Statement::While { cond, body } => self.loop_body(Some(*cond), &[], *body, flow),
+            Statement::While { cond, body } => {
+                self.loop_body(&[], *body, flow, |walk, pass| walk.expr(*cond, pass));
+            }
             Statement::Break => self.exit(Exit::Break, flow),
             Statement::Continue => self.exit(Exit::Continue, flow),
             Statement::Comment(_) => {}
@@ -248,19 +283,24 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
     }
 
     fn expr(&mut self, expr: Idx<Expr>, flow: &mut Flow) {
+        if !flow.reachable {
+            return;
+        }
         match self.body.expr_arena[expr] {
             Expr::Var(binding) => self.report(expr, binding, flow),
             Expr::Lambda { .. } => {}
             Expr::Block { statements, tail } => {
-                let outer = std::mem::take(&mut self.unwound);
+                let depth = self.defers.len();
+                self.defers.push(Vec::new());
                 for stmt in statements {
                     self.stmt(stmt, flow);
                 }
                 if let Some(tail) = tail {
                     self.expr(tail, flow);
                 }
-                self.run_defers(statements, flow);
-                self.unwound.merge(outer);
+                let returning = if expr == self.root { tail } else { None };
+                self.run_defers(depth, returning, flow);
+                self.defers.pop();
             }
             Expr::If {
                 cond,
@@ -296,15 +336,16 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
             }
             Expr::Match { scrutinee, arms } => {
                 self.expr(scrutinee, flow);
-                let entry = flow.clone();
+                let mut entry = flow.clone();
                 let mut out = Flow::default();
                 for arm in arms {
                     let arm = self.body.match_arm_arena[arm];
                     let mut branch = entry.clone();
+                    self.bind_pattern_flow(arm.pattern, scrutinee, &mut branch);
                     if let Some(guard) = arm.guard {
                         self.expr(guard, &mut branch);
+                        entry.merge(branch.clone());
                     }
-                    self.bind_pattern_flow(arm.pattern, scrutinee, &mut branch);
                     self.expr(arm.body, &mut branch);
                     out.merge(branch);
                 }
@@ -331,7 +372,7 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
                 self.expr(body, flow);
             }
             Expr::BinOp {
-                op: BinOp::NullCoalesce,
+                op: BinOp::NullCoalesce | BinOp::And | BinOp::Or,
                 lhs,
                 rhs,
             } => {
@@ -346,7 +387,7 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
                 if let Some(value) = value {
                     self.expr(value, flow);
                 }
-                self.exit(Exit::Return, flow);
+                self.exit(Exit::Return(value), flow);
             }
             Expr::Break => self.exit(Exit::Break, flow),
             Expr::Continue => self.exit(Exit::Continue, flow),
@@ -365,18 +406,38 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
                 });
             }
         }
+        self.cross_barrier(expr, flow);
+    }
+
+    fn cross_barrier(&mut self, expr: Idx<Expr>, flow: &mut Flow) {
         if self.policy.is_barrier(self.body, expr) {
             flow.suspend(|binding| self.policy.crosses_binding(binding, expr));
+            self.check_return(expr, false);
         }
     }
 
-    fn run_defers(&mut self, statements: IdxRange<Statement>, flow: &Flow) {
-        for stmt in statements {
-            if let Statement::Defer(expr) = self.body.statement_arena[stmt] {
-                let mut deferred = flow.clone();
-                deferred.merge(self.unwound.clone());
-                self.expr(expr, &mut deferred);
+    fn check_return(&mut self, at: Idx<Expr>, iteration: bool) {
+        if let Some(value) = self.returning
+            && self.policy.crosses_return(value, at, iteration)
+        {
+            self.reported.insert(value);
+        }
+    }
+
+    fn run_defers(&mut self, depth: usize, returning: Option<Idx<Expr>>, flow: &mut Flow) {
+        if !flow.reachable {
+            return;
+        }
+        let depth = depth.max(self.defer_floor);
+        let floor = std::mem::replace(&mut self.defer_floor, self.defers.len());
+        let saved = self.returning;
+        self.returning = returning.or(saved);
+        for frame in (depth..self.defers.len()).rev() {
+            for index in (0..self.defers[frame].len()).rev() {
+                self.expr(self.defers[frame][index], flow);
             }
         }
+        self.returning = saved;
+        self.defer_floor = floor;
     }
 }

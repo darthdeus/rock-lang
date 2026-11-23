@@ -6,11 +6,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use bone_core::hir_walk::HirChild;
 use bone_core::modules::is_stdlib_module_file;
 use bone_core::suspension::{SuspensionPolicy, uses_after_suspension, uses_after_suspension_in};
-use bone_core::workspace::BodyInference;
+use bone_core::workspace::{BodyInference, BoundNext};
 
 use crate::hir::{
-    BinOp, BindingInfo, BindingKind, Body, Expr, Function, Module, Statement, TypeCtor, TypeExpr,
-    VarId,
+    BinOp, BindingInfo, BindingKind, Body, BuiltinTy, Expr, Function, Module, Pattern, Statement,
+    TypeCtor, TypeExpr, VarId, VariantPayload,
 };
 use crate::prelude::*;
 
@@ -35,6 +35,11 @@ const GENERIC: char = '\x02';
 const MAX_KEY_LEN: usize = 256;
 
 type FnKey = (ModuleId, Idx<Function>);
+type BodyKey = (ModuleId, BodyOwner);
+
+fn function_body((module, function): FnKey) -> BodyKey {
+    (module, BodyOwner::Function(function))
+}
 
 /// What a call may do to collection structure. Each entry keeps the first
 /// site that established it, for the diagnostic.
@@ -42,6 +47,9 @@ type FnKey = (ModuleId, Idx<Function>);
 struct Effect {
     /// Runs a closure or foreign code whose effect is not known.
     unknown: Option<Span>,
+    /// Accesses a record whose fields can run host callbacks.
+    host_property: Option<Span>,
+    host_params: BTreeMap<u16, Span>,
     /// Keeps these reference parameters in a coroutine frame.
     retained: BTreeMap<u16, Span>,
     /// Changes the structure of the collection passed as this parameter.
@@ -63,16 +71,34 @@ impl Effect {
         self.elements.entry(key).or_insert(at);
     }
 
+    fn add_host_access(&mut self, origin: CollectionOrigin, at: Span) {
+        match origin {
+            CollectionOrigin::Rock => {}
+            CollectionOrigin::Host => {
+                self.host_property.get_or_insert(at);
+            }
+            CollectionOrigin::Param(p) => {
+                self.host_params.entry(p).or_insert(at);
+            }
+        }
+    }
+
     /// Equal apart from witnesses. Witnesses can shift while a cycle
     /// settles; only the keys decide convergence.
     fn same_shape(&self, other: &Effect) -> bool {
         self.unknown.is_some() == other.unknown.is_some()
+            && self.host_property.is_some() == other.host_property.is_some()
+            && self.host_params.keys().eq(other.host_params.keys())
             && self.retained.keys().eq(other.retained.keys())
             && self.params.keys().eq(other.params.keys())
             && self.elements.keys().eq(other.elements.keys())
     }
 
     fn union(&mut self, other: &Effect) {
+        self.host_property = self.host_property.or(other.host_property);
+        for (&p, &at) in &other.host_params {
+            self.host_params.entry(p).or_insert(at);
+        }
         for (&p, &at) in &other.retained {
             self.retained.entry(p).or_insert(at);
         }
@@ -91,9 +117,56 @@ impl Effect {
     }
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum CollectionOrigin {
+    #[default]
+    Rock,
+    Param(u16),
+    Host,
+}
+
+impl CollectionOrigin {
+    fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Rock, origin) | (origin, Self::Rock) => origin,
+            (a, b) if a == b => a,
+            _ => Self::Host,
+        }
+    }
+}
+
+#[derive(Default)]
+struct CollectionSources {
+    values: FxHashMap<Idx<BindingInfo>, Vec<Idx<Expr>>>,
+    stored: FxHashMap<Idx<BindingInfo>, Vec<(Idx<Expr>, Idx<Expr>)>>,
+    escaped: FxHashMap<Idx<BindingInfo>, usize>,
+    points: Option<ArenaMap<Idx<Expr>, usize>>,
+}
+
+impl CollectionSources {
+    fn point(&self, expr: Idx<Expr>) -> Option<usize> {
+        self.points.as_ref()?.get(expr).copied()
+    }
+}
+
+fn storage_root(body: &Body, mut place: Idx<Expr>) -> Expr {
+    loop {
+        match body.expr_arena[place] {
+            Expr::FieldAccess { base, .. }
+            | Expr::SafeNav { base, .. }
+            | Expr::Index { base, .. } => {
+                place = base;
+            }
+            Expr::TupleIndex { tuple, .. } => place = tuple,
+            root => return root,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Arg {
     expr: Idx<Expr>,
+    collection_origin: CollectionOrigin,
     ref_params: BTreeSet<u16>,
     /// A local Vec/Map built fresh in this body: only this body can reach it.
     fresh: Option<Idx<BindingInfo>>,
@@ -104,7 +177,7 @@ struct Arg {
 }
 
 struct Edge {
-    callee: FnKey,
+    callee: BodyKey,
     /// The callee's generics, as keys in the caller.
     generics: Vec<String>,
     /// Indexed by the callee's parameter.
@@ -120,11 +193,229 @@ struct Root {
 enum CallSite {
     Known(Edge),
     Unknown,
+    HostAccess(CollectionOrigin),
 }
 
 struct FnFacts {
     direct: Effect,
     calls: Vec<(Idx<Expr>, CallSite)>,
+    iterations: Vec<(Idx<Expr>, CallSite)>,
+    conversions: Vec<(Idx<Expr>, CallSite)>,
+}
+
+impl FnFacts {
+    fn all_calls(&self) -> impl Iterator<Item = &(Idx<Expr>, CallSite)> {
+        self.calls
+            .iter()
+            .chain(&self.iterations)
+            .chain(&self.conversions)
+    }
+
+    fn callees(&self) -> impl Iterator<Item = BodyKey> {
+        self.all_calls().filter_map(|(_, site)| match site {
+            CallSite::Known(edge) => Some(edge.callee),
+            CallSite::Unknown | CallSite::HostAccess(_) => None,
+        })
+    }
+}
+
+#[derive(Default)]
+struct HostRecords {
+    types: FxHashSet<Ustr>,
+    host_boundary: bool,
+    escaping_calls: FxHashSet<FnKey>,
+}
+
+impl HostRecords {
+    fn collect(ws: &Workspace) -> Self {
+        let mut records = Self::default();
+        let mut pending = Vec::new();
+        let user_modules = || {
+            ws.modules
+                .iter()
+                .filter(|m| !is_stdlib_module_file(m.file.as_str()))
+        };
+        let host_entry_points: FxHashSet<_> = user_modules()
+            .flat_map(|m| {
+                m.functions
+                    .iter()
+                    .filter(|(_, f)| Self::has_host_boundary(f))
+                    .map(|(f, _)| (m.id, f))
+            })
+            .collect();
+        if host_entry_points.is_empty() {
+            return records;
+        }
+        records.host_boundary = true;
+        let mut callers: FxHashMap<FnKey, Vec<FnKey>> = FxHashMap::default();
+        for module in &ws.modules {
+            let trusted = is_stdlib_module_file(module.file.as_str());
+            if !trusted {
+                // Host entry points can reach the Lua global directory by name.
+                for global in module.globals.values() {
+                    records.add(ws, None, global.ty, &mut pending);
+                }
+            }
+            for (id, function) in module.functions.iter() {
+                let opaque = function.inline_body.is_some() || function.is_extern;
+                let stores_alias = function.param_decls.len() > 1
+                    && function.annotations.iter().any(|a| {
+                        a.is_builtin(RELOCATES_ANNOTATION) || a.is_builtin("writes_elems")
+                    });
+                if opaque && (!trusted || stores_alias) {
+                    records.escaping_calls.insert((module.id, id));
+                }
+                if host_entry_points.contains(&(module.id, id)) {
+                    for ty in function
+                        .param_decls
+                        .iter()
+                        .map(|p| p.ty)
+                        .chain(function.return_ty)
+                    {
+                        records.add(ws, None, ty, &mut pending);
+                    }
+                }
+            }
+            let Some(inference) = ws.inference(module.id) else {
+                continue;
+            };
+            for (&owner, bi) in &inference.per_fn {
+                let Some(body) = module.bodies.get(&owner) else {
+                    continue;
+                };
+                if let BodyOwner::Function(id) = owner
+                    && body.expr_arena.values().any(|expr| {
+                        matches!(*expr, Expr::Assign { target, value }
+                            if !matches!(body.expr_arena[target], Expr::Var(_))
+                                && bi.expr_types.get(value).is_some_and(|&ty| {
+                                    records.carries_collection(ws, bi, ty)
+                                        || matches!(ws.resolve_ty(Some(bi), ty), Some((_, TypeExpr::Generic(..))))
+                                }))
+                    })
+                {
+                    records.escaping_calls.insert((module.id, id));
+                }
+                if !trusted {
+                    for &(_, ty) in &bi.any_erasures {
+                        records.add(ws, Some(bi), ty, &mut pending);
+                    }
+                }
+                for (&site, &(mid, fid)) in &bi.resolved_overload_calls {
+                    let callee_module = ws.module(mid);
+                    let callee = &callee_module.functions[fid];
+                    let stdlib = is_stdlib_module_file(callee_module.file.as_str());
+                    if let BodyOwner::Function(caller) = owner {
+                        callers
+                            .entry((mid, fid))
+                            .or_default()
+                            .push((module.id, caller));
+                    }
+                    let foreign = host_entry_points.contains(&(mid, fid));
+                    let cast = stdlib && matches!(callee.name.as_str(), "cast" | "transmute");
+                    if trusted || (!foreign && !cast) {
+                        continue;
+                    }
+                    if let Some(&ty) = bi.expr_types.get(site) {
+                        records.add(ws, Some(bi), ty, &mut pending);
+                    }
+                    let (receiver, args) = match body.expr_arena[site] {
+                        Expr::Call { args, .. } => (None, args),
+                        Expr::SafeNavCall { receiver, args, .. } => (Some(receiver), args),
+                        _ => continue,
+                    };
+                    for arg in receiver.into_iter().chain(args) {
+                        if let Some(&ty) = bi.expr_types.get(arg) {
+                            records.add(ws, Some(bi), ty, &mut pending);
+                        }
+                    }
+                }
+            }
+        }
+        // An opaque call or an aggregate store can retain a supplied alias.
+        let mut escaping_calls: Vec<_> = records.escaping_calls.iter().copied().collect();
+        while let Some(callee) = escaping_calls.pop() {
+            for &caller in callers.get(&callee).into_iter().flatten() {
+                if records.escaping_calls.insert(caller) {
+                    escaping_calls.push(caller);
+                }
+            }
+        }
+        while let Some(name) = pending.pop() {
+            let mut add = |ty| records.add(ws, None, ty, &mut pending);
+            match ws.nominals.get(&name) {
+                Some(Nominal::Struct(id)) => {
+                    for field in &ws.module(id.module).structs[id.def].fields {
+                        add(field.ty);
+                    }
+                }
+                Some(Nominal::Enum(id)) => {
+                    for variant in &ws.module(id.module).enums[id.def].variants {
+                        match &variant.payload {
+                            VariantPayload::Unit => {}
+                            VariantPayload::Tuple(types) => {
+                                types.iter().copied().for_each(&mut add)
+                            }
+                            VariantPayload::Record(fields) => fields.iter().for_each(|f| add(f.ty)),
+                        }
+                    }
+                }
+                Some(Nominal::Newtype(id)) => add(ws.module(id.module).newtypes[id.def].wrapped),
+                None => {}
+            }
+        }
+        records
+    }
+
+    fn has_host_boundary(function: &Function) -> bool {
+        function.is_extern
+            || function.inline_body.is_some()
+            || function
+                .annotations
+                .iter()
+                .any(|a| a.is_builtin("nomangle"))
+    }
+
+    fn add(
+        &mut self,
+        ws: &Workspace,
+        bi: Option<&BodyInference>,
+        ty: TyId,
+        pending: &mut Vec<Ustr>,
+    ) {
+        ws.type_any(bi, ty, &mut |node| {
+            if let TypeExpr::App {
+                ctor: TypeCtor::Nominal(name),
+                ..
+            } = node
+                && self.types.insert(name)
+            {
+                pending.push(name);
+            }
+            false
+        });
+    }
+
+    fn carries_collection(&self, ws: &Workspace, bi: &BodyInference, ty: TyId) -> bool {
+        collection_or_any(ws, Some(bi), ty)
+            || match strip_ref(ws, Some(bi), ty) {
+                Some((_, TypeExpr::Tuple { .. } | TypeExpr::Function { .. })) => true,
+                Some((
+                    _,
+                    TypeExpr::App {
+                        ctor: TypeCtor::Nominal(name),
+                        ..
+                    },
+                )) => self.types.contains(&name),
+                _ => false,
+            }
+    }
+
+    fn may_callback(&self, ws: &Workspace, bi: &BodyInference, ty: TyId) -> bool {
+        !self.types.is_empty()
+            && matches!(strip_ref(ws, Some(bi), ty),
+                Some((_, TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }))
+                    if self.types.contains(&name) && ws.is_identity_struct(name))
+    }
 }
 
 struct BodyCtx<'a> {
@@ -136,6 +427,8 @@ struct BodyCtx<'a> {
     fresh_locals: FxHashSet<Idx<BindingInfo>>,
     ref_values: FxHashMap<Idx<BindingInfo>, Vec<Idx<Expr>>>,
     arena_remove: Option<Span>,
+    arena_storage: bool,
+    collection_sources: Option<CollectionSources>,
     root_cache: std::cell::RefCell<FxHashMap<Idx<BindingInfo>, Vec<Root>>>,
     return_origins: &'a ReturnOrigins,
 }
@@ -143,14 +436,14 @@ struct BodyCtx<'a> {
 impl<'a> BodyCtx<'a> {
     fn new(
         ws: &'a Workspace,
-        function: &Function,
+        function: Option<&Function>,
         body: &'a Body,
         bi: &'a BodyInference,
         return_origins: &'a ReturnOrigins,
     ) -> Self {
         let generics = function
-            .generics
-            .iter()
+            .into_iter()
+            .flat_map(|f| &f.generics)
             .filter_map(|&g| match ws.resolve_ty(None, g) {
                 Some((_, TypeExpr::Generic(var, _))) => Some(var),
                 _ => None,
@@ -171,14 +464,20 @@ impl<'a> BodyCtx<'a> {
             fresh_locals: FxHashSet::default(),
             ref_values: FxHashMap::default(),
             root_cache: Default::default(),
+            collection_sources: None,
+            arena_storage: function.is_some_and(|f| {
+                bone_core::modules::stdlib_file_name(f.span.file.as_str()) == Some("arena.rock")
+            }),
             return_origins,
-            arena_remove: (function.name.as_str() == "remove"
-                && is_stdlib_module_file(function.span.file.as_str())
-                && function
-                    .param_decls
-                    .first()
-                    .is_some_and(|p| arena_element(ws, None, p.ty).is_some()))
-            .then_some(function.span),
+            arena_remove: function
+                .filter(|f| {
+                    f.name.as_str() == "remove"
+                        && is_stdlib_module_file(f.span.file.as_str())
+                        && f.param_decls
+                            .first()
+                            .is_some_and(|p| arena_element(ws, None, p.ty).is_some())
+                })
+                .map(|f| f.span),
         };
         ctx.fresh_locals = ctx.collect_fresh_locals();
         ctx
@@ -189,45 +488,45 @@ impl<'a> BodyCtx<'a> {
         let mut fresh = FxHashSet::default();
         let mut stale = FxHashSet::default();
         for (_, statement) in self.body.statement_arena.iter() {
-            if let Statement::Let { pattern, value, .. } = *statement
-                && let Some(name) = self.body.pattern_single_bind(pattern)
-            {
-                if self
-                    .bi
-                    .binding_types
-                    .get(name)
-                    .is_some_and(|&ty| ref_target(self.ws, self.bi, ty).is_some())
-                {
-                    self.ref_values.entry(name).or_default().push(value);
-                }
-                if self.body.binding_arena[name].kind == BindingKind::Let
-                    && self.is_new_collection(value)
-                {
-                    fresh.insert(name);
-                } else {
-                    stale.insert(name);
+            if let Statement::Let { pattern, value, .. } = *statement {
+                if let Some(name) = self.body.pattern_single_bind(pattern) {
+                    self.record_ref(name, value);
+                    if self.body.binding_arena[name].kind == BindingKind::Let
+                        && self.is_new_collection(value)
+                    {
+                        fresh.insert(name);
+                    } else {
+                        stale.insert(name);
+                    }
                 }
             }
         }
         for (_, expr) in self.body.expr_arena.iter() {
-            if let Expr::Assign { target, value } = *expr
-                && let Expr::Var(binding) = self.body.expr_arena[target]
-            {
-                if !self.is_new_collection(value) {
-                    stale.insert(binding);
+            match *expr {
+                Expr::Assign { target, value } => {
+                    if let Expr::Var(binding) = self.body.expr_arena[target] {
+                        if !self.is_new_collection(value) {
+                            stale.insert(binding);
+                        }
+                        self.record_ref(binding, value);
+                    }
                 }
-                if self
-                    .bi
-                    .binding_types
-                    .get(binding)
-                    .is_some_and(|&ty| ref_target(self.ws, self.bi, ty).is_some())
-                {
-                    self.ref_values.entry(binding).or_default().push(value);
-                }
+                _ => {}
             }
         }
         fresh.retain(|b| !stale.contains(b));
         fresh
+    }
+
+    fn record_ref(&mut self, binding: Idx<BindingInfo>, value: Idx<Expr>) {
+        if self
+            .bi
+            .binding_types
+            .get(binding)
+            .is_some_and(|&ty| ref_target(self.ws, self.bi, ty).is_some())
+        {
+            self.ref_values.entry(binding).or_default().push(value);
+        }
     }
 
     fn is_new_collection(&self, e: Idx<Expr>) -> bool {
@@ -269,7 +568,7 @@ impl<'a> BodyCtx<'a> {
         Some(self.key(element))
     }
 
-    fn arg(&self, expr: Idx<Expr>) -> Arg {
+    fn arg(&self, expr: Idx<Expr>, at: Idx<Expr>) -> Arg {
         let (fresh, param) = match self.body.expr_arena[expr] {
             Expr::Var(binding) => (
                 self.fresh_locals.contains(&binding).then_some(binding),
@@ -281,6 +580,7 @@ impl<'a> BodyCtx<'a> {
         self.ref_params(expr, &mut ref_params, &mut FxHashSet::default());
         Arg {
             expr,
+            collection_origin: self.collection_origin(expr, at),
             ref_params,
             fresh,
             param,
@@ -352,7 +652,7 @@ impl<'a> BodyCtx<'a> {
     }
 
     fn write(&self, effect: &mut Effect, target: Idx<Expr>, at: Span) {
-        let arg = self.arg(target);
+        let arg = self.arg(target, target);
         if let Some(local) = arg.fresh {
             effect.locals.entry(local).or_insert(at);
         } else if let Some(p) = arg.param {
@@ -365,12 +665,15 @@ impl<'a> BodyCtx<'a> {
     }
 
     fn call_args(&self, call: Idx<Expr>) -> impl Iterator<Item = Idx<Expr>> {
-        let (receiver, args) = match self.body.expr_arena[call] {
-            Expr::Call { args, .. } => (None, args),
-            Expr::SafeNavCall { receiver, args, .. } => (Some(receiver), args),
+        let (leading, args) = match self.body.expr_arena[call] {
+            Expr::Call { args, .. } => ([None, None], args),
+            Expr::SafeNavCall { receiver, args, .. } => ([Some(receiver), None], args),
+            Expr::CompoundAssign { target, value, .. } => {
+                ([Some(target), Some(value)], IdxRange::new_empty())
+            }
             _ => unreachable!("call arguments requested for a non-call"),
         };
-        receiver.into_iter().chain(args)
+        leading.into_iter().flatten().chain(args)
     }
 
     /// The callee's parameter each argument fills: by name when named,
@@ -388,28 +691,540 @@ impl<'a> BodyCtx<'a> {
                 }
             };
             if let Some(slot) = slot {
-                bound[slot] = Some(self.arg(arg));
+                bound[slot] = Some(self.arg(arg, call));
             }
         }
         bound
     }
 
-    fn facts(&self) -> FnFacts {
+    fn collection_origin(&self, expr: Idx<Expr>, at: Idx<Expr>) -> CollectionOrigin {
+        let Some(sources) = &self.collection_sources else {
+            return CollectionOrigin::Rock;
+        };
+        if !self
+            .ty(expr)
+            .is_some_and(|ty| collection_or_any(self.ws, Some(self.bi), ty))
+        {
+            return CollectionOrigin::Rock;
+        }
+        self.collection_origin_inner(
+            expr,
+            sources,
+            sources.point(at).unwrap_or(usize::MAX),
+            &mut FxHashSet::default(),
+        )
+    }
+
+    fn collection_origin_inner(
+        &self,
+        expr: Idx<Expr>,
+        sources: &CollectionSources,
+        at: usize,
+        seen: &mut FxHashSet<Idx<Expr>>,
+    ) -> CollectionOrigin {
+        use CollectionOrigin::{Host, Param, Rock};
+        if !seen.insert(expr) {
+            return Rock;
+        }
+        match self.body.expr_arena[expr] {
+            Expr::Var(binding) => {
+                if sources
+                    .escaped
+                    .get(&binding)
+                    .is_some_and(|&escape| escape <= at)
+                {
+                    return Host;
+                }
+                let param = self.params.get(&binding).copied().map(Param);
+                match sources.values.get(&binding) {
+                    Some(values) => values.iter().fold(param.unwrap_or(Rock), |origin, &value| {
+                        origin.merge(self.collection_origin_inner(value, sources, at, seen))
+                    }),
+                    None => param.unwrap_or(Host),
+                }
+            }
+            Expr::Array(_) | Expr::Null => Rock,
+            Expr::Call { .. } | Expr::SafeNavCall { .. } => {
+                if self.is_new_collection(expr) {
+                    return Rock;
+                }
+                if self.resolved(expr).is_some_and(|(mid, fid)| {
+                    let module = self.ws.module(mid);
+                    is_stdlib_module_file(module.file.as_str())
+                        && matches!(module.functions[fid].name.as_str(), "cast" | "transmute")
+                }) && let Some(arg) = self.call_args(expr).next()
+                {
+                    return self.collection_origin_inner(arg, sources, at, seen);
+                }
+                Host
+            }
+            // The Arena implementation owns its store columns and initializes them itself.
+            Expr::FieldAccess { .. } if self.arena_storage => Rock,
+            Expr::FieldAccess { .. } | Expr::SafeNav { .. } | Expr::TupleIndex { .. } => Host,
+            _ => {
+                let mut origin = None;
+                self.for_each_value_carrier(expr, &mut |child| {
+                    let child = self.collection_origin_inner(child, sources, at, seen);
+                    origin = Some(
+                        origin.map_or(child, |previous: CollectionOrigin| previous.merge(child)),
+                    );
+                });
+                origin.unwrap_or(Host)
+            }
+        }
+    }
+
+    fn collect_collection_sources(&self, host: &HostRecords) -> CollectionSources {
+        let mut sources = CollectionSources::default();
+        let mut record = |binding, value| {
+            if self
+                .bi
+                .binding_types
+                .get(binding)
+                .is_some_and(|&ty| host.carries_collection(self.ws, self.bi, ty))
+            {
+                sources.values.entry(binding).or_default().push(value);
+            }
+        };
+        for statement in self.body.statement_arena.values() {
+            if let Statement::Let { pattern, value, .. } = *statement
+                && let Some(binding) = self.body.pattern_single_bind(pattern)
+            {
+                record(binding, value);
+            }
+        }
+        let mut sinks = Vec::new();
+        for (site, expr) in self.body.expr_arena.iter() {
+            let Expr::Assign { target, value } = *expr else {
+                continue;
+            };
+            if let Expr::Var(binding) = self.body.expr_arena[target] {
+                record(binding, value);
+            } else if self
+                .ty(value)
+                .is_some_and(|ty| host.carries_collection(self.ws, self.bi, ty))
+            {
+                match storage_root(self.body, target) {
+                    Expr::Var(binding) => {
+                        sources
+                            .stored
+                            .entry(binding)
+                            .or_default()
+                            .push((site, value));
+                    }
+                    _ => sinks.push((site, value)),
+                }
+            }
+        }
+        for (call, expr) in self.body.expr_arena.iter() {
+            if !matches!(expr, Expr::Call { .. } | Expr::SafeNavCall { .. })
+                || self
+                    .resolved(call)
+                    .is_some_and(|key| !host.escaping_calls.contains(&key))
+            {
+                continue;
+            }
+            for arg in self.call_args(call) {
+                if self
+                    .ty(arg)
+                    .is_some_and(|ty| host.carries_collection(self.ws, self.bi, ty))
+                {
+                    sinks.push((call, arg));
+                }
+            }
+        }
+        if !sinks.is_empty() {
+            sources.points = Some(self.statement_points());
+        }
+        for (site, value) in sinks {
+            let at = sources.point(site).unwrap_or_default();
+            self.escape_collection(value, &mut sources, at, &mut FxHashMap::default());
+        }
+        sources
+    }
+
+    // Distinguish sequential statements. Uses inside a loop, branch or
+    // argument share its statement point. Deferred and nested bodies can run
+    // out of order and do not get a point in the enclosing body.
+    fn statement_points(&self) -> ArenaMap<Idx<Expr>, usize> {
+        let mut points = ArenaMap::default();
+        let Some(root) = self.body.root else {
+            return points;
+        };
+        let Expr::Block { statements, tail } = self.body.expr_arena[root] else {
+            return points;
+        };
+        for (point, child) in statements
+            .into_iter()
+            .map(HirChild::Statement)
+            .chain(tail.map(HirChild::Expr))
+            .enumerate()
+        {
+            let mut visit = |node| {
+                match node {
+                    HirChild::Expr(e) => {
+                        if matches!(self.body.expr_arena[e], Expr::Lambda { .. }) {
+                            return false;
+                        }
+                        if points.get(e).is_none() {
+                            points.insert(e, point + 1);
+                        }
+                    }
+                    HirChild::Statement(s)
+                        if matches!(
+                            self.body.statement_arena[s],
+                            Statement::Fn { .. } | Statement::Defer(_)
+                        ) =>
+                    {
+                        return false;
+                    }
+                    _ => {}
+                }
+                true
+            };
+            if visit(child) {
+                self.body.walk_descendants(child, &mut visit);
+            }
+        }
+        points
+    }
+
+    fn escape_collection(
+        &self,
+        expr: Idx<Expr>,
+        sources: &mut CollectionSources,
+        at: usize,
+        seen: &mut FxHashMap<Idx<Expr>, usize>,
+    ) {
+        if seen.get(&expr).is_some_and(|&previous| previous <= at) {
+            return;
+        }
+        seen.insert(expr, at);
+        if let Expr::Var(binding) = self.body.expr_arena[expr] {
+            let first = sources.escaped.entry(binding).or_insert(at);
+            *first = (*first).min(at);
+            if let Some(values) = sources.values.get(&binding).cloned() {
+                for value in values {
+                    self.escape_collection(value, sources, at, seen);
+                }
+            }
+            if let Some(stored) = sources.stored.get(&binding).cloned() {
+                for (site, value) in stored {
+                    let at = at.max(sources.point(site).unwrap_or_default());
+                    self.escape_collection(value, sources, at, seen);
+                }
+            }
+        } else if let Expr::Lambda { body, .. } = self.body.expr_arena[expr] {
+            self.escape_collection(body, sources, at, seen);
+            self.body
+                .walk_descendants(HirChild::Expr(body), &mut |child| {
+                    if let HirChild::Expr(child) = child
+                        && matches!(self.body.expr_arena[child], Expr::Var(_))
+                    {
+                        self.escape_collection(child, sources, at, seen);
+                    }
+                    true
+                });
+        } else {
+            self.body.for_each_child(HirChild::Expr(expr), |child| {
+                if let HirChild::Expr(child) = child {
+                    self.escape_collection(child, sources, at, seen);
+                }
+            });
+        }
+    }
+
+    fn facts(mut self, host_records: &HostRecords) -> FnFacts {
+        if host_records.host_boundary {
+            self.collection_sources = Some(self.collect_collection_sources(host_records));
+        }
         let mut direct = Effect::default();
         if let Some(at) = self.arena_remove {
             direct.params.insert(0, at);
         }
         let mut calls = Vec::new();
+        let private_records = self.private_records(host_records);
+        let may_callback = |base| {
+            self.ty(base)
+                .is_some_and(|ty| host_records.may_callback(self.ws, self.bi, ty))
+                && !matches!(self.body.expr_arena[base], Expr::StructLiteral { .. })
+                && !private_records.contains(&base)
+        };
         for (id, expr) in self.body.expr_arena.iter() {
             match expr {
                 Expr::Call { .. } | Expr::SafeNavCall { .. } => {
                     calls.push((id, self.call_site(id)));
+                    if host_records.host_boundary
+                        && let Some(base) = self.raw_table_receiver(id)
+                        && !private_records.contains(&base)
+                    {
+                        let origin = if may_callback(base) {
+                            CollectionOrigin::Host
+                        } else {
+                            self.collection_origin(base, id)
+                        };
+                        if origin != CollectionOrigin::Rock {
+                            calls.push((id, CallSite::HostAccess(origin)));
+                        }
+                    }
+                }
+                Expr::CompoundAssign { .. } if self.resolved(id).is_some() => {
+                    calls.push((id, self.call_site(id)));
+                }
+                Expr::Index { base, .. }
+                    if self
+                        .collection_ctor(*base)
+                        .is_some_and(|ctor| matches!(ctor, TypeCtor::Array | TypeCtor::Map)) =>
+                {
+                    let origin = self.collection_origin(*base, id);
+                    if origin != CollectionOrigin::Rock {
+                        calls.push((id, CallSite::HostAccess(origin)));
+                    }
+                }
+                Expr::FieldAccess { base, field } | Expr::SafeNav { base, field }
+                    if field.as_str() == "len"
+                        && self.collection_ctor(*base) == Some(TypeCtor::Array) =>
+                {
+                    let origin = self.collection_origin(*base, id);
+                    if origin != CollectionOrigin::Rock {
+                        calls.push((id, CallSite::HostAccess(origin)));
+                    }
                 }
                 Expr::Assign { .. } => self.assign_write(id, &mut direct),
+                Expr::FieldAccess { base, .. }
+                | Expr::SafeNav { base, .. }
+                | Expr::Spread(base)
+                    if may_callback(*base) =>
+                {
+                    calls.push((id, CallSite::HostAccess(CollectionOrigin::Host)));
+                }
+                Expr::StructLiteral { bases, fields, .. } => {
+                    if bases.into_iter().any(may_callback) {
+                        calls.push((id, CallSite::HostAccess(CollectionOrigin::Host)));
+                    }
+                    if let Some(edge) = self.default_fields(id, *fields) {
+                        calls.push((id, CallSite::Known(edge)));
+                    }
+                }
+                Expr::IfLet { pattern, value, .. }
+                    if self.pattern_may_callback(host_records, *pattern) =>
+                {
+                    calls.push((*value, CallSite::HostAccess(CollectionOrigin::Host)));
+                }
+                Expr::Match {
+                    scrutinee, arms, ..
+                } if arms.into_iter().any(|arm| {
+                    self.pattern_may_callback(host_records, self.body.match_arm_arena[arm].pattern)
+                }) =>
+                {
+                    calls.push((*scrutinee, CallSite::HostAccess(CollectionOrigin::Host)));
+                }
                 _ => {}
             }
         }
-        FnFacts { direct, calls }
+        let mut iterations = Vec::new();
+        if !!host_records.host_boundary {
+            for statement in self.body.statement_arena.values() {
+                match *statement {
+                    Statement::Let { pattern, value, .. }
+                        if self.pattern_may_callback(host_records, pattern) =>
+                    {
+                        calls.push((value, CallSite::HostAccess(CollectionOrigin::Host)));
+                    }
+                    Statement::For { pattern, iter, .. }
+                        if self.pattern_may_callback(host_records, pattern) =>
+                    {
+                        iterations.push((iter, CallSite::HostAccess(CollectionOrigin::Host)));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut conversions: Vec<_> = self
+            .bi
+            .implicit_iter_args
+            .iter()
+            .map(|(&arg, witness)| {
+                (
+                    arg,
+                    self.unary_witness(witness.func, &witness.generics, Some(arg)),
+                )
+            })
+            .collect();
+        for (&iter, info) in &self.bi.for_iter_protocol {
+            if let Some(witness) = &info.iter {
+                conversions.push((
+                    iter,
+                    self.unary_witness(witness.func, &witness.generics, Some(iter)),
+                ));
+            }
+            let next = match &info.next {
+                BoundNext::Concrete {
+                    func,
+                    next_generics,
+                    ..
+                } => self.unary_witness(*func, next_generics, info.iter.is_none().then_some(iter)),
+                BoundNext::CallerGeneric(_) => CallSite::Unknown,
+            };
+            iterations.push((iter, next));
+        }
+        FnFacts {
+            direct,
+            calls,
+            iterations,
+            conversions,
+        }
+    }
+
+    fn default_fields(
+        &self,
+        literal: Idx<Expr>,
+        fields: IdxRange<crate::hir::StructLitField>,
+    ) -> Option<Edge> {
+        let (
+            ty,
+            TypeExpr::App {
+                ctor: TypeCtor::Nominal(name),
+                params,
+            },
+        ) = strip_ref(self.ws, Some(self.bi), self.ty(literal)?)?
+        else {
+            return None;
+        };
+        let id = self.ws.nominals.struct_id(name)?;
+        let owner = BodyOwner::StructDefaults(id.def);
+        let module = self.ws.module(id.module);
+        let defaults = module.bodies.get(&owner)?;
+        if defaults.field_defaults.keys().all(|name| {
+            fields
+                .into_iter()
+                .any(|field| self.body.struct_lit_field_arena[field].name == *name)
+        }) {
+            return None;
+        }
+        Some(Edge {
+            callee: (id.module, owner),
+            generics: params
+                .into_iter()
+                .map(|param| self.key(ty.with_idx(param)))
+                .collect(),
+            args: Vec::new(),
+        })
+    }
+
+    fn pattern_may_callback(&self, host_records: &HostRecords, pattern: Idx<Pattern>) -> bool {
+        fn check(ctx: &BodyCtx<'_>, host: &HostRecords, pattern: Idx<Pattern>) -> bool {
+            ctx.bi
+                .record_pattern_types
+                .get(&pattern)
+                .is_some_and(|&ty| host.may_callback(ctx.ws, ctx.bi, ty))
+        }
+        if !host_records.host_boundary
+            || matches!(
+                self.body.pattern_arena[pattern],
+                Pattern::Bind(_) | Pattern::Wildcard
+            )
+        {
+            return false;
+        }
+        let mut found = check(self, host_records, pattern);
+        self.body
+            .walk_descendants(HirChild::Pattern(pattern), &mut |child| {
+                if let HirChild::Pattern(pattern) = child {
+                    found |= check(self, host_records, pattern);
+                }
+                !found
+            });
+        found
+    }
+
+    fn raw_table_receiver(&self, expr: Idx<Expr>) -> Option<Idx<Expr>> {
+        let (mid, fid) = self.resolved(expr)?;
+        let module = self.ws.module(mid);
+        (matches!(
+            module.functions[fid].name.as_str(),
+            "table_get" | "table_set"
+        ) && is_stdlib_module_file(module.file.as_str()))
+        .then(|| self.call_args(expr).next())
+        .flatten()
+    }
+
+    fn private_records(&self, host_records: &HostRecords) -> FxHashSet<Idx<Expr>> {
+        if !host_records.host_boundary {
+            return FxHashSet::default();
+        }
+        let projected: FxHashSet<_> = self
+            .body
+            .expr_arena
+            .iter()
+            .filter_map(|(id, expr)| match *expr {
+                Expr::Call { .. } | Expr::SafeNavCall { .. } => self.raw_table_receiver(id),
+                Expr::FieldAccess { base, .. } | Expr::SafeNav { base, .. }
+                    if matches!(self.body.expr_arena[base], Expr::Var(_))
+                        && self
+                            .ty(base)
+                            .is_some_and(|ty| host_records.may_callback(self.ws, self.bi, ty)) =>
+                {
+                    Some(base)
+                }
+                _ => None,
+            })
+            .collect();
+        if projected.is_empty() {
+            return projected;
+        }
+        let mut private: FxHashSet<_> = self
+            .body
+            .statement_arena
+            .values()
+            .filter_map(|stmt| {
+                if let Statement::Let { pattern, value, .. } = *stmt
+                    && matches!(self.body.expr_arena[value], Expr::StructLiteral { .. })
+                {
+                    return self.body.pattern_single_bind(pattern);
+                }
+                None
+            })
+            .collect();
+        for (id, expr) in self.body.expr_arena.iter() {
+            if let Expr::Var(binding) = *expr
+                && !projected.contains(&id)
+            {
+                private.remove(&binding);
+            }
+        }
+        projected.into_iter().filter(|&id| {
+            matches!(self.body.expr_arena[id], Expr::Var(binding) if private.contains(&binding))
+        }).collect()
+    }
+
+    fn unary_witness(
+        &self,
+        callee: FnKey,
+        subs: &FxHashMap<VarId, TyId>,
+        receiver: Option<Idx<Expr>>,
+    ) -> CallSite {
+        let function = &self.ws.module(callee.0).functions[callee.1];
+        let generics = function
+            .generics
+            .iter()
+            .map(|&generic| {
+                if let Some((_, TypeExpr::Generic(var, _))) = self.ws.resolve_ty(None, generic)
+                    && let Some(&ty) = subs.get(&var)
+                {
+                    return self.key(ty);
+                }
+                ANY_KEY.to_string()
+            })
+            .collect();
+        CallSite::Known(Edge {
+            callee: function_body(callee),
+            generics,
+            // A missing receiver here is the iterator returned by a preceding iter call.
+            args: receiver
+                .map(|arg| vec![Some(self.arg(arg, arg))])
+                .unwrap_or_default(),
+        })
     }
 
     /// Map index assignment inserts; a Vec `len` write resizes.
@@ -448,7 +1263,7 @@ impl<'a> BodyCtx<'a> {
         };
         let function = &self.ws.module(callee.0).functions[callee.1];
         CallSite::Known(Edge {
-            callee,
+            callee: function_body(callee),
             generics: self.generic_keys(call),
             args: self.bind_args(function, call),
         })
@@ -504,7 +1319,7 @@ impl<'a> BodyCtx<'a> {
             Expr::Index { base, .. } => match self.element_key(*base) {
                 Some(key) => out.push(Root {
                     key,
-                    local: self.arg(*base).fresh,
+                    local: self.arg(*base, e).fresh,
                 }),
                 None => self.element_roots_inner(*base, out, seen),
             },
@@ -589,9 +1404,12 @@ fn arena_element(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> Option
 }
 
 struct ArenaCrossings<'a> {
+    ctx: &'a BodyCtx<'a>,
+    returns_ref: bool,
     roots: FxHashMap<Idx<BindingInfo>, Vec<Root>>,
     active_values: FxHashSet<Idx<Expr>>,
     effects: &'a FxHashMap<Idx<Expr>, Effect>,
+    iterations: &'a FxHashMap<Idx<Expr>, Effect>,
 }
 
 impl SuspensionPolicy for ArenaCrossings<'_> {
@@ -607,14 +1425,50 @@ impl SuspensionPolicy for ArenaCrossings<'_> {
         self.effects.contains_key(&at)
     }
     fn crosses_binding(&self, binding: Idx<BindingInfo>, at: Idx<Expr>) -> bool {
-        let effect = &self.effects[&at];
+        self.crosses(binding, &self.effects[&at])
+    }
+
+    fn crosses_iteration(&self, binding: Idx<BindingInfo>, iter: Idx<Expr>) -> bool {
+        self.iterations
+            .get(&iter)
+            .is_some_and(|effect| self.crosses(binding, effect))
+    }
+
+    fn crosses_return(&self, value: Idx<Expr>, at: Idx<Expr>, iteration: bool) -> bool {
+        if !self.returns_ref {
+            return false;
+        }
+        let sites = if iteration {
+            self.iterations
+        } else {
+            self.effects
+        };
+        let Some(effect) = sites.get(&at) else {
+            return false;
+        };
+        let mut roots = Vec::new();
+        self.ctx.element_roots(value, &mut roots);
+        roots
+            .iter()
+            .any(|root| root.key.starts_with("Arena<") && Self::invalidates(&root.key, effect))
+    }
+}
+
+impl ArenaCrossings<'_> {
+    fn crosses(&self, binding: Idx<BindingInfo>, effect: &Effect) -> bool {
+        self.roots[&binding]
+            .iter()
+            .any(|root| Self::invalidates(&root.key, effect))
+    }
+
+    fn invalidates(key: &str, effect: &Effect) -> bool {
         effect.unknown.is_some()
-            || self.roots[&binding].iter().any(|root| {
-                effect
-                    .elements
-                    .keys()
-                    .any(|key| keys_may_alias(&root.key, key))
-            })
+            || effect.host_property.is_some()
+            || !effect.host_params.is_empty()
+            || effect
+                .elements
+                .keys()
+                .any(|other| keys_may_alias(key, other))
     }
 }
 
@@ -633,6 +1487,19 @@ pub(crate) fn strip_ref(
         } => strip_ref(ws, bi, base.with_idx(params.into_iter().next()?)),
         _ => Some((base, expr)),
     }
+}
+
+fn collection_or_any(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> bool {
+    matches!(
+        strip_ref(ws, bi, ty),
+        Some((
+            _,
+            TypeExpr::App {
+                ctor: TypeCtor::Map | TypeCtor::Array,
+                ..
+            } | TypeExpr::Builtin(BuiltinTy::Any)
+        ))
+    )
 }
 
 fn collection_element(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> Option<TyId> {
@@ -739,7 +1606,18 @@ fn shown(key: &str) -> String {
 }
 
 fn map_edge(edge: &Edge, callee: &Effect, at: Span) -> Effect {
-    let mut mapped = Effect::default();
+    let mut mapped = Effect {
+        host_property: callee.host_property,
+        ..Effect::default()
+    };
+    for (&p, &witness) in &callee.host_params {
+        let origin = edge
+            .args
+            .get(p as usize)
+            .and_then(Option::as_ref)
+            .map_or(CollectionOrigin::Host, |arg| arg.collection_origin);
+        mapped.add_host_access(origin, witness);
+    }
     for (&p, &witness) in &callee.retained {
         if let Some(Some(arg)) = edge.args.get(p as usize) {
             for &q in &arg.ref_params {
@@ -789,6 +1667,10 @@ fn bodiless_summary(ws: &Workspace, key: FnKey) -> Effect {
     {
         effect.params.insert(0, function.span);
     } else if !is_stdlib_module_file(module.file.as_str())
+        || matches!(
+            function.name.as_str(),
+            "resume" | "kill" | "fire_hot_reload" | "__rock_coroutine_kill"
+        )
         || function.param_decls.iter().any(|p| {
             matches!(
                 ws.resolve_ty(None, p.ty),
@@ -798,6 +1680,23 @@ fn bodiless_summary(ws: &Workspace, key: FnKey) -> Effect {
     {
         // Foreign code, or a stdlib primitive that calls back into a closure.
         effect.add_unknown(function.span);
+    }
+    if is_stdlib_module_file(module.file.as_str())
+        && function.inline_body.is_some()
+        && function.param_decls.first().is_some_and(|param| {
+            matches!(
+                strip_ref(ws, None, param.ty),
+                Some((
+                    _,
+                    TypeExpr::App {
+                        ctor: TypeCtor::Map | TypeCtor::Array,
+                        ..
+                    }
+                ))
+            )
+        })
+    {
+        effect.host_params.insert(0, function.span);
     }
     effect
 }
@@ -825,6 +1724,8 @@ impl Relevance {
     /// Unknown code subsumes structural effects; retention still propagates.
     fn trim(&self, effect: &mut Effect) {
         if effect.unknown.is_some() {
+            effect.host_property = None;
+            effect.host_params.clear();
             effect.params.clear();
             effect.elements.clear();
             effect.locals.clear();
@@ -857,7 +1758,7 @@ impl ReturnOrigins {
         self.active.borrow_mut().insert(key, true);
         let mut roots = Vec::new();
         if let Some((function, body, bi)) = inferred_body(ws, key) {
-            let ctx = BodyCtx::new(ws, function, body, bi, self);
+            let ctx = BodyCtx::new(ws, Some(function), body, bi, self);
             if let Some(root) = body.root {
                 ctx.element_roots(root, &mut roots);
                 body.walk_descendants(HirChild::Expr(root), &mut |child| {
@@ -902,22 +1803,39 @@ impl ReturnOrigins {
 struct Program<'a> {
     ws: &'a Workspace,
     relevance: Relevance,
-    sites: Vec<FnKey>,
-    facts: FxHashMap<FnKey, FnFacts>,
-    summaries: FxHashMap<FnKey, Effect>,
+    sites: Vec<BodyKey>,
+    facts: FxHashMap<BodyKey, FnFacts>,
+    summaries: FxHashMap<BodyKey, Effect>,
     return_origins: ReturnOrigins,
+    host_records: HostRecords,
 }
 
-fn inferred_body(ws: &Workspace, key: FnKey) -> Option<(&Function, &Body, &BodyInference)> {
-    let module = ws.module(key.0);
-    let function = &module.functions[key.1];
-    if function.inline_body.is_some() || function.is_extern {
-        return None;
-    }
-    let owner = BodyOwner::Function(key.1);
+fn inferred_site(
+    ws: &Workspace,
+    (module, owner): BodyKey,
+) -> Option<(Option<&Function>, &Body, &BodyInference)> {
+    let module = ws.module(module);
+    let function = match owner {
+        BodyOwner::Function(id) => {
+            let f = &module.functions[id];
+            if f.inline_body.is_some() || f.is_extern {
+                return None;
+            }
+            Some(f)
+        }
+        _ => None,
+    };
     let body = module.bodies.get(&owner)?;
-    let bi = ws.inference(key.0)?.per_fn.get(&owner)?;
+    let bi = ws.inference(module.id)?.per_fn.get(&owner)?;
     Some((function, body, bi))
+}
+
+fn inferred_body(
+    ws: &Workspace,
+    (module, function): FnKey,
+) -> Option<(&Function, &Body, &BodyInference)> {
+    let (f, body, bi) = inferred_site(ws, function_body((module, function)))?;
+    Some((f?, body, bi))
 }
 
 impl<'a> Program<'a> {
@@ -929,31 +1847,39 @@ impl<'a> Program<'a> {
             facts: FxHashMap::default(),
             summaries: FxHashMap::default(),
             return_origins: ReturnOrigins::default(),
+            host_records: HostRecords::default(),
         };
         // Few bodies pass a reference argument; finding them visits every
         // function, so the search runs per module in parallel.
-        let candidates: Vec<Vec<FnKey>> = ws
+        let candidates: Vec<Vec<_>> = ws
             .modules
             .par_iter()
             .map(|module| {
                 module
-                    .functions
-                    .iter()
-                    .map(|(fid, _)| (module.id, fid))
-                    .filter(|&key| {
-                        inferred_body(ws, key).is_some_and(|(_, _, bi)| {
+                    .bodies
+                    .keys()
+                    .copied()
+                    .filter(|&owner| {
+                        inferred_site(ws, (module.id, owner)).is_some_and(|(_, _, bi)| {
                             !bi.ref_call_args.is_empty()
+                                || (match owner {
+                                    BodyOwner::Function(id) => module.functions[id]
+                                        .return_ty
+                                        .is_some_and(|ty| ref_target(ws, bi, ty).is_some()),
+                                    _ => false,
+                                })
                                 || bi
                                     .binding_types
                                     .iter()
                                     .any(|(_, &ty)| ref_target(ws, bi, ty).is_some())
                         })
                     })
+                    .map(|owner| (module.id, owner))
                     .collect()
             })
             .collect();
-        for key in candidates.into_iter().flatten() {
-            let Some((function, body, bi)) = inferred_body(ws, key) else {
+        for (mid, owner) in candidates.into_iter().flatten() {
+            let Some((function, body, bi)) = inferred_site(ws, (mid, owner)) else {
                 continue;
             };
             let ctx = BodyCtx::new(ws, function, body, bi, &program.return_origins);
@@ -966,40 +1892,70 @@ impl<'a> Program<'a> {
                     ctx.element_roots(value, &mut roots);
                 }
             }
+            if let BodyOwner::Function(id) = owner
+                && function
+                    .and_then(|f| f.return_ty)
+                    .is_some_and(|ty| ref_target(ws, bi, ty).is_some())
+                && body
+                    .statement_arena
+                    .values()
+                    .any(|s| matches!(s, Statement::Defer(_)))
+            {
+                roots.extend(
+                    program
+                        .return_origins
+                        .roots(ws, (mid, id))
+                        .into_iter()
+                        .map(|key| Root { key, local: None }),
+                );
+            }
             if roots.is_empty() {
                 continue;
             }
             for root in &roots {
                 program.relevance.add(&root.key);
             }
-            program.sites.push(key);
+            program.sites.push((mid, owner));
         }
         let mut pending = program.sites.clone();
+        if program
+            .relevance
+            .keys
+            .iter()
+            .any(|key| key.starts_with("Arena<"))
+        {
+            program.host_records = HostRecords::collect(ws);
+        }
         while let Some(key) = pending.pop() {
             if program.facts.contains_key(&key) {
                 continue;
             }
-            let Some((function, body, bi)) = inferred_body(ws, key) else {
+            let Some((function, body, bi)) = inferred_site(ws, key) else {
                 continue;
             };
-            let facts = BodyCtx::new(ws, function, body, bi, &program.return_origins).facts();
-            pending.extend(facts.calls.iter().filter_map(|(_, site)| match site {
-                CallSite::Known(edge) => Some(edge.callee),
-                CallSite::Unknown => None,
-            }));
+            let facts = BodyCtx::new(ws, function, body, bi, &program.return_origins)
+                .facts(&program.host_records);
+            pending.extend(facts.callees());
             program.facts.insert(key, facts);
         }
         program.solve();
         program
     }
 
-    fn summary(&self, key: FnKey) -> Effect {
+    fn summary(&self, key: BodyKey) -> Effect {
         let mut effect = match self.summaries.get(&key) {
-            Some(effect) => effect.clone(),
-            None if self.facts.contains_key(&key) => Effect::default(),
-            None => bodiless_summary(self.ws, key),
+            Some(summary) => summary.clone(),
+            None => match key.1 {
+                BodyOwner::Function(id) if !self.facts.contains_key(&key) => {
+                    bodiless_summary(self.ws, (key.0, id))
+                }
+                _ => Effect::default(),
+            },
         };
-        let function = &self.ws.module(key.0).functions[key.1];
+        let BodyOwner::Function(id) = key.1 else {
+            return effect;
+        };
+        let function = &self.ws.module(key.0).functions[id];
         if function.is_coroutine {
             for (index, param) in function.param_decls.iter().enumerate() {
                 if self.ws.type_contains_ref(None, param.ty) {
@@ -1014,9 +1970,13 @@ impl<'a> Program<'a> {
         let at = body.expr_spans[call];
         let mut effect = match site {
             CallSite::Known(edge) => map_edge(edge, &self.summary(edge.callee), at),
-            CallSite::Unknown => {
+            CallSite::Unknown => Effect {
+                unknown: Some(at),
+                ..Effect::default()
+            },
+            CallSite::HostAccess(origin) => {
                 let mut effect = Effect::default();
-                effect.add_unknown(at);
+                effect.add_host_access(*origin, at);
                 effect
             }
         };
@@ -1026,22 +1986,20 @@ impl<'a> Program<'a> {
 
     /// Summaries only grow, and keys are bounded, so the worklist drains.
     fn solve(&mut self) {
-        let mut callers: FxHashMap<FnKey, Vec<FnKey>> = FxHashMap::default();
+        let mut callers: FxHashMap<BodyKey, Vec<BodyKey>> = FxHashMap::default();
         for (&caller, facts) in &self.facts {
-            for (_, site) in &facts.calls {
-                if let CallSite::Known(edge) = site {
-                    callers.entry(edge.callee).or_default().push(caller);
-                }
+            for callee in facts.callees() {
+                callers.entry(callee).or_default().push(caller);
             }
         }
-        let mut pending: Vec<FnKey> = self.facts.keys().copied().collect();
-        let mut queued: FxHashSet<FnKey> = pending.iter().copied().collect();
+        let mut pending: Vec<_> = self.facts.keys().copied().collect();
+        let mut queued: FxHashSet<_> = pending.iter().copied().collect();
         while let Some(key) = pending.pop() {
             queued.remove(&key);
-            let body = &self.ws.module(key.0).bodies[&BodyOwner::Function(key.1)];
+            let body = &self.ws.module(key.0).bodies[&key.1];
             let facts = &self.facts[&key];
             let mut effect = facts.direct.clone();
-            for (call, site) in &facts.calls {
+            for (call, site) in facts.all_calls() {
                 effect.union(&self.call_effect(body, *call, site));
             }
             effect.locals.clear();
@@ -1062,18 +2020,14 @@ impl<'a> Program<'a> {
         }
     }
 
-    fn rejections(&self, key: FnKey) -> Vec<CompilerError> {
-        let (Some(facts), Some((function, body, bi))) =
-            (self.facts.get(&key), inferred_body(self.ws, key))
-        else {
+    fn rejections(&self, mid: ModuleId, owner: BodyOwner) -> Vec<CompilerError> {
+        let Some((function, body, bi)) = inferred_site(self.ws, (mid, owner)) else {
             return Vec::new();
         };
         let ctx = BodyCtx::new(self.ws, function, body, bi, &self.return_origins);
-        let effects: FxHashMap<Idx<Expr>, Effect> = facts
-            .calls
-            .iter()
-            .map(|(call, site)| (*call, self.call_effect(body, *call, site)))
-            .collect();
+        let facts = &self.facts[&(mid, owner)];
+        let effects = self.effects_at(body, facts.calls.iter().chain(&facts.conversions));
+        let iterations = self.effects_at(body, &facts.iterations);
         let mut errors = Vec::new();
         let mut borrowed = FxHashMap::default();
         let mut active_values = FxHashSet::default();
@@ -1094,13 +2048,28 @@ impl<'a> Program<'a> {
                 borrowed.insert(binding, roots);
             }
         }
-        if !borrowed.is_empty() {
-            let policy = ArenaCrossings {
+        let returns_ref = function
+            .and_then(|f| f.return_ty)
+            .is_some_and(|ty| ref_target(self.ws, bi, ty).is_some());
+        if !borrowed.is_empty() || returns_ref {
+            let mut policy = ArenaCrossings {
+                ctx: &ctx,
+                returns_ref,
                 roots: borrowed,
                 active_values,
                 effects: &effects,
+                iterations: &iterations,
             };
             let mut crossings = uses_after_suspension(body, &policy);
+            policy.returns_ref = false;
+            for &default in body
+                .param_defaults
+                .iter()
+                .flatten()
+                .chain(body.field_defaults.values())
+            {
+                crossings.extend(uses_after_suspension_in(body, default, [], &policy));
+            }
             for expr in body.expr_arena.values() {
                 if let Expr::Lambda {
                     params,
@@ -1128,6 +2097,12 @@ impl<'a> Program<'a> {
             }
         }
         for (call, site) in &facts.calls {
+            if !matches!(
+                body.expr_arena[*call],
+                Expr::Call { .. } | Expr::SafeNavCall { .. }
+            ) {
+                continue;
+            }
             let Some(ref_args) = bi.ref_call_args.get(call) else {
                 continue;
             };
@@ -1157,7 +2132,7 @@ impl<'a> Program<'a> {
                     ).with_label(witness, "the coroutine retains its parameters until resume".to_string()));
                     continue;
                 }
-                let effect = self.effect_while_live(&ctx, &effects, *call, ref_arg);
+                let effect = self.effect_while_live(&ctx, &effects, &iterations, *call, ref_arg);
                 if let Some(error) = rejection(&ctx, *call, ref_arg, &roots, &effect) {
                     errors.push(error);
                 }
@@ -1166,12 +2141,32 @@ impl<'a> Program<'a> {
         errors
     }
 
+    fn effects_at<'b>(
+        &self,
+        body: &Body,
+        sites: impl IntoIterator<Item = &'b (Idx<Expr>, CallSite)>,
+    ) -> FxHashMap<Idx<Expr>, Effect> {
+        use std::collections::hash_map::Entry;
+        let mut effects = FxHashMap::<_, Effect>::default();
+        for (expr, site) in sites {
+            let effect = self.call_effect(body, *expr, site);
+            match effects.entry(*expr) {
+                Entry::Vacant(entry) => {
+                    entry.insert(effect);
+                }
+                Entry::Occupied(mut entry) => entry.get_mut().union(&effect),
+            }
+        }
+        effects
+    }
+
     /// What may run while `ref_arg` is live: the call itself and the
     /// arguments evaluated after it.
     fn effect_while_live(
         &self,
         ctx: &BodyCtx,
         effects: &FxHashMap<Idx<Expr>, Effect>,
+        iterations: &FxHashMap<Idx<Expr>, Effect>,
         call: Idx<Expr>,
         ref_arg: Idx<Expr>,
     ) -> Effect {
@@ -1187,14 +2182,10 @@ impl<'a> Program<'a> {
                 if !span.contains(inner) {
                     continue;
                 }
-                if let Some(nested) = effects.get(&id) {
+                for nested in effects.get(&id).into_iter().chain(iterations.get(&id)) {
                     effect.union(nested);
                 }
-            }
-            for (id, _) in ctx.body.expr_arena.iter() {
-                if span.contains(ctx.body.expr_spans[id]) {
-                    ctx.assign_write(id, &mut effect);
-                }
+                ctx.assign_write(id, &mut effect);
             }
         }
         effect
@@ -1222,7 +2213,11 @@ fn rejection(
     } else {
         "copy the element out and write it back after the call, or keep data that is referenced across calls in an Arena"
     };
-    if let Some(witness) = effect.unknown {
+    let arena = roots.iter().any(|root| root.key.starts_with("Arena<"));
+    let host = effect
+        .host_property
+        .or_else(|| effect.host_params.values().next().copied());
+    if let Some(witness) = effect.unknown.or(host.filter(|_| arena)) {
         return Some(
             CompilerError::new_with_label(
                 at,
@@ -1300,9 +2295,9 @@ pub fn check_relocation(ws: &mut Workspace) {
                 found.push((module.id, owner, error));
             }
         }
-        for &key in &program.sites {
-            for error in program.rejections(key) {
-                found.push((key.0, BodyOwner::Function(key.1), error));
+        for &(mid, owner) in &program.sites {
+            for error in program.rejections(mid, owner) {
+                found.push((mid, owner, error));
             }
         }
         found
