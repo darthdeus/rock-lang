@@ -1721,6 +1721,12 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     return __json_record_native_get(data._data, name, '', offsets, __json_record_scratch(codec, name, depth), slot * stride)
 """
 
+// A nested function would make LuaJIT close upvalues (UCLO, which aborts
+// traces) at every return of the function that holds it.
+@nomangle @lua_helper inline(lua) fn __json_record_wire_order(a: any, b: any) -> bool = """
+    return (a.json_name or a.name) < (b.json_name or b.name)
+"""
+
 @nomangle @lua_helper inline(lua) fn __json_record_write_fields(codec: any, decl: any) -> any = """
     local fields = decl.json_write_fields
     if fields then return fields end
@@ -1732,7 +1738,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
             fields[#fields + 1] = field
         end
     end
-    table.sort(fields, function(a, b) return (a.json_name or a.name) < (b.json_name or b.name) end)
+    table.sort(fields, __json_record_wire_order)
     decl.json_write_fields = fields
     return fields
 """
@@ -2005,7 +2011,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
                     record.slots[field.name] = field.slot
                 end
                 if record.named then
-                    table.sort(record.fields, function(a, b) return a.name < b.name end)
+                    table.sort(record.fields, __json_record_wire_order)
                     payload = {{ k = 'nom', name = name, variant = tag, record = record }}
                 end
                 selected.json_payload = payload
@@ -2036,7 +2042,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
                     fields[#fields + 1] = { name = field_name, type = inner.name or inner.k, desc = desc,
                         embed = desc.leaves ~= nil, nullable = desc.k == 'opt' }
                 end
-                table.sort(fields, function(a, b) return a.name < b.name end)
+                table.sort(fields, __json_record_wire_order)
                 payload = {{ k = 'nom', name = name, variant = tag, record = { kind = 'struct', fields = fields, tag_key = '__variant' } }}
                 selected.json_payload = payload
             end
