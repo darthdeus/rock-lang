@@ -1551,19 +1551,9 @@ pub(crate) fn lower_expr_value(
                 _ => unreachable!(),
             };
 
-            if !lvalue_has_safe_nav(a, left) {
-                let temps = compound_place_temps(a, left);
-                if !temps.is_empty() {
-                    return lower_compound_assign_with_temps(
-                        ctx, scope, e, op_fn, left, right, &temps,
-                    );
-                }
-            }
-
-            let target = lower_expr(ctx, scope, a.e(left))?;
-            let (callee_key, family) = ctx.resolve_callee_family(ustr(op_fn), e.span)?;
-
             if lvalue_has_safe_nav(a, left) {
+                let target = lower_expr(ctx, scope, a.e(left))?;
+                let (_, family) = ctx.resolve_callee_family(ustr(op_fn), e.span)?;
                 let value = lower_expr(ctx, scope, a.e(right))?;
                 Expr::CompoundAssign {
                     target,
@@ -1572,26 +1562,7 @@ pub(crate) fn lower_expr_value(
                     family,
                 }
             } else {
-                let args = lower_exprs(ctx, scope, [left, right].into_iter())?;
-
-                let name_span = ctx.body.name_spans.alloc(e.span);
-                let call = ctx.alloc_expr(
-                    Expr::Call {
-                        callee: Callee::Unresolved {
-                            name: callee_key,
-                            name_span,
-                        },
-                        args,
-                        generic_args: IdxRange::new_empty(),
-                        family,
-                    },
-                    e.span,
-                );
-
-                Expr::Assign {
-                    target,
-                    value: call,
-                }
+                lower_ordinary_compound_assign(ctx, scope, e.span, op_fn, left, right)?
             }
         }
 
@@ -3747,26 +3718,26 @@ fn expr_is_pure(a: &Ast, e: &Idx<ExprData>) -> bool {
     }
 }
 
-/// `place op= value` whose place has effectful parts:
-/// `{ let t1 = part1; ...; place' = place' op value }`, where `place'` reads
-/// each part from its temporary.
-#[allow(clippy::too_many_arguments)]
-fn lower_compound_assign_with_temps(
+fn lower_ordinary_compound_assign(
     ctx: &mut LowerCtx,
     scope: Idx<Scope>,
-    e: &ExprData,
+    span: Span,
     op_fn: &str,
     left: &Idx<ExprData>,
     right: &Idx<ExprData>,
-    temps: &[Idx<ExprData>],
 ) -> Result<Expr, CompilerError> {
     let a = ctx.ast;
-    let scope = ctx.body.alloc_child_scope(scope);
+    let temps = compound_place_temps(a, left);
+    let scope = if temps.is_empty() {
+        scope
+    } else {
+        ctx.body.alloc_child_scope(scope)
+    };
     let saved = ctx.place_temps.len();
     let result = (|| {
-        let mut statements = Vec::with_capacity(temps.len() + 1);
+        let mut statements = Vec::with_capacity(temps.len());
         for part in temps {
-            let part = a.e(part);
+            let part = a.e(&part);
             let value = lower_expr(ctx, scope, part)?;
             let binding = ctx.body.binding_arena.alloc(BindingInfo {
                 name: ustr("__place"),
@@ -3789,10 +3760,10 @@ fn lower_compound_assign_with_temps(
         }
 
         let target = lower_expr(ctx, scope, a.e(left))?;
-        let (callee_key, family) = ctx.resolve_callee_family(ustr(op_fn), e.span)?;
+        let (callee_key, family) = ctx.resolve_callee_family(ustr(op_fn), span)?;
         let args = lower_exprs(ctx, scope, [left, right].into_iter())?;
-        let name_span = ctx.body.name_spans.alloc(e.span);
-        let call = ctx.alloc_expr(
+        let name_span = ctx.body.name_spans.alloc(span);
+        let value = ctx.alloc_expr(
             Expr::Call {
                 callee: Callee::Unresolved {
                     name: callee_key,
@@ -3802,25 +3773,21 @@ fn lower_compound_assign_with_temps(
                 generic_args: IdxRange::new_empty(),
                 family,
             },
-            e.span,
+            span,
         );
-        let assign = ctx.alloc_expr(
-            Expr::Assign {
-                target,
-                value: call,
-            },
-            e.span,
-        );
-        statements.push((Statement::Expr(assign), e.span));
-
-        let mut range: Option<(Idx<Statement>, Idx<Statement>)> = None;
-        for (s, span) in statements {
-            let id = ctx.body.alloc_statement(s, span);
-            range = Some((range.map_or(id, |r| r.0), id));
+        let assign = Expr::Assign { target, value };
+        if statements.is_empty() {
+            return Ok(assign);
         }
-        let (first, last) = range.expect("at least the assignment statement");
+
+        let assign = ctx.alloc_expr(assign, span);
+        let start = ctx.body.statement_arena.len();
+        for (statement, span) in statements {
+            ctx.body.alloc_statement(statement, span);
+        }
+        ctx.body.alloc_statement(Statement::Expr(assign), span);
         Ok(Expr::Block {
-            statements: IdxRange::new_inclusive(first..=last),
+            statements: ctx.body.statement_arena.allocated_since(start),
             tail: None,
         })
     })();
