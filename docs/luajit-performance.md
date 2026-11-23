@@ -15,6 +15,12 @@ small. Repeatedly failing exits and trace-cache flushes can also produce uneven
 frame times. Reduce unnecessary work and the live state at hot exits before
 assuming a larger runtime limit will fix a workload.
 
+The recorder can follow calls across several helpers in one trace. When a
+per-row loop hits the constant limit, try separate passes for independent
+work so each pass has its own loop back edge. Preserve ordering wherever
+one step can observe another. Run `python3 benchmarks/long_trace.py` with
+Rock and LuaJIT on the path to compare the two loop shapes on fixed work.
+
 Values flattened into scalar lanes avoid allocation, but wide values increase
 argument, local and snapshot pressure. Boxing trades that pressure for
 allocation and indirection; neither choice is universally faster. The shared
