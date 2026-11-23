@@ -166,7 +166,9 @@ pub fn compute_inlinable(
                 Inst::Load(cell)
                     if immutable_params[raw(*cell) as usize] || received[raw(*cell) as usize]
             );
-            let nil = matches!(func.insts[id], Inst::Const(Lit::Nil));
+            // `(nil)[1] = x` cannot start a Lua statement, so a nil base keeps a register.
+            let nil = matches!(func.insts[id], Inst::Const(Lit::Nil))
+                && uses.operand[k] & STORE_BASE == 0;
             repeatable[k] = parameter_load || nil;
             // A store base other than a plain local keeps its own register.
             if parameter_load
