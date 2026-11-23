@@ -7,8 +7,8 @@ use std::ffi::{c_int, c_uchar, c_ulong, CString};
 use stone_rs::{
     stone_create_window_ex, stone_get_fullscreen, stone_get_window_position, stone_get_window_size,
     stone_hide_window, stone_init, stone_is_window_hidden, stone_save_window_geometry,
-    stone_set_fullscreen, stone_set_window_position, stone_set_window_size, stone_show_window,
-    stone_show_window_if_deferred, stone_teardown,
+    stone_set_fullscreen, stone_set_window_size, stone_show_window, stone_show_window_if_deferred,
+    stone_teardown,
 };
 use x11::xlib;
 
@@ -17,6 +17,15 @@ mod x11_window;
 
 #[path = "support/private_display.rs"]
 mod private_display;
+
+fn move_fixture_window(x: c_int, y: c_int) {
+    use sdl2::sys;
+    unsafe {
+        let window = sys::SDL_GL_GetCurrentWindow();
+        assert!(!window.is_null(), "Stone's GL window is current");
+        sys::SDL_SetWindowPosition(window, x, y);
+    }
+}
 
 #[test]
 #[serial]
@@ -165,7 +174,7 @@ fn initially_hidden_session_applies_saved_placement_on_first_show() {
         let mut boot_h = 0;
         stone_get_window_size(&mut boot_w, &mut boot_h);
         stone_set_window_size(960, 540);
-        stone_set_window_position(150, 150);
+        move_fixture_window(150, 150);
         let mut expected_w = 0;
         let mut expected_h = 0;
         let mut expected_x = 0;
@@ -244,7 +253,7 @@ fn hide_and_show_preserves_position_after_runtime_move() {
     assert!(!window.is_null());
     stone_show_window_if_deferred();
 
-    stone_set_window_position(500, 350);
+    move_fixture_window(500, 350);
     let mut x = 0;
     let mut y = 0;
     stone_get_window_position(&mut x, &mut y);
@@ -296,7 +305,7 @@ fn hide_and_show_survives_wm_frame_teardown() {
     let window = stone_create_window_ex(title.as_ptr(), 200, 200, 400, 300, -1, true, 0);
     assert!(!window.is_null());
     stone_show_window_if_deferred();
-    stone_set_window_position(500, 350);
+    move_fixture_window(500, 350);
 
     let handles = x11_window::current();
     let display = handles.display;
@@ -312,7 +321,7 @@ fn hide_and_show_survives_wm_frame_teardown() {
         stone_hide_window();
         assert!(stone_is_window_hidden());
         for _ in 0..3 {
-            stone_set_window_position(500, 350);
+            move_fixture_window(500, 350);
         }
         stone_show_window();
         assert!(!stone_is_window_hidden());

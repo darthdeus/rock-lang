@@ -2610,13 +2610,6 @@ pub extern "C" fn stone_set_window_title(_window: *mut StoneWindow, title: *cons
     });
 }
 
-pub fn stone_set_window_position(x: c_int, y: c_int) {
-    with_window_mut(|window| {
-        let (fx, fy) = clamp_window_position(&window._video, &window.window, x, y);
-        move_window(&mut window.window, fx, fy);
-    });
-}
-
 #[no_mangle]
 pub extern "C" fn stone_get_window_position(x: *mut c_int, y: *mut c_int) {
     with_window(|window| {
@@ -3101,35 +3094,6 @@ fn resolve_window_geometry(
         );
     }
     resolved
-}
-
-fn clamp_window_position(
-    video: &sdl2::VideoSubsystem,
-    window: &sdl2::video::Window,
-    x: i32,
-    y: i32,
-) -> (i32, i32) {
-    let headless = std::env::var("STONE_HEADLESS").is_ok();
-    if !window_fit_enabled(headless) {
-        return (x, y);
-    }
-    let borders = effective_borders(query_window_borders(window));
-    let (w, h) = window.size();
-    let displays = gather_display_reports(video);
-    let req = window_report::WindowRequest {
-        size: (w as i32, h as i32),
-        pos: (x, y),
-        display: None,
-    };
-    let p = window_report::resolve_window_placement(req, &displays, borders);
-    if p.pos != (x, y) {
-        ::log::info!(
-            target: "STONE",
-            "window move clamped: ({},{}) -> ({},{}) (size {}x{} borders t{} l{} b{} r{})",
-            x, y, p.pos.0, p.pos.1, w, h, borders.top, borders.left, borders.bottom, borders.right,
-        );
-    }
-    p.pos
 }
 
 pub(crate) fn track_draw_call() {

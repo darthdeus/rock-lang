@@ -1444,7 +1444,6 @@ pub extern "C" fn stone_get_image_format(handle: u64) -> c_int {
 mod relight_rg8_gl_tests {
     use super::*;
     use std::ffi::CString;
-    use std::io::Cursor;
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
     const LOAD_EXACT_TEXELS: i32 = 1;
@@ -1512,17 +1511,18 @@ mod relight_rg8_gl_tests {
         }
     }
 
+    fn register_fixture(name: &str, bytes: &[u8]) -> CString {
+        let path = CString::new(name).unwrap();
+        crate::asset_registry::stone_register_asset(path.as_ptr(), bytes.as_ptr(), bytes.len());
+        path
+    }
+
     fn register_png(name: &str, width: u32, height: u32, pixels: &[u8]) -> CString {
         assert_eq!(pixels.len(), width as usize * height as usize * 4);
-        let image = image::RgbaImage::from_raw(width, height, pixels.to_vec()).unwrap();
-        let mut cursor = Cursor::new(Vec::new());
-        image::DynamicImage::ImageRgba8(image)
-            .write_to(&mut cursor, image::ImageFormat::Png)
-            .expect("PNG fixture encoding failed");
-        let encoded = cursor.into_inner();
-        let path = CString::new(name).unwrap();
-        crate::asset_registry::stone_register_asset(path.as_ptr(), encoded.as_ptr(), encoded.len());
-        path
+        register_fixture(
+            name,
+            &crate::image_data::encode_test_png(width, height, pixels),
+        )
     }
 
     const PACK_PARAMETERS: [u32; 4] = [
@@ -1642,8 +1642,7 @@ mod relight_rg8_gl_tests {
         let mut dds = stone_texture::bc1_header(5, 3).unwrap().to_vec();
         dds.extend([0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
         dds.extend([0x00, 0xf8, 0, 0, 0, 0, 0, 0]);
-        let path = CString::new("test/cutout.dds").unwrap();
-        crate::asset_registry::stone_register_asset(path.as_ptr(), dds.as_ptr(), dds.len());
+        let path = register_fixture("test/cutout.dds", &dds);
         let mut images = ImageScope::default();
         for flags in [0, LOAD_DEFERRED] {
             stone_reset_image_profile_stats();
@@ -1679,8 +1678,7 @@ mod relight_rg8_gl_tests {
         let _session = GlSession::start();
         let mut dds = stone_texture::bc5_header(3, 2).unwrap().to_vec();
         dds.extend([63, 0, 0, 0, 0, 0, 0, 0, 147, 0, 0, 0, 0, 0, 0, 0]);
-        let path = CString::new("test/pair.bc5.dds").unwrap();
-        crate::asset_registry::stone_register_asset(path.as_ptr(), dds.as_ptr(), dds.len());
+        let path = register_fixture("test/pair.bc5.dds", &dds);
         let mut images = ImageScope::default();
         let handle = stone_load_image(path.as_ptr(), 0, 0, 3, 2);
         assert_ne!(handle, 0);
@@ -1988,25 +1986,6 @@ mod relight_rg8_gl_tests {
         false
     }
 
-    fn corrupt_png(good: &CString) -> CString {
-        let bad = CString::new("tests/decode-storage-bad.png").unwrap();
-        let mut encoded = crate::asset_registry::resolve_asset(good.to_str().unwrap()).unwrap();
-        let mut off = 8;
-        loop {
-            let len = u32::from_be_bytes(encoded[off..off + 4].try_into().unwrap()) as usize;
-            if &encoded[off + 4..off + 8] == b"IDAT" {
-                assert!(len > 0);
-                let at = off + 8 + len / 2;
-                encoded[at] = encoded[at].wrapping_add(1);
-                break;
-            }
-            off += 12 + len;
-            assert!(off + 8 <= encoded.len(), "no IDAT in encoded PNG");
-        }
-        crate::asset_registry::stone_register_asset(bad.as_ptr(), encoded.as_ptr(), encoded.len());
-        bad
-    }
-
     fn driver_levels(handle: u64) -> Vec<(u32, u32, u32)> {
         let texture = with_image(handle, |image| image.texture).unwrap();
         with_gl(|gl| unsafe {
@@ -2127,13 +2106,22 @@ mod relight_rg8_gl_tests {
 
     fn run_failure_storage_case() {
         let _session = GlSession::start();
-        let good = register_png(
-            "tests/decode-storage-good.png",
-            5,
-            3,
-            &[0, 255, 0, 255].repeat(15),
-        );
-        let bad = corrupt_png(&good);
+        let mut encoded = crate::image_data::encode_test_png(5, 3, &[0, 255, 0, 255]);
+        let good = register_fixture("tests/decode-storage-good.png", &encoded);
+
+        // Damage the IDAT payload while keeping the header usable for the deferred load.
+        let mut chunk = &mut encoded[8..];
+        loop {
+            let len = u32::from_be_bytes(chunk[..4].try_into().unwrap()) as usize;
+            if &chunk[4..8] == b"IDAT" && len != 0 {
+                let byte = &mut chunk[8 + len / 2];
+                *byte = byte.wrapping_add(1);
+                break;
+            }
+            chunk = &mut chunk[12 + len..];
+            assert!(chunk.len() >= 8, "fixture has no nonempty IDAT chunk");
+        }
+        let bad = register_fixture("tests/decode-storage-bad.png", &encoded);
         let mut images = ImageScope::default();
         for (format, flags) in [
             (ImageFormat::DepthRg8, LOAD_FLAGS),
