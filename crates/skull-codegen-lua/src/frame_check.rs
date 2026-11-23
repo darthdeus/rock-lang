@@ -9,13 +9,11 @@ pub(crate) fn check_frame_limits(
     rpo: &[Idx<Block>],
     top_locals: usize,
     loops: &HashMap<Idx<Block>, ForLoop>,
-    color_scope: &[Option<Idx<Block>>],
     hoist: &HashMap<Idx<Inst>, u32>,
     tail_forwards: &[Option<&[Idx<Inst>]>],
     call_arg_forwards: &CallArgForwards,
     inlinable: &[bool],
 ) {
-    let loop_scoped_locals = color_scope.iter().flatten().count();
     if frame_limits::fits_without_measuring(
         func,
         rpo,
@@ -25,21 +23,15 @@ pub(crate) fn check_frame_limits(
                 .filter(|l| matches!(l.control, ForControl::Map { .. }))
                 .count(),
         loops.len(),
-        loop_scoped_locals,
         inlinable,
     ) {
         return;
     }
 
-    // Each enclosing counted loop adds its four control locals and its
-    // body-scoped `local r<N>` line; regions nest, so this accumulates.
+    // Count control locals from each enclosing loop.
     let mut actives = vec![top_locals; func.blocks.len()];
-    let mut loop_locals: HashMap<Idx<Block>, usize> = HashMap::default();
-    for header in color_scope.iter().flatten() {
-        *loop_locals.entry(*header).or_default() += 1;
-    }
-    for (header, cl) in loops.iter() {
-        let add = cl.control_locals() + loop_locals.get(header).copied().unwrap_or(0);
+    for cl in loops.values() {
+        let add = cl.control_locals();
         for &b in cl.region.iter().chain(std::iter::once(&cl.latch)) {
             actives[raw(b) as usize] += add;
         }

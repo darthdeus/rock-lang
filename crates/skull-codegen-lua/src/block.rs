@@ -50,7 +50,6 @@ impl Emitter<'_> {
             out.push(' ');
             match *local {
                 regalloc::KillLocal::Value(c) => {
-                    scope_guard::register(self.func, c);
                     out.push('r');
                     push_uint(out, c);
                 }
@@ -280,24 +279,6 @@ impl Emitter<'_> {
                 write_cellname(out, self.func, self.frame, self.cell_colors, *value);
                 writeln!(out, " = mk{h}, mv{h}").unwrap();
             }
-        }
-        // Declared inside the `for` block so LuaJIT's snapshot liveness can prune
-        // them at loop exits; otherwise side traces inherit them and `asm_head_side`
-        // aborts past ~16 inherited FP values.
-        let mut regs = self
-            .color_scope
-            .iter()
-            .enumerate()
-            .filter(|(_, scope)| **scope == Some(header))
-            .map(|(color, _)| color as u32);
-        if let Some(first) = regs.next() {
-            out.push_str(" local r");
-            push_uint(out, first);
-            for color in regs {
-                out.push_str(", r");
-                push_uint(out, color);
-            }
-            out.push('\n');
         }
     }
 

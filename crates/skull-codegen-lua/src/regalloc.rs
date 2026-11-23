@@ -350,11 +350,6 @@ fn cell_reads(
     }
 }
 
-pub(crate) struct LoopScope {
-    pub header: Idx<Block>,
-    pub region: Vec<Idx<Block>>,
-}
-
 /// Items grouped by a key, as one chain per key threaded through the items.
 struct Chains {
     /// `key -> its last item`, then `item -> the one before it`; `u32::MAX`
@@ -393,8 +388,6 @@ struct Entries {
     bits: Vec<u32>,
     marks: Vec<(u32, u32)>,
     first: Vec<u32>,
-    use_set: BitRows,
-    def_set: BitRows,
     live_in: BitRows,
 }
 
@@ -439,8 +432,6 @@ impl Entries {
             bits,
             marks,
             first,
-            use_set,
-            def_set,
             live_in,
         }
     }
@@ -843,14 +834,6 @@ fn result_discarded(func: &MirFunc, inline: &[bool], readers: &[u32], id: Idx<In
         }
 }
 
-pub(crate) struct ValueAlloc {
-    /// Dense `raw(inst) -> color` (`u32::MAX` = uncolored: inlined or non-value).
-    pub colors: Vec<u32>,
-    /// Loop-local colors let LuaJIT prune temps from exit snapshots; inherited
-    /// floating-point values can otherwise abort side-trace register coalescing.
-    pub color_scope: Vec<Option<Idx<Block>>>,
-}
-
 pub(crate) fn cell_defs(inst: &Inst, push: &mut impl FnMut(Idx<Cell>)) {
     // Residual bound-call destinations are placeholders, not emitted locals.
     if !matches!(inst, Inst::CallBoundMulti { .. }) {
@@ -890,9 +873,6 @@ pub(crate) struct Locals<'a> {
     /// removing them does not renumber later colors.
     cells: Vec<Option<Idx<Cell>>>,
     ci: Vec<u32>,
-    /// Words of a bit row that hold registers; cells follow.
-    v_words: usize,
-    entries: Entries,
     value_graph: Neighbors,
     cell_graph: Neighbors,
     /// By logical cell index: the cell owns a color alone.
@@ -1061,158 +1041,26 @@ impl<'a> Locals<'a> {
             values,
             cells,
             ci,
-            v_words,
-            entries,
             value_graph: value_graph.finish(v_count),
             cell_graph: cell_graph.finish(c_count),
             force,
         }
     }
 
-    /// Assign register colors from the innermost loop that contains their live range.
-    /// Separate palettes keep loop locals from shadowing outer locals.
-    pub(crate) fn color_values(&self, loops: &[LoopScope]) -> ValueAlloc {
-        let (func, blocks) = (self.func, self.scope);
-        let n = blocks.len();
-        let v_count = self.values.len();
-        let value_bits = |rows: &BitRows, bi: usize, f: &mut dyn FnMut(usize)| {
-            for_each_bit(&rows.row(bi)[..self.v_words], f)
-        };
-
-        // Values live across a loop back-edge cannot use a body local, which
-        // Lua would reinitialize on every iteration.
-        let mut block_part = vec![0u32; func.blocks.len()];
-        for (k, ls) in loops.iter().enumerate() {
-            for &b in &ls.region {
-                let cur = block_part[raw(b)];
-                let tighter = cur == 0 || {
-                    let c = &loops[cur as usize - 1];
-                    (c.region.len(), func.emit_block_id(c.header))
-                        > (ls.region.len(), func.emit_block_id(ls.header))
-                };
-                if tighter {
-                    block_part[raw(b)] = k as u32 + 1;
-                }
-            }
-        }
-        let parent_of = |p: u32| -> u32 {
-            if p == 0 {
-                0
-            } else {
-                block_part[raw(loops[p as usize - 1].header)]
-            }
-        };
-        let depth_of = |mut p: u32| -> u32 {
-            let mut d = 0;
-            while p != 0 {
-                p = parent_of(p);
-                d += 1;
-            }
-            d
-        };
-        let lca = |mut a: u32, mut b: u32| -> u32 {
-            let (mut da, mut db) = (depth_of(a), depth_of(b));
-            while da > db {
-                a = parent_of(a);
-                da -= 1;
-            }
-            while db > da {
-                b = parent_of(b);
-                db -= 1;
-            }
-            while a != b {
-                a = parent_of(a);
-                b = parent_of(b);
-            }
-            a
-        };
-        // u32::MAX = value not seen yet (every colored value has a def, so all end assigned).
-        let mut val_part: Vec<u32> = vec![u32::MAX; v_count];
-        if !loops.is_empty() {
-            for bi in 0..n {
-                let p = block_part[raw(blocks[bi])];
-                let mut fold = |k: usize| {
-                    let cur = val_part[k];
-                    val_part[k] = if cur == u32::MAX { p } else { lca(cur, p) };
-                };
-                value_bits(&self.entries.def_set, bi, &mut fold);
-                value_bits(&self.entries.use_set, bi, &mut fold);
-            }
-            for (k, ls) in loops.iter().enumerate() {
-                let Some(hbi) = self.flow.index(ls.header) else {
-                    continue;
-                };
-                let lp = k as u32 + 1;
-                value_bits(&self.entries.live_in, hbi, &mut |v| {
-                    let mut p = val_part[v];
-                    if p == u32::MAX {
-                        return;
-                    }
-                    let mut inside = false;
-                    while p != 0 {
-                        if p == lp {
-                            inside = true;
-                            break;
-                        }
-                        p = parent_of(p);
-                    }
-                    if inside {
-                        val_part[v] = parent_of(lp);
-                    }
-                });
-            }
-        }
-
-        // Every color belongs to exactly one partition.
-        let mut colors: Vec<u32> = vec![u32::MAX; func.insts.len()];
-        let mut color_of: Vec<u32> = vec![u32::MAX; v_count];
-        let mut color_part: Vec<u32> = Vec::new();
-        let mut used: Vec<bool> = Vec::new();
+    /// Dense `raw(inst) -> color` table, with `u32::MAX` for uncolored values.
+    pub(crate) fn color_values(&self) -> (Vec<u32>, u32) {
+        let mut colors = vec![u32::MAX; self.func.insts.len()];
+        let mut color_of = vec![u32::MAX; self.values.len()];
+        let mut used = Vec::new();
+        let mut count = 0;
         for (i, &v) in self.values.iter().enumerate() {
-            used.clear();
-            self.value_graph.for_each(i, |nb| {
-                let c = color_of[nb];
-                if c != u32::MAX {
-                    let c = c as usize;
-                    if c >= used.len() {
-                        used.resize(c + 1, false);
-                    }
-                    used[c] = true;
-                }
-            });
-            let my = match val_part[i] {
-                u32::MAX => 0,
-                p => p,
-            };
-            let mut c = 0u32;
-            loop {
-                let cu = c as usize;
-                if cu >= color_part.len() {
-                    color_part.push(my); // mint a new color owned by this partition
-                    break;
-                }
-                if color_part[cu] == my && !(cu < used.len() && used[cu]) {
-                    break;
-                }
-                c += 1;
-            }
-            colors[raw(v)] = c;
-            color_of[i] = c;
+            mark_neighbor_colors(&self.value_graph, i, &color_of, &mut used);
+            let color = first_free_color(&used, 0);
+            colors[raw(v)] = color;
+            color_of[i] = color;
+            count = count.max(color + 1);
         }
-        let color_scope = color_part
-            .iter()
-            .map(|&p| {
-                if p == 0 {
-                    None
-                } else {
-                    Some(loops[p as usize - 1].header)
-                }
-            })
-            .collect();
-        ValueAlloc {
-            colors,
-            color_scope,
-        }
+        (colors, count)
     }
 
     /// Color the cells: a dense `raw(cell) -> color` table (`u32::MAX` =
@@ -1257,17 +1105,7 @@ impl<'a> Locals<'a> {
             if force[i] {
                 continue;
             }
-            used.clear();
-            self.cell_graph.for_each(i, |nb| {
-                let col = color_of[nb];
-                if col != u32::MAX {
-                    let col = col as usize;
-                    if col >= used.len() {
-                        used.resize(col + 1, false);
-                    }
-                    used[col] = true;
-                }
-            });
+            mark_neighbor_colors(&self.cell_graph, i, &color_of, &mut used);
             let free = |col: usize| col >= base as usize && used.get(col) != Some(&true);
             let start = partners.partition_point(|&(a, _)| (a as usize) < i);
             let preferred = partners[start..]
@@ -1275,20 +1113,36 @@ impl<'a> Locals<'a> {
                 .take_while(|&&(a, _)| a as usize == i)
                 .map(|&(_, b)| color_of[b as usize])
                 .find(|&col| col != u32::MAX && free(col as usize));
-            let mut col = base as usize;
-            while col < used.len() && used[col] {
-                col += 1;
-            }
-            if let Some(p) = preferred {
-                col = p as usize;
-            }
+            let color = preferred.unwrap_or_else(|| first_free_color(&used, base));
             if let Some(c) = c {
-                colors[raw(*c)] = col as u32;
+                colors[raw(*c)] = color;
             }
-            color_of[i] = col as u32;
+            color_of[i] = color;
         }
         colors
     }
+}
+
+fn mark_neighbor_colors(graph: &Neighbors, node: usize, colors: &[u32], used: &mut Vec<bool>) {
+    used.clear();
+    graph.for_each(node, |neighbor| {
+        let color = colors[neighbor];
+        if color != u32::MAX {
+            let color = color as usize;
+            if color >= used.len() {
+                used.resize(color + 1, false);
+            }
+            used[color] = true;
+        }
+    });
+}
+
+fn first_free_color(used: &[bool], base: u32) -> u32 {
+    let mut color = base as usize;
+    while color < used.len() && used[color] {
+        color += 1;
+    }
+    color as u32
 }
 
 /// Cells held by reference for the whole body -- a closure's params, any cell
@@ -1363,8 +1217,6 @@ pub(crate) struct NilKills<'a> {
     first_pure_range: Vec<(u32, u32)>,
     first_pure_slots: Vec<usize>,
     value_count: u32,
-    value_scope: Vec<Option<Idx<Block>>>,
-    loop_blocks: Vec<(Idx<Block>, HashSet<Idx<Block>>)>,
     /// Dense `raw(block)`: control reaches a `return` from the block's entry
     /// without running a statement.
     return_tail: Vec<bool>,
@@ -1434,21 +1286,6 @@ impl NilKills<'_> {
         }
     }
 
-    /// A loop-scoped register is declared inside its `for` block, so a kill
-    /// anywhere else would assign a global of the same name.
-    fn allowed_at(&self, local: KillLocal, block: Idx<Block>) -> bool {
-        match local {
-            KillLocal::Value(c) => match self.value_scope.get(c as usize).copied().flatten() {
-                None => true,
-                Some(h) => self
-                    .loop_blocks
-                    .iter()
-                    .any(|(header, blocks)| *header == h && blocks.contains(&block)),
-            },
-            KillLocal::Cell(_) => true,
-        }
-    }
-
     /// Locals live at the end of `from` that are dead on entry to `to`, for a
     /// control-flow edge the emitter renders as a direct fall-through (the
     /// `math.min`/`math.max` selection skips its arm blocks).
@@ -1473,9 +1310,8 @@ impl NilKills<'_> {
             while bits != 0 {
                 let b = bits.trailing_zeros() as usize;
                 let slot = wi * 64 + b;
-                let local = KillLocal::of_slot(slot, self.value_count);
-                if self.allowed_at(local, to) && !first_pure.contains(&slot) {
-                    out.push(local);
+                if !first_pure.contains(&slot) {
+                    out.push(KillLocal::of_slot(slot, self.value_count));
                 }
                 bits &= bits - 1;
             }
@@ -1568,9 +1404,7 @@ pub(crate) fn statement_is_pure(func: &MirFunc, inline: &[bool], id: Idx<Inst>) 
 /// `quiet` marks the instructions that emit no statement of their own when
 /// that is more than the values `locals` already folds (hoisted constants, a
 /// counted loop's header and latch); their reads are attributed to the
-/// consumer, as the emitter renders them. `loops` supplies the blocks in
-/// which a loop-scoped register may be killed (its `for` body plus the latch
-/// label, both inside the `for` block). `cell_excluded` is every cell this
+/// consumer, as the emitter renders them. `cell_excluded` is every cell this
 /// body does NOT render as a bare `c<color>` local, from the caller's own
 /// declaration predicate: a kill of one of those would assign a GLOBAL of
 /// that name.
@@ -1579,8 +1413,7 @@ pub(crate) fn nil_kills<'a>(
     locals: &Locals<'a>,
     quiet: Option<&[bool]>,
     value_colors: &[u32],
-    value_scope: &[Option<Idx<Block>>],
-    loops: &[LoopScope],
+    value_count: u32,
     cell_colors: &[u32],
     cell_excluded: &[bool],
     params: &[Idx<Cell>],
@@ -1590,8 +1423,6 @@ pub(crate) fn nil_kills<'a>(
     let (func, scope, flow) = (locals.func, locals.scope, locals.flow);
     let inline = quiet.unwrap_or(locals.inline);
     let n = scope.len();
-    // Every color is held by some register, so the palette is the count.
-    let value_count = value_scope.len() as u32;
     // Slot space: value colors first, then killable cell colors. `cell_excluded`
     // carries both reasons a cell is not killable: it is pinned (owning its color
     // alone, so excluding it by cell excludes the color), or the emitter renders
@@ -1653,11 +1484,6 @@ pub(crate) fn nil_kills<'a>(
         first_pure_range: vec![(0, 0); n],
         first_pure_slots: Vec::new(),
         value_count,
-        value_scope: value_scope.to_vec(),
-        loop_blocks: loops
-            .iter()
-            .map(|l| (l.header, l.region.iter().copied().collect()))
-            .collect(),
         return_tail: Vec::new(),
     };
 
@@ -1726,9 +1552,8 @@ pub(crate) fn nil_kills<'a>(
                 seen[wi] |= bits;
                 while bits != 0 {
                     let slot = wi * 64 + bits.trailing_zeros() as usize;
-                    let local = KillLocal::of_slot(slot, value_count);
-                    if kills.allowed_at(local, to) && !first_pure.contains(&slot) {
-                        entry_locals.push(local);
+                    if !first_pure.contains(&slot) {
+                        entry_locals.push(KillLocal::of_slot(slot, value_count));
                     }
                     bits &= bits - 1;
                 }

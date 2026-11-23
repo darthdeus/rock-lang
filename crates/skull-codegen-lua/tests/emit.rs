@@ -434,37 +434,26 @@ fn iterator_chain_lambdas_inline_into_the_counted_loop() {
     }
 }
 
-/// A register declared inside a `for` block (a loop-scoped color) is only ever
-/// killed inside that block: a kill at the loop's exit label would write a
-/// global of the same name.
 #[test]
-fn loop_scoped_registers_are_never_killed_outside_their_loop() {
+fn loop_register_kills_never_write_globals() {
     let lua = emit_clean(
         "fn probe(v: [int], target: int) -> int { let n = 0; for i in 0..v.len() { let x = v[i] * 2; let y = x + 1; n = n + y; if x > target { break } }; return n }",
         "probe",
     );
-    let lines: Vec<&str> = lua.lines().map(str::trim).collect();
-    let for_line = lines
-        .iter()
-        .position(|l| l.starts_with("for "))
-        .unwrap_or_else(|| panic!("no for:\n{lua}"));
-    let inner_decl = lines[for_line + 1];
-    assert!(inner_decl.starts_with("local r"), "{lua}");
-    let end_line = lines.iter().rposition(|l| *l == "end").unwrap();
-    let end_line = lines[..end_line]
-        .iter()
-        .rposition(|l| *l == "end")
-        .unwrap_or_else(|| panic!("no loop end:\n{lua}"));
-    let scoped: Vec<&str> = inner_decl["local ".len()..].split(", ").collect();
-    for name in scoped {
-        let kill = format!("{name}=nil");
-        for (i, l) in lines.iter().enumerate() {
-            if *l == kill {
-                assert!(for_line < i && i < end_line, "{lua}");
-            }
-        }
-    }
-    assert!(lines.iter().any(|l| l.ends_with("=nil")), "{lua}");
+    assert!(lua.lines().any(|line| line.ends_with("=nil")), "{lua}");
+    luajit_ok(
+        &format!(
+            r#"{lua}
+local probe = probe_arr_int_int
+setfenv(probe, setmetatable({{}}, {{
+    __newindex = function(_, name) error("unexpected global write: " .. name) end
+}}))
+local input = {{[0] = 3, 1, 2, 3}}
+assert(probe(input, 2) == 8)
+assert(probe(input, 99) == 15)"#
+        ),
+        &lua,
+    );
 }
 
 /// [`emit_clean`] with its callee binding plan.

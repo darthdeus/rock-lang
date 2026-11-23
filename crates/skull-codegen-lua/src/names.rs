@@ -84,7 +84,6 @@ pub(crate) fn write_vname(out: &mut String, func: &MirFunc, colors: &[u32], id: 
             push_uint(out, func.emit_inst_id(id));
         }
         c => {
-            scope_guard::register(func, c);
             out.push('r');
             push_uint(out, c);
         }

@@ -31,24 +31,7 @@ pub(crate) fn render_scope(
     out: &mut String,
 ) {
     let t_ra = bone_core::prelude::Instant::now();
-    // Partitioning trades color sharing for scoping; drop it if a palette
-    // nears LuaJIT's 200-active-locals cap.
-    let mut loop_scopes: Vec<regalloc::LoopScope> = loops
-        .iter()
-        .map(|(&h, cl)| regalloc::LoopScope {
-            header: h,
-            region: cl.region.iter().copied().collect(),
-        })
-        .collect();
-    loop_scopes.sort_by_key(|ls| func.emit_block_id(ls.header));
-    let mut va = locals.color_values(&loop_scopes);
-    if va.color_scope.len() > 150 && !loop_scopes.is_empty() {
-        va = locals.color_values(&[]);
-    }
-    let regalloc::ValueAlloc {
-        colors,
-        color_scope,
-    } = va;
+    let (colors, value_count) = locals.color_values();
     // A hoisted lambda body is a full-arena clone; declaring its dead cells
     // would blow LuaJIT's 200-local cap.
     let referenced = referenced_cells_in_region(func, rpo, tail_forwards, suppressed);
@@ -78,21 +61,6 @@ pub(crate) fn render_scope(
             }
             quiet
         });
-        // A loop-scoped register may be killed anywhere inside its `for` block:
-        // the body region and the latch label, not the header (rendered as the
-        // `for` line itself, outside the block).
-        let kill_scopes: Vec<regalloc::LoopScope> = loops
-            .iter()
-            .map(|(&h, cl)| regalloc::LoopScope {
-                header: h,
-                region: cl
-                    .region
-                    .iter()
-                    .copied()
-                    .chain(std::iter::once(cl.latch))
-                    .collect(),
-            })
-            .collect();
         let mut excluded = pinned.to_vec();
         for (cid, _) in func.cells.iter() {
             if !cell_has_local(cid) {
@@ -103,8 +71,7 @@ pub(crate) fn render_scope(
             locals,
             emits_nothing.as_deref(),
             &colors,
-            &color_scope,
-            &kill_scopes,
+            value_count,
             cell_colors,
             &excluded,
             params,
@@ -167,17 +134,14 @@ pub(crate) fn render_scope(
     out.push_str(" local ");
     let mut any = false;
     let mut top_locals = 0usize;
-    for (color, scope) in color_scope.iter().enumerate() {
-        if scope.is_some() {
-            continue;
-        }
+    for color in 0..value_count {
         if any {
             out.push_str(", ");
         }
         any = true;
         top_locals += 1;
         out.push('r');
-        push_uint(out, color as u32);
+        push_uint(out, color);
     }
     let mut declared_colors: HashSet<u32> = params
         .iter()
@@ -223,7 +187,6 @@ pub(crate) fn render_scope(
             rpo,
             params.len() + top_locals,
             &loops,
-            &color_scope,
             hoist,
             tail_forwards,
             call_arg_forwards,
@@ -231,7 +194,7 @@ pub(crate) fn render_scope(
         );
     }
 
-    let _guard = scope_guard::install(func, &loops, cell_colors, &color_scope);
+    let _guard = scope_guard::install(func, &loops, cell_colors);
     let mut em = Emitter {
         enum_box_groups: RefCell::new(HashMap::default()),
         selection_preds: std::cell::OnceCell::new(),
@@ -240,7 +203,6 @@ pub(crate) fn render_scope(
         interner,
         func,
         colors,
-        color_scope,
         cell_colors,
         frame,
         loops: &loops,

@@ -310,10 +310,9 @@ pub(crate) fn fits_without_measuring(
     blocks: &[Idx<Block>],
     top_locals: usize,
     loop_count: usize,
-    loop_scoped_locals: usize,
     inlinable: &[bool],
 ) -> bool {
-    let actives_upper = top_locals + loop_count * FOR_CONTROL_LOCALS + loop_scoped_locals;
+    let actives_upper = top_locals + loop_count * FOR_CONTROL_LOCALS;
     if actives_upper > LJ_MAX_LOCVAR {
         return false;
     }

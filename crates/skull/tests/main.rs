@@ -64,7 +64,7 @@ mod global_storage;
 mod int_float_alias;
 mod line_directives;
 mod loop_bytecode;
-mod loop_scoped_locals;
+mod loop_registers;
 mod modules_lifecycle;
 mod modules_state_identity;
 mod modules_type_emission;

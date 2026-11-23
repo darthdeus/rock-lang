@@ -827,7 +827,6 @@ struct Emitter<'a> {
     /// `u32::MAX` = uncolored.
     colors: Vec<u32>,
     /// `None` = function top.
-    color_scope: Vec<Option<Idx<Block>>>,
     cell_colors: &'a [u32],
     frame: Option<&'a FrameCtx>,
     loops: &'a HashMap<Idx<Block>, ForLoop>,

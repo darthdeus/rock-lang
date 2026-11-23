@@ -1,5 +1,4 @@
-//! Compiler-bug check, when scope checks are on: every printed cell or
-//! register name must be printed where the Lua local it means is in scope.
+//! Check the scope of emitted cell names around counted loops.
 //! A mismatch is valid Lua that reads the wrong variable.
 
 use super::*;
@@ -15,7 +14,6 @@ struct Guard {
     loops: Vec<(Idx<Block>, Idx<Cell>, u32)>,
     open: Vec<Idx<Block>>,
     writing: bool,
-    color_scope: Vec<Option<Idx<Block>>>,
 }
 
 thread_local! {
@@ -37,7 +35,6 @@ pub(crate) fn install(
     func: &MirFunc,
     loops: &HashMap<Idx<Block>, ForLoop>,
     cell_colors: &[u32],
-    color_scope: &[Option<Idx<Block>>],
 ) -> Installed {
     if !skull_mir::verify::scope_checks_enabled() {
         return Installed(false);
@@ -58,7 +55,6 @@ pub(crate) fn install(
             loops,
             open: Vec::new(),
             writing: false,
-            color_scope: color_scope.to_vec(),
         })
     });
     Installed(true)
@@ -133,18 +129,6 @@ pub(crate) fn cell_kill(func: &MirFunc, number: u32) {
                 n != number || !g.open.contains(&h),
                 "kill of c{number} inside the `for` (header bb{}) whose counter it names",
                 raw(h)
-            );
-        }
-    });
-}
-
-pub(crate) fn register(func: &MirFunc, color: u32) {
-    with_guard(func, |g| {
-        if let Some(Some(h)) = g.color_scope.get(color as usize) {
-            assert!(
-                g.open.contains(h),
-                "loop-owned register r{color} printed outside its `for` (header bb{})",
-                raw(*h)
             );
         }
     });
