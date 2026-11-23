@@ -805,8 +805,10 @@ impl<'a> Builder<'a> {
             }
             _ => return Ok(None),
         };
-        if let Some(scrut) = self.nobox_record_scrut(&repr)? {
-            return Ok(Some(scrut));
+        if let Some(mut shape) = self.nobox_embed_group_shape(child)? {
+            shape.nullable = nullable;
+            let leaves = self.repr_to_leaves_shape(&repr, &shape)?;
+            return Ok(Some(Scrut::Leaves { leaves, shape }));
         }
         self.scrut_from_repr(repr).map(Some)
     }
@@ -1031,7 +1033,7 @@ impl<'a> Builder<'a> {
         let MonoTy::App {
             ctor: crate::monoty::MonoCtor::Nominal(name),
             params,
-        } = owner_ty
+        } = owner_ty.peel_nullable().0
         else {
             return None;
         };

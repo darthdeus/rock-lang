@@ -1,6 +1,8 @@
 nobox value Point { x: int, y: int }
 value Holder { k: int, pair: (Point, int) }
 struct Outer { holder: Holder }
+nobox value NullableHolder { pair: (Point, int) }
+value NullableOuter { holder: NullableHolder?, k: int }
 
 fn make_outer() -> Outer {
     return Outer { holder: Holder { k: 1, pair: (Point { x: 2, y: 5 }, 9) } }
@@ -12,4 +14,21 @@ fn make_outer() -> Outer {
     assert_eq(outer.holder.pair.1, 9)
     let (point, n) = outer.holder.pair
     assert(point.x == 2 && point.y == 5 && n == 9)
+}
+
+fn read_nullable_holder(outer: NullableOuter) -> int {
+    return match outer {
+        NullableOuter { holder: NullableHolder { pair: (Point { x, y }, n) }, .. } => x + y + n,
+        _ => -1,
+    }
+}
+
+@test fn destructure_tuple_under_nullable_record() {
+    let present = NullableHolder { pair: (Point { x: 2, y: 5 }, 9) }
+    assert_eq(read_nullable_holder(NullableOuter { holder: present, k: 1 }), 16)
+    assert_eq(read_nullable_holder(NullableOuter { holder: null, k: 2 }), -1)
+    assert_eq(match (NullableOuter { holder: null, k: 3 }) {
+        NullableOuter { holder: NullableHolder { pair: (Point { x, y }, n) }, .. } => x + y + n,
+        _ => -1,
+    }, -1)
 }
