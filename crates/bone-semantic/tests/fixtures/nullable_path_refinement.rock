@@ -1,6 +1,6 @@
-//- refine_field_path
 value Inner { v: int }
 struct Mid { inner: Inner? }
+//- refine_field_path
 fn f(m: Mid) -> int {
     if m.inner != null {
         let r = m.inner.v
@@ -12,8 +12,6 @@ fn f(m: Mid) -> int {
 }
 
 //- refine_and_chain
-value Inner { v: int }
-struct Mid { inner: Inner? }
 fn f(m: Mid?) -> int {
     if m != null && m.inner != null {
         let r = m.inner.v

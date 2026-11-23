@@ -51,7 +51,7 @@ fn hits(s: string, r: UiRect) -> bool {
 }
 
 //- a_glob_vec2_lerp_joins_std_lerp
-//-- core.rock @pkg=core,1 @v1
+//-- core_lerp=core.rock @pkg=core,1 @v1
 pub fn lerp(a: Vec2, b: Vec2, t: float) -> Vec2 {
     a
 }
@@ -109,7 +109,7 @@ fn mix() -> int {
 }
 
 //- a_cross_tier_exact_tie_goes_to_the_explicit_import_over_the_glob
-//-- a.rock @pkg=a,1 @v1
+//-- a_heal=a.rock @pkg=a,1 @v1
 pub fn heal(n: int) -> int {
     n
 }
@@ -145,12 +145,9 @@ fn f() -> int {
 }
 
 //- a_same_tier_tie_is_ambiguous_and_names_both_origins @fail=Ambiguous overload for `heal`
-//-- a.rock @pkg=a,1 @v1
-pub fn heal(n: int) -> int {
-    n
-}
+//-- =a_heal
 
-//-- b.rock @pkg=b,2 @v1
+//-- b_heal=b.rock @pkg=b,2 @v1
 pub fn heal(n: int) -> int {
     n
 }
@@ -164,15 +161,9 @@ fn f() -> int {
 }
 
 //- two_explicit_imports_of_one_signature_are_ambiguous_and_name_each_origin @fail=(v1 definition b::heal)
-//-- a.rock @pkg=a,1 @v1
-pub fn heal(n: int) -> int {
-    n
-}
+//-- =a_heal
 
-//-- b.rock @pkg=b,2 @v1
-pub fn heal(n: int) -> int {
-    n
-}
+//-- =b_heal
 
 //-- app.rock @pkg=app,3 @v1
 use a::heal;
@@ -298,10 +289,7 @@ fn f() -> float {
 }
 
 //- a_qualified_call_reads_only_that_modules_family @fail=expected `Vec2`, found `float`
-//-- core.rock @pkg=core,1 @v1
-pub fn lerp(a: Vec2, b: Vec2, t: float) -> Vec2 {
-    a
-}
+//-- =core_lerp
 
 //-- app.rock @pkg=app,2 @v1
 fn f() -> float {

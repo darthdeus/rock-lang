@@ -116,7 +116,7 @@ fn f() -> int {
 }
 
 //- operator_import_selects_user_plus
-//-- geo.rock @pkg=geo,1 @v1
+//-- geo_vec2=geo.rock @pkg=geo,1 @v1
 pub struct Vec2 { pub x: int, pub y: int }
 pub operator +(a: Vec2, b: Vec2) -> Vec2 {
     Vec2 { x: a.x, y: a.y }
@@ -187,11 +187,7 @@ mod std;
 fn main() {}
 
 //- operator_not_globally_discovered @fail
-//-- geo.rock @pkg=geo,1 @v1
-pub struct Vec2 { pub x: int, pub y: int }
-pub operator +(a: Vec2, b: Vec2) -> Vec2 {
-    Vec2 { x: a.x, y: a.y }
-}
+//-- =geo_vec2
 
 //-- app.rock @pkg=app,2 @v1
 use geo::Vec2;
@@ -328,7 +324,7 @@ pub fn sauce() -> int {
     secret::recipe()
 }
 
-//-- lib_secret.rock @pkg=chess,1 @v1
+//-- chess_recipe=lib_secret.rock @pkg=chess,1 @v1
 private mod secret;
 
 pub fn recipe() -> int {
@@ -360,12 +356,7 @@ fn f() -> int {
 
 //- a_private_child_module_is_unreachable_through_a_use_import @fail=module `secret` is not accessible from this module
 //-- lib.rock @pkg=chess,1 @v1
-//-- lib_secret.rock @pkg=chess,1 @v1
-private mod secret;
-
-pub fn recipe() -> int {
-    7
-}
+//-- =chess_recipe
 
 //-- app.rock @pkg=app,2 @v1
 use chess::secret::recipe;

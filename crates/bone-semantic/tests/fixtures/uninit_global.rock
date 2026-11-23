@@ -1,5 +1,5 @@
-//- uninit_typed_global
 struct Image { w: int, h: int }
+//- uninit_typed_global
 global current: Image
 fn f() -> int {
     let n = current.w
@@ -8,7 +8,6 @@ fn f() -> int {
 }
 
 //- init_global_still_works
-struct Image { w: int, h: int }
 global origin: Image = Image { w: 0, h: 0 }
 fn f() -> int {
     let n = origin.h

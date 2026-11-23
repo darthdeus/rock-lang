@@ -1,5 +1,5 @@
-//- lambda_nullable_arg_unit_ret_tail_if
 fn gives_bool() -> bool { true }
+//- lambda_nullable_arg_unit_ret_tail_if
 fn run(cb: (() -> ())?) -> int {
     if let c = cb { c() }
     1
@@ -17,7 +17,6 @@ fn f() -> int {
 }
 
 //- lambda_nullable_arg_unit_ret_tail_iflet
-fn gives_bool() -> bool { true }
 fn run(cb: (() -> ())?) -> int {
     if let c = cb { c() }
     1
@@ -35,7 +34,6 @@ fn f() -> int {
 }
 
 //- lambda_nullable_default_arg_unit_ret_tail_iflet
-fn gives_bool() -> bool { true }
 fn run(cb: (() -> ())? = null) -> int {
     if let c = cb { c() }
     1

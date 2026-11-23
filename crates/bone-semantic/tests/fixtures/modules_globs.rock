@@ -185,7 +185,7 @@ pub mod a;
 
 pub use chess::b::*;
 
-//-- lib_b.rock @pkg=chess,1 @v1
+//-- chess_b=lib_b.rock @pkg=chess,1 @v1
 pub mod b;
 
 pub use chess::a::ply;
@@ -200,7 +200,7 @@ fn f() -> int {
 //- a_reexport_target_resolves_from_the_exporting_module
 //-- =public_inner_ply
 
-//-- lib_facade.rock @pkg=chess,1 @v1
+//-- relative_facade_ply=lib_facade.rock @pkg=chess,1 @v1
 pub mod facade;
 
 pub use super::inner::ply;
@@ -225,7 +225,7 @@ fn f() -> int {
 //- a_glob_does_not_open_a_module_private_reexport_to_another_package @fail=`ply` did not resolve to any definition
 //-- =public_inner_ply
 
-//-- lib_facade.rock @pkg=chess,1 @v1
+//-- private_facade_ply=lib_facade.rock @pkg=chess,1 @v1
 pub mod facade;
 
 private use chess::inner::ply;
@@ -235,7 +235,7 @@ private use chess::inner::ply;
 //- a_pub_package_reexport_is_opened_for_a_same_package_globber
 //-- =public_inner_ply
 
-//-- lib_facade.rock @pkg=chess,1 @v1
+//-- package_facade_ply=lib_facade.rock @pkg=chess,1 @v1
 pub mod facade;
 
 pub(package) use chess::inner::ply;
@@ -254,10 +254,7 @@ fn f() -> int {
 //- a_pub_package_reexport_is_not_opened_for_another_package_globber @fail=`ply` did not resolve to any definition
 //-- =public_inner_ply
 
-//-- lib_facade.rock @pkg=chess,1 @v1
-pub mod facade;
-
-pub(package) use chess::inner::ply;
+//-- =package_facade_ply
 
 //-- =call_facade
 
@@ -323,10 +320,7 @@ pub mod a;
 
 pub use chess::b::ply;
 
-//-- lib_b.rock @pkg=chess,1 @v1
-pub mod b;
-
-pub use chess::a::ply;
+//-- =chess_b
 
 //-- app.rock @pkg=app,2 @v1
 use chess::a::ply;
@@ -401,10 +395,7 @@ fn f() -> int {
 //- an_explicit_path_does_not_reach_a_module_private_reexport @fail=`ply` is not accessible from this module
 //-- =public_inner_ply
 
-//-- lib_facade.rock @pkg=chess,1 @v1
-pub mod facade;
-
-private use chess::inner::ply;
+//-- =private_facade_ply
 
 //-- app.rock @pkg=app,2 @v1
 use chess::facade::ply;
@@ -416,10 +407,7 @@ fn f() -> int {
 //- an_explicit_path_resolves_a_reexport_from_the_exporting_module
 //-- =public_inner_ply
 
-//-- lib_facade.rock @pkg=chess,1 @v1
-pub mod facade;
-
-pub use super::inner::ply;
+//-- =relative_facade_ply
 
 //-- app.rock @pkg=app,2 @v1
 use chess::facade::ply;

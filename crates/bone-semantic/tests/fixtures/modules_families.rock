@@ -178,7 +178,7 @@ fn use_it() -> int {
 //- same_signature_explicit_imports_tie_at_the_call @fail=lib_b::pick(n: int) -> int (v1 definition lib_b::pick)
 //-- =pick_int
 
-//-- b.rock @pkg=lib_b,2 @v1
+//-- lib_b_pick=b.rock @pkg=lib_b,2 @v1
 pub fn pick(n: int) -> int {
     n
 }
@@ -253,7 +253,7 @@ pub struct Pick {
     pub n: int,
 }
 
-//-- b.rock @pkg=lib_b,2 @v1
+//-- lib_b_pick_struct=b.rock @pkg=lib_b,2 @v1
 pub struct Pick {
     pub s: string,
 }
@@ -367,7 +367,7 @@ fn use_it(p: P) -> P {
 //- explicit_imports_of_a_callable_and_a_type_are_an_error @fail=`Pick` is imported from several definitions that do not form one overload family: lib_a::Pick, lib_b::Pick
 //-- =pick_struct
 
-//-- b.rock @pkg=lib_b,2 @v1
+//-- lib_b_capital_pick=b.rock @pkg=lib_b,2 @v1
 pub fn Pick(n: int) -> int {
     n
 }
@@ -402,10 +402,7 @@ fn use_it() -> int {
 //- same_signature_glob_callables_tie_at_the_call @fail=lib_b::pick(n: int) -> int (v1 definition lib_b::pick)
 //-- =pick_int
 
-//-- b.rock @pkg=lib_b,2 @v1
-pub fn pick(n: int) -> int {
-    n
-}
+//-- =lib_b_pick
 
 //-- main.rock @pkg=game,3 @v1
 use lib_a::*;
@@ -448,10 +445,7 @@ fn use_it() {
 //- glob_imported_types_of_two_modules_stay_ambiguous @fail=`Pick` is ambiguous between glob imports lib_a::Pick, lib_b::Pick
 //-- =pick_struct
 
-//-- b.rock @pkg=lib_b,2 @v1
-pub struct Pick {
-    pub s: string,
-}
+//-- =lib_b_pick_struct
 
 //-- main.rock @pkg=game,3 @v1
 use lib_a::*;
@@ -464,10 +458,7 @@ fn use_it(p: Pick) -> int {
 //- a_globbed_callable_and_type_stay_ambiguous_at_the_call @fail=`Pick` is ambiguous between glob imports lib_a::Pick, lib_b::Pick
 //-- =pick_struct
 
-//-- b.rock @pkg=lib_b,2 @v1
-pub fn Pick(n: int) -> int {
-    n
-}
+//-- =lib_b_capital_pick
 
 //-- main.rock @pkg=game,3 @v1
 use lib_a::*;

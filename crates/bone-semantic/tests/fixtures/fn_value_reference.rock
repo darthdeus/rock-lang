@@ -1,5 +1,5 @@
-//- fn_name_as_local_value
 fn id(x: int) -> int { return x }
+//- fn_name_as_local_value
 fn f() -> int {
     let g = id
     let y = g(5)
@@ -8,7 +8,6 @@ fn f() -> int {
 }
 
 //- fn_name_value_has_fn_type
-fn id(x: int) -> int { return x }
 fn f() -> int {
     let g = id
       //^ fn(int) -> int
@@ -16,7 +15,6 @@ fn f() -> int {
 }
 
 //- fn_name_as_argument
-fn id(x: int) -> int { return x }
 fn apply(g: fn(int) -> int, x: int) -> int { return g(x) }
 fn f() -> int {
     let y = apply(id, 5)

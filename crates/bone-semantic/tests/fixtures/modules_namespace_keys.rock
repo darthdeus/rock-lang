@@ -1,5 +1,5 @@
 //- repeated_nested_members_keep_alias_and_super_resolution
-//-- lib_outer_inner.rock @pkg=keys,1 @v1
+//-- keys_outer=lib_outer_inner.rock @pkg=keys,1 @v1
 pub mod outer::inner;
 
 pub fn value() -> int { 7 }
@@ -19,10 +19,7 @@ fn repeated() -> int {
 }
 
 //- nested_missing_member_still_rejects @fail=did not resolve
-//-- lib_outer_inner.rock @pkg=keys,1 @v1
-pub mod outer::inner;
-
-pub fn value() -> int { 7 }
+//-- =keys_outer
 
 //-- lib.rock @pkg=keys,1 @v1
 fn missing() -> int { keys::outer::inner::missing() }

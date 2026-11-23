@@ -1,5 +1,5 @@
-//- safenav_method_call
 struct Box { v: int }
+//- safenav_method_call
 fn get_v(b: Box) -> int { return b.v }
 fn f(b: Box?) -> int {
     let r = b?.get_v()
@@ -8,7 +8,6 @@ fn f(b: Box?) -> int {
 }
 
 //- safenav_method_with_arg
-struct Box { v: int }
 fn pick(b: Box, n: int) -> int { return n }
 fn f(b: Box?) -> int {
     let r = b?.pick(3)

@@ -1,5 +1,5 @@
 //- a_package_overload_of_a_std_function_is_not_in_the_std_tier @fail=No overload for `lerp` with argument types (string, string, float)
-//-- game.rock @pkg=game,3
+//-- game_lerp=game.rock @pkg=game,3
 fn lerp(a: string, b: string, t: float) -> string {
     a
 }
@@ -10,10 +10,7 @@ fn g() -> string {
 }
 
 //- the_std_tier_keeps_the_std_members_beside_a_package_overload
-//-- game.rock @pkg=game,3
-fn lerp(a: string, b: string, t: float) -> string {
-    a
-}
+//-- =game_lerp
 
 //-- app.rock @pkg=app,2 @v1
 fn g() -> float {
@@ -25,10 +22,7 @@ fn g() -> float {
 }
 
 //- a_std_path_names_only_std_members @fail=No overload for `lerp` with argument types (string, string, float)
-//-- game.rock @pkg=game,3
-fn lerp(a: string, b: string, t: float) -> string {
-    a
-}
+//-- =game_lerp
 
 //-- app.rock @pkg=app,2 @v1
 fn g() -> string {
@@ -73,7 +67,7 @@ fn g() -> float {
 }
 
 //- a_std_function_value_is_not_overloaded_by_a_package_file
-//-- game.rock @pkg=game,3
+//-- game_smoothstep=game.rock @pkg=game,3
 fn smoothstep(a: string, b: string, t: float) -> string {
     a
 }
@@ -87,10 +81,7 @@ fn g() -> float {
 }
 
 //- a_std_function_value_passed_as_an_argument_is_the_std_definition
-//-- game.rock @pkg=game,3
-fn smoothstep(a: string, b: string, t: float) -> string {
-    a
-}
+//-- =game_smoothstep
 
 //-- app.rock @pkg=app,2 @v1
 fn apply(f: fn(float, float, float) -> float) -> float {

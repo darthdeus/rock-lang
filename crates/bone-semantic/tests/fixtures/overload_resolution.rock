@@ -1,5 +1,5 @@
-//- select_by_arg_type
 fn pick(x: int) -> int { x }
+//- select_by_arg_type
 fn pick(x: bool) -> bool { x }
 fn f() -> bool {
     let r = pick(true)
@@ -8,7 +8,6 @@ fn f() -> bool {
 }
 
 //- exact_preferred_over_any
-fn pick(x: int) -> int { x }
 fn pick(x: any) -> any { x }
 fn f() -> int {
     let r = pick(5)
@@ -17,7 +16,6 @@ fn f() -> int {
 }
 
 //- any_fallback
-fn pick(x: int) -> int { x }
 fn pick(x: any) -> any { x }
 fn f() -> any {
     let r = pick("hi")

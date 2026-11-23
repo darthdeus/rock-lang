@@ -1,5 +1,5 @@
-//- variadic_call
 fn collect(xs: ...int) -> int { return 0 }
+//- variadic_call
 fn f() -> int {
     let r = collect(1, 2, 3)
       //^ int
@@ -7,7 +7,6 @@ fn f() -> int {
 }
 
 //- variadic_empty
-fn collect(xs: ...int) -> int { return 0 }
 fn f() -> int {
     let r = collect()
       //^ int

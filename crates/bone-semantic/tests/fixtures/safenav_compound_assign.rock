@@ -1,5 +1,5 @@
-//- safenav_compound_basic
 value V2 { x: int, y: int }
+//- safenav_compound_basic
 fn __op_add(a: V2, b: V2) -> V2 { return a }
 value Inner { v: V2 }
 struct Outer { inner: Inner? }
@@ -12,7 +12,6 @@ fn f() -> int {
 }
 
 //- safenav_compound_mixed_op
-value V2 { x: int, y: int }
 fn __op_mul(a: V2, s: int) -> V2 { return a }
 value Inner { v: V2 }
 struct Outer { inner: Inner? }
@@ -25,7 +24,6 @@ fn f() -> int {
 }
 
 //- safenav_compound_deep_chain
-value V2 { x: int, y: int }
 fn __op_add(a: V2, b: V2) -> V2 { return a }
 value L1 { v: V2 }
 value L2 { l1: L1? }
