@@ -1560,6 +1560,191 @@ fn render_scene_overlays() {
     if POST_SCENE_BATCHES_PENDING { render_batches(after_scene:true) }
 }
 
+// Specialize the shared traversal at compile time so each pass keeps its
+// material and probe operations in order without dispatch in the loop.
+macro flush_batch_keys(Pool: expr, Keys: expr, World: expr, Ui: expr, AfterScene: expr,
+    Offset: expr, Scale: expr, YBounds: expr, Extent: expr, Convention: expr, List: expr
+) {
+    // A custom draw can change the draw-buffer mask and shader out of band.
+    let current_draw_buffers = 0
+    let write_id_set = false
+    let active_shader = sprite_batch_shader
+    let current_depth = DepthMode::Off
+    let entry_blend = CURRENT_BLEND
+    let current_blend = entry_blend
+    if !Ui { unset_depth_mode() }
+    if Ui { profile_begin("screen.ui_flush.render_batches.loop") }
+
+    for key in Keys {
+        let batch = Pool.get(key) ?? {
+            if World { d("Render batch for key {key} is null, skipping render.") }
+            continue
+        }
+
+        if World {
+            let late = if let pipe = batch.pipeline { pipe.after_scene } else { false }
+            if late != AfterScene {
+                if late && (batch.count > 0 || batch.custom_draw != null) { POST_SCENE_BATCHES_PENDING = true }
+                continue
+            }
+            if ENGINE.show_pipeline_inspector { pipeline_inspector_record_batch(batch) }
+        }
+
+        if !Ui && batch.depth != current_depth {
+            apply_depth_mode(batch.depth)
+            current_depth = batch.depth
+        }
+        if (!Ui || !UI_SUBMISSION_PROBE_WINDOWLESS) && batch.blend != current_blend {
+            set_blend_mode(batch.blend)
+            current_blend = batch.blend
+        }
+
+        if World && mrt_id_attached {
+            // The integer ID attachment uses overwrite regardless of color blending.
+            let outputs = batch.surface_outputs
+            let overlay = outputs == WorldSurfaceOutputs::ColorAndMaterial
+                || outputs == WorldSurfaceOutputs::ColorMaterialAndNormal
+            let write_material = !AfterScene && batch.custom_draw == null && overlay
+            let receiver = outputs == WorldSurfaceOutputs::Receiver
+                || outputs == WorldSurfaceOutputs::ReceiverMetadata
+                || outputs == WorldSurfaceOutputs::ColorAndNormal
+            let write_id = !AfterScene && (batch.custom_draw == null || batch.pipeline != null)
+                && !overlay && (depth_writes(batch.depth) || receiver)
+                && sprite_pipeline_has_id_output(batch.pipeline)
+            if !AfterScene && receiver && !write_id {
+                error("surface-ID writer needs an integer fragment output at location 1")
+            }
+            let write_normal = write_material && outputs == WorldSurfaceOutputs::ColorMaterialAndNormal
+            if write_material {
+                assert(sprite_pipeline_has_material_output(batch.pipeline),
+                    "surface-material writer needs a material output at location 2")
+                let _ = ensure_world_material_canvas()
+            }
+            if write_normal {
+                assert(sprite_pipeline_has_output(batch.pipeline,3,3),
+                    "surface-normal writer needs a normal output at location 3")
+                let _ = ensure_world_normal_canvas()
+            }
+            if write_id && (batch.count > 0 || batch.custom_draw != null) { outline_ids_written = true }
+            let material_output = sprite_pipeline_has_material_output(batch.pipeline)
+            if material_output && write_id { let _ = ensure_world_material_canvas() }
+            let normal_output = sprite_pipeline_has_output(batch.pipeline,3,3)
+            if normal_output && write_id {
+                assert(material_output,"world normal writer also requires material output")
+                let _ = ensure_world_normal_canvas()
+            }
+            let owner_output = sprite_pipeline_has_output(batch.pipeline,4,4)
+            if owner_output && write_id {
+                assert(normal_output,"surface owner writer requires normal and material outputs")
+                let _ = ensure_world_surface_owner_canvas()
+            }
+            let draw_buffers = if write_id {
+                if owner_output { DRAW_BUFFERS_FULL_SURFACE }
+                else { if normal_output { DRAW_BUFFERS_COLOR_ID_MATERIAL_NORMAL }
+                else { if material_output { DRAW_BUFFERS_COLOR_ID_MATERIAL }
+                else { DRAW_BUFFERS_COLOR_AND_ID } } }
+            } else { if write_normal { DRAW_BUFFERS_COLOR_MATERIAL_AND_NORMAL }
+                else { if write_material { DRAW_BUFFERS_COLOR_AND_MATERIAL } else { DRAW_BUFFERS_COLOR_ONLY } } }
+            draw_buffers = match outputs {
+                WorldSurfaceOutputs::ColorAndNormal => 0b01001,
+                WorldSurfaceOutputs::ReceiverMetadata => if owner_output && world_surface_owner_canvas != null { 0b10110 } else { 0b00110 },
+                _ => draw_buffers,
+            }
+            if !write_id_set || draw_buffers != current_draw_buffers {
+                stone_set_draw_buffer_mask(draw_buffers)
+                current_draw_buffers = draw_buffers
+                write_id_set = true
+            }
+        }
+
+        if let custom_draw = batch.custom_draw {
+            if Ui {
+                if UI_SUBMISSION_PROBE_ON {
+                    UI_SUBMISSION_PROBE_BATCH_HOOK.unwrap()(key, batch, sprite_batch_shader, Extent)
+                }
+                // A preceding pipeline must not leak into custom UI draws.
+                if active_shader != sprite_batch_shader {
+                    set_shader(sprite_batch_shader)
+                    setup_ui_pass_shader(sprite_batch_shader, Extent, Convention)
+                }
+            }
+            let target = CURRENT_CANVAS_HANDLE
+            if Ui { batch.custom_draw.unwrap()() } else { custom_draw() }
+            restore_after_custom_draw(target, if Ui { DepthMode::Off } else { batch.depth }, batch.blend)
+            if World && mrt_id_attached { write_id_set = false }
+            active_shader = ""
+            if Ui && UI_SUBMISSION_PROBE_ON {
+                stone_ui_probe_custom_consumed()
+                stone_ui_probe_end_operation()
+            }
+            continue
+        }
+        if batch.count == 0 { continue }
+
+        let want = if batch.pipeline != null { batch.pipeline.shader_name } else { sprite_batch_shader }
+        if (!Ui || !UI_SUBMISSION_PROBE_WINDOWLESS) && want != active_shader {
+            set_shader(want)
+            if World { setup_world_pass_shader(want, Offset, Scale, YBounds) }
+            else if Ui { setup_ui_pass_shader(want, Extent, Convention) }
+            else { setup_draw_list_shader(want, List, YBounds) }
+            active_shader = want
+        }
+        if Ui {
+            if UI_SUBMISSION_PROBE_ON { UI_SUBMISSION_PROBE_BATCH_HOOK.unwrap()(key, batch, want, Extent) }
+            if UI_SUBMISSION_PROBE_WINDOWLESS {
+                draw_batch_mesh(batch)
+                stone_ui_probe_end_operation()
+                continue
+            }
+            profile_begin("screen.ui_flush.render_batches.uniforms")
+        }
+        apply_batch_uniforms(active_shader, batch)
+        if Ui {
+            profile_end("screen.ui_flush.render_batches.uniforms")
+            profile_begin("screen.ui_flush.render_batches.normal")
+        }
+        bind_batch_samplers(active_shader, batch)
+        if Ui {
+            profile_end("screen.ui_flush.render_batches.normal")
+            profile_begin("screen.ui_flush.render_batches.mesh")
+        }
+        if World {
+            // Upload the world fragment block per batch so material state
+            // cannot leak across draws. Custom pipelines may omit the block.
+            set_uniform_block_if_present(active_shader, sprite_frag_uniforms(
+                batch.surface != null,
+                sampled_color_srgb(batch.texture), batch.sampling == TextureFilter::Linear))
+            if UNIFORM_BLOCK_DUMP_ON { stone_mesh_capture_arm(AfterScene) }
+        }
+
+        draw_batch_mesh(batch)
+        if World && UNIFORM_BLOCK_DUMP_ON {
+            UNIFORM_BLOCK_DUMP_MESH_JSON = stone_mesh_capture_finish_json()
+            UNIFORM_BLOCK_DUMP_DRAW_HOOK.unwrap()(key, batch, active_shader, AfterScene)
+        }
+        release_batch_samplers(active_shader, batch)
+        if Ui {
+            if UI_SUBMISSION_PROBE_ON { stone_ui_probe_end_operation() }
+            profile_end("screen.ui_flush.render_batches.mesh")
+        }
+    }
+
+    if World {
+        if let capture = UNIFORM_BLOCK_DUMP_STAGE_HOOK {
+            if let canvas = screen_canvas {
+                capture(if AfterScene { "late_end" } else { "main_end" }, canvas)
+            }
+        }
+    }
+    if Ui { profile_end("screen.ui_flush.render_batches.loop") }
+    if !Ui && current_depth != DepthMode::Off { unset_depth_mode() }
+    if current_blend != entry_blend { set_blend_mode(entry_blend) }
+    if !Ui && active_shader != sprite_batch_shader { set_shader(sprite_batch_shader) }
+    // Turn off this pass's ID attachment for scene and composite draws.
+    if World && mrt_id_attached { stone_set_draw_buffer_mask(DRAW_BUFFERS_COLOR_ONLY) }
+    if !Ui || !UI_SUBMISSION_PROBE_WINDOWLESS { reset_camera() }
+}
+
 pub fn render_batches(after_scene: bool = false) {
     let previous_canvas = CURRENT_CANVAS_HANDLE
     RENDER_BATCH_FLUSHES = RENDER_BATCH_FLUSHES + 1
@@ -1610,209 +1795,10 @@ pub fn render_batches(after_scene: bool = false) {
             if let canvas = screen_canvas { capture(if after_scene { "late_begin" } else { "main_begin" }, canvas) }
         }
 
-        // R6 (MRT): the id attachment (draw buffer 1 = visible_id_canvas) is
-        // written by overwrite, never blended. R32I makes that automatic --
-        // blending is ignored on integer color buffers per spec -- so no
-        // per-attachment blend state exists here (the old float path needed
-        // GLES-3.2-only glDisablei; picker_blend_id_overwrite still guards
-        // the invariant end-to-end).
-
-        // Tracks whether draw buffer 1 (id attachment) is in the draw-buffer
-        // list, mirroring current_depth/current_blend: re-issued only when the
-        // needed value changes, but always set for the first batch (the entry
-        // GL state is assumed unknown), so it is correct before any custom_draw.
-        let current_draw_buffers = 0
-        let write_id_set = false
-
         let yb = camera_y_bounds()
         setup_world_pass_shader(sprite_batch_shader, cam_offset, cam_scale, yb)
-
-        let active_shader = sprite_batch_shader
-        let current_depth = DepthMode::Off
-
-        let entry_blend = CURRENT_BLEND
-        let current_blend = entry_blend
-
-        unset_depth_mode()
-
-        for key in sorted_keys {
-            let batch = RENDER_BATCHES.get(key)
-
-            if batch == null {
-                d("Render batch for key {key} is null, skipping render.")
-                continue
-            }
-
-            let batch = batch
-            let late = if let pipe = batch.pipeline { pipe.after_scene } else { false }
-            if late != after_scene {
-                if late && (batch.count > 0 || batch.custom_draw != null) { POST_SCENE_BATCHES_PENDING = true }
-                continue
-            }
-
-            if ENGINE.show_pipeline_inspector {
-                pipeline_inspector_record_batch(batch)
-            }
-
-            if batch.depth != current_depth {
-                apply_depth_mode(batch.depth)
-                current_depth = batch.depth
-            }
-
-            if batch.blend != current_blend {
-                // Blending is ignored on integer (R32I) color buffers per spec, so this cannot corrupt the id attachment.
-                set_blend_mode(batch.blend)
-                current_blend = batch.blend
-            }
-
-            if mrt_id_attached {
-                let outputs = batch.surface_outputs
-                let overlay = outputs == WorldSurfaceOutputs::ColorAndMaterial
-                    || outputs == WorldSurfaceOutputs::ColorMaterialAndNormal
-                let write_material = !after_scene && batch.custom_draw == null && overlay
-                let receiver = outputs == WorldSurfaceOutputs::Receiver
-                    || outputs == WorldSurfaceOutputs::ReceiverMetadata
-                    || outputs == WorldSurfaceOutputs::ColorAndNormal
-                let write_id = !after_scene && (batch.custom_draw == null || batch.pipeline != null)
-                    && !overlay && (depth_writes(batch.depth) || receiver)
-                    && sprite_pipeline_has_id_output(batch.pipeline)
-                if !after_scene && receiver && !write_id {
-                    error("surface-ID writer needs an integer fragment output at location 1")
-                }
-                let write_normal = write_material && outputs == WorldSurfaceOutputs::ColorMaterialAndNormal
-                if write_material {
-                    assert(sprite_pipeline_has_material_output(batch.pipeline),
-                        "surface-material writer needs a material output at location 2")
-                    let _ = ensure_world_material_canvas()
-                }
-                if write_normal {
-                    assert(sprite_pipeline_has_output(batch.pipeline,3,3),
-                        "surface-normal writer needs a normal output at location 3")
-                    let _ = ensure_world_normal_canvas()
-                }
-                if write_id && (batch.count > 0 || batch.custom_draw != null) { outline_ids_written = true }
-                let material_output = sprite_pipeline_has_material_output(batch.pipeline)
-                if material_output && write_id { let _ = ensure_world_material_canvas() }
-                let normal_output = sprite_pipeline_has_output(batch.pipeline,3,3)
-                if normal_output && write_id {
-                    assert(material_output,"world normal writer also requires material output")
-                    let _ = ensure_world_normal_canvas()
-                }
-                let owner_output = sprite_pipeline_has_output(batch.pipeline,4,4)
-                if owner_output && write_id {
-                    assert(normal_output,"surface owner writer requires normal and material outputs")
-                    let _ = ensure_world_surface_owner_canvas()
-                }
-                let draw_buffers = if write_id {
-                    if owner_output { DRAW_BUFFERS_FULL_SURFACE }
-                    else { if normal_output { DRAW_BUFFERS_COLOR_ID_MATERIAL_NORMAL }
-                    else { if material_output { DRAW_BUFFERS_COLOR_ID_MATERIAL }
-                    else { DRAW_BUFFERS_COLOR_AND_ID } } }
-                } else { if write_normal { DRAW_BUFFERS_COLOR_MATERIAL_AND_NORMAL }
-                    else { if write_material { DRAW_BUFFERS_COLOR_AND_MATERIAL } else { DRAW_BUFFERS_COLOR_ONLY } } }
-                draw_buffers = match outputs {
-                    WorldSurfaceOutputs::ColorAndNormal => 0b01001,
-                    WorldSurfaceOutputs::ReceiverMetadata => if owner_output && world_surface_owner_canvas != null { 0b10110 } else { 0b00110 },
-                    _ => draw_buffers,
-                }
-                if !write_id_set || draw_buffers != current_draw_buffers {
-                    stone_set_draw_buffer_mask(draw_buffers)
-                    current_draw_buffers = draw_buffers
-                    write_id_set = true
-                }
-            }
-
-            if batch.custom_draw != null {
-                let target = CURRENT_CANVAS_HANDLE
-                (batch.custom_draw)()
-                restore_after_custom_draw(target, batch.depth, batch.blend)
-                // A custom_draw closure runs arbitrary GL and may change tracked
-                // state out-of-band. Invalidate the trackers so the next batch
-                // re-asserts from a known state -- same "entry GL state unknown"
-                // logic as the first-batch guard above. Two trackers:
-                //  - the draw-buffer mask (stone_set_draw_buffer_mask is public):
-                //    without the reset a following batch whose intended list
-                //    matches the stale cached value skips the re-issue and
-                //    draws with whatever list the closure left active --
-                //    id 0 stomped over a visible entity's id
-                //    (picker_custom_draw_mask_desync).
-                //  - the bound shader: a custom_draw's own with_shader ends in
-                //    unset_shader (CURRENT_SHADER = none), but active_shader still
-                //    names sprite_batch, so the next plain batch's want==active
-                //    guard skips the set_shader re-bind. Native stone_draw_mesh
-                //    then skips the draw because no shader is bound
-                //    (world_shader_after_custom_draw).
-                if mrt_id_attached { write_id_set = false }
-                active_shader = ""
-                continue
-            }
-
-            if batch.count == 0 { continue }
-
-            let want = if batch.pipeline != null {
-                batch.pipeline.shader_name
-            } else {
-                sprite_batch_shader
-            }
-            if want != active_shader {
-                set_shader(want)
-                // Uniforms are per-program GL state: the incoming
-                // program needs this frame's world setup too.
-                setup_world_pass_shader(want, cam_offset, cam_scale, yb)
-                active_shader = want
-            }
-
-            apply_batch_uniforms(active_shader, batch)
-
-            bind_batch_samplers(active_shader, batch)
-
-            // The whole fragment block, per batch. It is set WHOLE rather than
-            // per-member: the frame-scope lighting values and the per-batch
-            // normal/fullbright bits reach the GPU in one upload, which is also
-            // what stops a prior batch's value leaking into the next one -- the
-            // reason the by-name sets had to be explicit every batch.
-            // A custom pipeline declares its own group (a bolt effect has
-            // BoltFragU), so it has no block of THIS layout and wants no upload.
-            // Asking first is the difference between that normal state and the
-            // set-then-draw caller the miss log is actually for.
-            set_uniform_block_if_present(active_shader, sprite_frag_uniforms(
-                batch.surface != null,
-                sampled_color_srgb(batch.texture), batch.sampling == TextureFilter::Linear))
-
-            if UNIFORM_BLOCK_DUMP_ON { stone_mesh_capture_arm(after_scene) }
-
-            draw_batch_mesh(batch)
-            if UNIFORM_BLOCK_DUMP_ON {
-                UNIFORM_BLOCK_DUMP_MESH_JSON = stone_mesh_capture_finish_json()
-                UNIFORM_BLOCK_DUMP_DRAW_HOOK.unwrap()(key, batch, active_shader, after_scene)
-            }
-            release_batch_samplers(active_shader, batch)
-        }
-
-        if let capture = UNIFORM_BLOCK_DUMP_STAGE_HOOK {
-            if let canvas = screen_canvas { capture(if after_scene { "late_end" } else { "main_end" }, canvas) }
-        }
-        if current_depth != DepthMode::Off {
-            unset_depth_mode()
-        }
-
-        if current_blend != entry_blend {
-            set_blend_mode(entry_blend)
-        }
-
-        if active_shader != sprite_batch_shader {
-            set_shader(sprite_batch_shader)
-        }
-
-        // R6: restore per-draw-buffer-1 GL state (global, not FBO-bound) so it
-        // can't leak to other passes; mask back on so a future MRT clear works.
-        // All no-ops when the MRT attach failed (nothing was toggled).
-        if mrt_id_attached {
-            // Back to color-only so later scene/composite passes into screen_canvas never write the id.
-            stone_set_draw_buffer_mask(DRAW_BUFFERS_COLOR_ONLY)
-        }
-
-        reset_camera()
+        flush_batch_keys(RENDER_BATCHES, sorted_keys, true, false, after_scene,
+            cam_offset, cam_scale, yb, null, TargetConvention::Direct, world)
     }
     end_shader()
 
@@ -2106,79 +2092,9 @@ fn render_ui_batches_gl(
     profile_begin("screen.ui_flush.render_batches.setup")
     if !UI_SUBMISSION_PROBE_WINDOWLESS { setup_ui_pass_shader(sprite_batch_shader, projection_extent, convention) }
     profile_end("screen.ui_flush.render_batches.setup")
-    let active_shader = sprite_batch_shader
-
-    let entry_blend = CURRENT_BLEND
-    let current_blend = entry_blend
-
-    profile_begin("screen.ui_flush.render_batches.loop")
-    for key in sorted_keys {
-        let batch = pool.get(key) ?? continue
-        let batch = batch
-
-        if !UI_SUBMISSION_PROBE_WINDOWLESS && batch.blend != current_blend {
-            set_blend_mode(batch.blend)
-            current_blend = batch.blend
-        }
-
-        // Restore the default program first so a preceding pipeline batch cannot leak into the closure.
-        if batch.custom_draw != null {
-            if UI_SUBMISSION_PROBE_ON { UI_SUBMISSION_PROBE_BATCH_HOOK.unwrap()(key, batch, sprite_batch_shader, projection_extent) }
-            if active_shader != sprite_batch_shader {
-                set_shader(sprite_batch_shader)
-                setup_ui_pass_shader(sprite_batch_shader, projection_extent, convention)
-                active_shader = sprite_batch_shader
-            }
-            let target = CURRENT_CANVAS_HANDLE
-            batch.custom_draw.unwrap()()
-            restore_after_custom_draw(target, DepthMode::Off, batch.blend)
-            active_shader = ""
-            if UI_SUBMISSION_PROBE_ON { stone_ui_probe_custom_consumed(); stone_ui_probe_end_operation() }
-            continue
-        }
-
-        if batch.count == 0 { continue }
-
-        let want = if batch.pipeline != null {
-            batch.pipeline.shader_name
-        } else {
-            sprite_batch_shader
-        }
-        if !UI_SUBMISSION_PROBE_WINDOWLESS && want != active_shader {
-            set_shader(want)
-            setup_ui_pass_shader(want, projection_extent, convention)
-            active_shader = want
-        }
-
-        if UI_SUBMISSION_PROBE_ON { UI_SUBMISSION_PROBE_BATCH_HOOK.unwrap()(key, batch, want, projection_extent) }
-        if UI_SUBMISSION_PROBE_WINDOWLESS {
-            draw_batch_mesh(batch)
-            stone_ui_probe_end_operation()
-            continue
-        }
-
-        profile_begin("screen.ui_flush.render_batches.uniforms")
-        apply_batch_uniforms(active_shader, batch)
-        profile_end("screen.ui_flush.render_batches.uniforms")
-        profile_begin("screen.ui_flush.render_batches.normal")
-        bind_batch_samplers(active_shader, batch)
-        profile_end("screen.ui_flush.render_batches.normal")
-        profile_begin("screen.ui_flush.render_batches.mesh")
-        draw_batch_mesh(batch)
-        release_batch_samplers(active_shader, batch)
-        if UI_SUBMISSION_PROBE_ON { stone_ui_probe_end_operation() }
-        profile_end("screen.ui_flush.render_batches.mesh")
-    }
-    profile_end("screen.ui_flush.render_batches.loop")
-
-    if current_blend != entry_blend {
-        set_blend_mode(entry_blend)
-    }
-
-    if !UI_SUBMISSION_PROBE_WINDOWLESS {
-        reset_camera()
-        end_shader()
-    }
+    flush_batch_keys(pool, sorted_keys, false, true, false,
+        v(), 1.0, v(), projection_extent, convention, screen)
+    if !UI_SUBMISSION_PROBE_WINDOWLESS { end_shader() }
 }
 
 pub fn render_ui_batches(

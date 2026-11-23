@@ -94,14 +94,13 @@ pub fn draw_list_new(
 pub fn draw_list_flush(dl: DrawList) {
     if !pool_has_pending(dl.batches) { return }
 
-    let body = () => {
+    if let canvas = dl.canvas {
+        let prior = CURRENT_CANVAS_HANDLE
+        set_canvas(canvas)
         draw_list_flush_body(dl)
-    }
-
-    if dl.canvas != null {
-        with_canvas(dl.canvas, body)
+        set_canvas_handle(prior)
     } else {
-        body()
+        draw_list_flush_body(dl)
     }
 }
 
@@ -151,72 +150,12 @@ fn draw_list_flush_body(dl: DrawList) {
     static sort_keys: [string] = []
     let keys = dl.batches.keys_into(sort_keys)
 
-    with_shader(
-        sprite_batch_shader,
-        () => {
-            let yb = camera_y_bounds()
-            setup_draw_list_shader(sprite_batch_shader, dl, yb)
-
-            let active_shader = sprite_batch_shader
-            let current_depth = DepthMode::Off
-            let entry_blend = CURRENT_BLEND
-            let current_blend = entry_blend
-            unset_depth_mode()
-
-            for key in keys {
-                let batch_opt = dl.batches.get(key) ?? continue
-                let batch = batch_opt
-
-                if batch.depth != current_depth {
-                    apply_depth_mode(batch.depth)
-                    current_depth = batch.depth
-                }
-
-                if batch.blend != current_blend {
-                    set_blend_mode(batch.blend)
-                    current_blend = batch.blend
-                }
-
-
-                if batch.custom_draw != null {
-                    let target = CURRENT_CANVAS_HANDLE
-                    (batch.custom_draw)()
-                    restore_after_custom_draw(target, batch.depth, batch.blend)
-                    active_shader = ""
-                    continue
-                }
-
-                if batch.count == 0 { continue }
-
-                let want = if batch.pipeline != null {
-                    batch.pipeline.shader_name
-                } else {
-                    sprite_batch_shader
-                }
-                if want != active_shader {
-                    set_shader(want)
-                    setup_draw_list_shader(want, dl, yb)
-                    active_shader = want
-                }
-
-                apply_batch_uniforms(active_shader, batch)
-                bind_batch_samplers(active_shader, batch)
-
-                draw_batch_mesh(batch)
-                release_batch_samplers(active_shader, batch)
-            }
-
-            if current_depth != DepthMode::Off { unset_depth_mode() }
-
-            if current_blend != entry_blend { set_blend_mode(entry_blend) }
-
-            if active_shader != sprite_batch_shader {
-                set_shader(sprite_batch_shader)
-            }
-
-            reset_camera()
-        }
-    )
+    set_shader(sprite_batch_shader)
+    let yb = camera_y_bounds()
+    setup_draw_list_shader(sprite_batch_shader, dl, yb)
+    flush_batch_keys(dl.batches, keys, false, false, false,
+        v(), 1.0, yb, null, TargetConvention::Direct, dl)
+    end_shader()
 }
 
 pub fn draw_list_clear(dl: DrawList) {
