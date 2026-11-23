@@ -1347,57 +1347,75 @@ fn enum_cdata_metatypes(ws: &Workspace, syms: &mut Vec<String>) -> String {
              \x20   return {eq}\n  end,\n"
         ));
         let mut ts = String::from("  __tostring = function(v)\n    local t = v.__tag\n");
-        if let Some(eid) = ws.nominals.enum_id(name) {
-            use bone_semantic::hir::VariantPayload;
-            let ed = &ws.modules[eid.module.index()].enums[eid.def];
-            for (i, var) in ed.variants.iter().enumerate() {
-                let vn = var.name;
-                let shown = display_name(name.as_str());
-                let open = format!("{shown}::{vn} {{ ");
-                let parts = match &var.payload {
-                    VariantPayload::Tuple(tys) if !tys.is_empty() => display_record(
-                        &open,
-                        (0..tys.len()).map(|j| {
-                            (
-                                format!("[{}] = ", j + 1),
-                                vec![LuaDisplayPart::Expr(format!("tostring(v._{j})"))],
-                            )
-                        }),
-                        " }",
-                    ),
-                    VariantPayload::Record(fields) if !fields.is_empty() => {
-                        let mut fns: Vec<ustr::Ustr> = fields.iter().map(|f| f.name).collect();
-                        fns.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-                        display_record(
-                            &open,
-                            fns.iter().map(|f| {
-                                (
-                                    format!("{f} = "),
-                                    vec![LuaDisplayPart::Expr(format!("tostring(v._{f})"))],
-                                )
-                            }),
-                            " }",
-                        )
-                    }
-                    _ => vec![LuaDisplayPart::literal(&format!("{shown}::{vn}"))], // unit (or empty tuple/record)
-                };
-                match display_expr(&parts) {
-                    Some(render) => {
-                        ts.push_str(&format!("    if t == {i} then return {render} end\n"))
-                    }
-                    None => {
-                        ts.push_str(&format!("    if t == {i} then\n"));
-                        ts.push_str(&display_return(&parts, "      "));
-                        ts.push_str("    end\n");
-                    }
-                }
-            }
-        }
+        ts.push_str(&enum_variant_display(
+            ws,
+            name,
+            |i, _| format!("t == {i}"),
+            |slot| match slot {
+                EnumSlot::Tuple(j) => format!("v._{j}"),
+                EnumSlot::Field(f) => format!("v._{f}"),
+            },
+        ));
         ts.push_str("    return \"?\"\n  end,\n}\n");
         out.push_str(&ts);
         syms.push(sym.to_string());
     }
     out
+}
+
+enum EnumSlot<'a> {
+    Tuple(usize),
+    Field(&'a str),
+}
+
+/// One `if <cond> then return <display> end` per variant of `name`; `slot`
+/// spells how a payload slot is read from `v` (cdata `_0`, box `[1]`).
+fn enum_variant_display(
+    ws: &Workspace,
+    name: ustr::Ustr,
+    cond: impl Fn(usize, &str) -> String,
+    slot: impl Fn(EnumSlot) -> String,
+) -> String {
+    use bone_semantic::hir::VariantPayload;
+    let mut ts = String::new();
+    let Some(eid) = ws.nominals.enum_id(name) else {
+        return ts;
+    };
+    let ed = &ws.modules[eid.module.index()].enums[eid.def];
+    for (i, var) in ed.variants.iter().enumerate() {
+        let vn = var.name;
+        let shown = display_name(name.as_str());
+        let open = format!("{shown}::{vn} {{ ");
+        let read = |s: EnumSlot| vec![LuaDisplayPart::Expr(format!("tostring({})", slot(s)))];
+        let parts = match &var.payload {
+            VariantPayload::Tuple(tys) if !tys.is_empty() => display_record(
+                &open,
+                (0..tys.len()).map(|j| (format!("[{}] = ", j + 1), read(EnumSlot::Tuple(j)))),
+                " }",
+            ),
+            VariantPayload::Record(fields) if !fields.is_empty() => {
+                let mut fns: Vec<ustr::Ustr> = fields.iter().map(|f| f.name).collect();
+                fns.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+                display_record(
+                    &open,
+                    fns.iter()
+                        .map(|f| (format!("{f} = "), read(EnumSlot::Field(f.as_str())))),
+                    " }",
+                )
+            }
+            _ => vec![LuaDisplayPart::literal(&format!("{shown}::{vn}"))], // unit (or empty tuple/record)
+        };
+        let cond = cond(i, vn.as_str());
+        match display_expr(&parts) {
+            Some(render) => ts.push_str(&format!("    if {cond} then return {render} end\n")),
+            None => {
+                ts.push_str(&format!("    if {cond} then\n"));
+                ts.push_str(&display_return(&parts, "      "));
+                ts.push_str("    end\n");
+            }
+        }
+    }
+    ts
 }
 
 /// Metatypes seal once, so each trampoline delegates to the mutable
@@ -1587,6 +1605,19 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
                     .all(|v| matches!(v.payload, VariantPayload::Unit));
             if all_unit {
             } else {
+                let sym = skull_mir::mangle::type_symbol(ws, e.name);
+                out.push_str(&format!(
+                    "__rock_box_mts[\"{sym}\"].__tostring = function(v)\n    local t = v.__variant\n{}    return \"?\"\nend\n",
+                    enum_variant_display(
+                        ws,
+                        e.name,
+                        |_, var| format!("t == \"{var}\""),
+                        |slot| match slot {
+                            EnumSlot::Tuple(j) => format!("v[{}]", j + 1),
+                            EnumSlot::Field(f) => lua_key_read("v", f),
+                        },
+                    ),
+                ));
                 let mut units = Vec::new();
                 for v in e.variants.iter() {
                     if matches!(v.payload, VariantPayload::Unit) {

@@ -1,0 +1,21 @@
+// A boxed enum whose payload is GC-typed prints through `any` as its cdata
+// siblings do: `Enum::Variant { slot = value }`, never a table address.
+enum FeEv { Quiet, Say(string), Pair(int, string), Named { who: string, n: int } }
+
+fn fe_show(x: any) { print(x) }
+
+@test(output = "FeEv::Say {{ [1] = s }}\nFeEv::Quiet\nFeEv::Pair {{ [1] = 1, [2] = x }}\nFeEv::Named {{ n = 2, who = q }}")
+fn flat_enum_prints_through_any() {
+    fe_show(FeEv::Say("s"))
+    fe_show(FeEv::Quiet)
+    fe_show(FeEv::Pair(1, "x"))
+    fe_show(FeEv::Named { who: "q", n: 2 })
+}
+
+nobox value FeStep { ev: FeEv, n: int }
+value FeTrail { name: string, step: FeStep }
+
+@test(output = "FeTrail {{ name: t, step: FeStep {{ ev: FeEv::Say {{ [1] = s }}, n: 3 }} }}")
+fn flat_enum_in_value_leaves_prints_through_any() {
+    fe_show(FeTrail { name: "t", step: FeStep { ev: FeEv::Say("s"), n: 3 } })
+}

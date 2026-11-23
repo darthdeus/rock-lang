@@ -180,8 +180,9 @@ pub(super) fn emit_inspect_ty(
     )
 }
 
-/// Per-enum `__rock_inspect_ty` renderers for scalar-tag-box enums. The box carries no variant
-/// name, so it is baked per tag to match luajit's cdata `__tostring`.
+/// Per-enum `__rock_inspect_ty` renderers for scalar-tag-box enums, which carry no variant
+/// name, so it is baked per tag to match luajit's cdata `__tostring`; and `__rock_tostring_ty`
+/// renderers for payload enums boxed with a variant name, matching the box `__tostring`.
 pub(super) fn emit_inspect_cdata_enums(ws: &Workspace) -> String {
     use bone_core::hir::VariantPayload;
 
@@ -192,34 +193,55 @@ pub(super) fn emit_inspect_cdata_enums(ws: &Workspace) -> String {
     });
     let mut out = String::new();
     for name in names {
-        if skull_mir::lower::EnumPlan::for_name(ws, name)
+        let cdata = skull_mir::lower::EnumPlan::for_name(ws, name)
             .and_then(|plan| plan.cdata().cloned())
-            .is_none()
-        {
-            continue;
-        }
+            .is_some();
         let Some(eid) = ws.nominals.enum_id(name) else {
             continue;
         };
         let ed = &ws.modules[eid.module.index()].enums[eid.def];
+        if !cdata
+            && ed
+                .variants
+                .iter()
+                .all(|v| matches!(v.payload, VariantPayload::Unit))
+        {
+            continue;
+        }
         if out.is_empty() {
             out.push_str("var __rock_inspect_ty = __rock_inspect_ty || {};\n");
             out.push_str("var __rock_tostring_ty = __rock_tostring_ty || {};\n");
         }
-        let mut body = String::from("var g = t.__tag; ");
+        let mut body = format!("var g = t.{}; ", if cdata { "__tag" } else { "__variant" });
         for (tag, variant) in ed.variants.iter().enumerate() {
             let display_name = bone_core::modules::display_name(name.as_str());
             let head = format!("{display_name}::{}", variant.name);
             let slots: Vec<(String, String)> = match &variant.payload {
                 VariantPayload::Tuple(types) => (0..types.len())
-                    .map(|j| (format!("[{}]", j + 1), format!("_{j}")))
+                    .map(|j| {
+                        let slot = if cdata {
+                            format!("_{j}")
+                        } else {
+                            j.to_string()
+                        };
+                        (format!("[{}]", j + 1), slot)
+                    })
                     .collect(),
                 VariantPayload::Record(fields) => {
                     let mut names: Vec<ustr::Ustr> = fields.iter().map(|f| f.name).collect();
                     names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
                     names
                         .iter()
-                        .map(|f| (f.to_string(), format!("_{f}")))
+                        .map(|f| {
+                            (
+                                f.to_string(),
+                                if cdata {
+                                    format!("_{f}")
+                                } else {
+                                    f.to_string()
+                                },
+                            )
+                        })
                         .collect()
                 }
                 _ => Vec::new(),
@@ -236,16 +258,27 @@ pub(super) fn emit_inspect_cdata_enums(ws: &Workspace) -> String {
                 parts.push(js_string_lit(" }"));
                 parts.join(" + ")
             };
-            body.push_str(&format!("if (g === {tag}) return {render}; "));
+            let want = if cdata {
+                tag.to_string()
+            } else {
+                js_string_lit(variant.name.as_str())
+            };
+            body.push_str(&format!("if (g === {want}) return {render}; "));
         }
         body.push_str("return \"?\";");
         let key = js_string_lit(
             skull_mir::mangle::type_symbol(ws, ustr::Ustr::from(name.as_str())).as_str(),
         );
-        out.push_str(&format!(
-            "__rock_inspect_ty[{key}] = function(t) {{ {body} }};\n\
-             __rock_tostring_ty[{key}] = __rock_inspect_ty[{key}];\n"
-        ));
+        if cdata {
+            out.push_str(&format!(
+                "__rock_inspect_ty[{key}] = function(t) {{ {body} }};\n\
+                 __rock_tostring_ty[{key}] = __rock_inspect_ty[{key}];\n"
+            ));
+        } else {
+            out.push_str(&format!(
+                "__rock_tostring_ty[{key}] = function(t) {{ {body} }};\n"
+            ));
+        }
     }
     out
 }
