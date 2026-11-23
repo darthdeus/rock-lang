@@ -1641,13 +1641,17 @@ impl<'a> Builder<'a> {
         }
         // A flattened enum field writes its tag and payload slots on the parent,
         // with no nested box.
-        if let Some(shape) = embed_plan.and_then(|p| p.flat_shape()) {
+        if let Some(shape) = embed_plan.as_ref().and_then(|p| p.flat_shape()) {
             let cells = self.lower_flat_value(&shape, value)?;
             self.store_flat_cells(b, key, cells);
             return Ok(());
         }
         if !self.scx.values_first_class
-            && let Some(child) = self.value_struct_of(target)
+            && let Some(child) = self.value_struct_of(target).or_else(|| {
+                let plan = embed_plan.as_ref()?;
+                let child = plan.direct_child()?;
+                (!plan.nullable() && self.is_nobox_struct(child)).then_some(child)
+            })
         {
             let native_owner = if key == field
                 && self.scx.target == bone_core::hir::FnBackend::Lua

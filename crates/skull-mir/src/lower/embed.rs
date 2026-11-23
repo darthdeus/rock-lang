@@ -71,6 +71,8 @@ impl<'a> Builder<'a> {
         let mut physical = (base, field, None, false);
         let guarded = guards.is_some();
         let mut guard_receiver = guarded;
+        let mut guard_owner = guarded;
+        let mut guard_end = 1;
         let mut presence = Vec::new();
         loop {
             let (owner, child_field, safe) = match self.body.expr_arena[cur] {
@@ -88,6 +90,9 @@ impl<'a> Builder<'a> {
             else {
                 break;
             };
+            if guarded && self.ws.nominals.struct_id(sname).is_none() {
+                break;
+            }
             if !guarded
                 && self.scx.target == bone_core::hir::FnBackend::Lua
                 && !self.scx.values_first_class
@@ -146,13 +151,12 @@ impl<'a> Builder<'a> {
                         projected,
                         false,
                     );
-                    if guard_receiver && plan.nullable() {
-                        presence.push(parts.len());
-                    }
+                    guard_owner = safe;
+                    guard_end = parts.len() + 1;
                 }
             }
-            if guarded && physical.0 != owner {
-                break;
+            if guard_receiver && plan.nullable() {
+                presence.push(parts.len());
             }
             guard_receiver = safe;
             parts.push(child_field);
@@ -161,11 +165,11 @@ impl<'a> Builder<'a> {
         if let Some(guards) = guards {
             // A boxed receiver uses nil, while an embedded child uses its
             // presence bit in the same holder as the selected field.
-            if guard_receiver {
+            if guard_owner {
                 guards.push(None);
             }
-            for index in presence.into_iter().rev() {
-                let key = parts[index..]
+            for index in presence.into_iter().rev().filter(|&i| i < guard_end) {
+                let key = parts[index..guard_end]
                     .iter()
                     .rev()
                     .map(|p| p.as_str())

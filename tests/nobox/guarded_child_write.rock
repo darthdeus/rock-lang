@@ -1,0 +1,43 @@
+value Leaf { a: int, b: int }
+nobox value Child { k: int, l: Leaf }
+value ValueOwner { child: Child, n: int }
+struct RecordOwner { child: Child? }
+struct Wrapper { owner: RecordOwner }
+
+global calls: int = 0
+
+fn next_a() -> int {
+    calls += 1
+    return 9
+}
+
+fn child(n: int) -> Child {
+    return Child { k: n, l: Leaf { a: n + 1, b: n + 2 } }
+}
+
+fn write_value(o: ValueOwner?) -> int {
+    o?.child = child(10)
+    return o?.child?.l?.a ?? -1
+}
+
+@test(output = "11 -1")
+fn replace_nobox_through_nullable_value() {
+    let a = write_value(ValueOwner { child: child(1), n: 7 })
+    let b = write_value(null)
+    print("{a} {b}")
+}
+
+fn write_record(w: Wrapper?) {
+    w?.owner?.child?.l?.a = next_a()
+}
+
+@test(output = "9 3 1 true 1")
+fn guard_inline_leaf_without_materializing_it() {
+    let o = RecordOwner { child: child(1) }
+    let n = RecordOwner { child: null }
+    calls = 0
+    write_record(Wrapper { owner: o })
+    write_record(Wrapper { owner: n })
+    write_record(null)
+    print("{o.child?.l?.a ?? -1} {o.child?.l?.b ?? -1} {o.child?.k ?? -1} {n.child == null} {calls}")
+}
