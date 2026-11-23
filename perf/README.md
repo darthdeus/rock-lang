@@ -250,6 +250,25 @@ Lua allocation is tracked to the Rock boundary. VM compiler and collector
 traffic have separate rows. Conflicting source candidates and PCs without
 compiler provenance appear as unknown.
 
+`--by-type` ranks the value types the compiler boxes implicitly instead:
+value and tuple boxes and the generated helpers that box a value, each
+split into its sites with the use of the boxed result. A generated helper is
+charged to its type declaration unless `--callers` names a run made with
+`runtime_pairs.py --bridge-callers`, which counts the helper's calls by
+calling line over the same window; the helper's bytes are then shared out
+among its callers. That run perturbs the counters, so it measures each arm once and
+compares nothing; make it from the same sources and build variables.
+`--nobox-check ROCK PROJECT` compiles the project once per type above
+`--min-bytes` (default 256 bytes per frame) with the declaration marked
+`nobox`, restores it, and reports whether the compiler accepts it or the
+first site that needs a box. A whole value stored to a global or field is
+marked as a store that could write its fields in place.
+
+```sh
+python3 perf/join_allocation_sites.py /tmp/runtime-aa/01-a --luajit "$ROCK_PERF_LUAJIT" \
+    --by-type --callers /tmp/callers/01-a --nobox-check "$(command -v rock)" game
+```
+
 ### Explaining a runtime change
 
 Collect a diagnostic pair with `runtime_pairs.py --explain`. It saves the

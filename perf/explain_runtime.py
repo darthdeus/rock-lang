@@ -54,7 +54,7 @@ def load(root, vm):
         chunk, first, line, pc, _, _ = sites[ident]
         if chunk == "main.lua":
             for mapping in (sources, census):
-                candidates = {source for source, _ in mapping.get((owner, line - first + 1), ())}
+                candidates = {source for source, *_ in mapping.get((owner, line - first + 1), ())}
                 if len(candidates) == 1:
                     return f"{owner} [{source_path(next(iter(candidates)))}]"
         return f"{owner}@{pc}"
@@ -82,7 +82,7 @@ def load(root, vm):
     compiler, compile_sites = Counter(), Counter()
     origins = Counter()
     totals = [0, 0]
-    for site, event, (source, kind), trace, phase, count, size in allocation_rows(
+    for site, event, (source, kind, *_), trace, phase, count, size in allocation_rows(
             vm, lua, (owners, lines), sites, counts, census, sources, sunk=True):
         if event in ALLOCATION_EVENTS:
             totals[0] += count

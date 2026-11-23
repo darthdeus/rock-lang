@@ -244,6 +244,10 @@ def measure(args, binary, env, name):
                "--output", str(output), *(f"--var={var}" for var in args.var)]
     env = env | {"PERF_MEASURE_FRAMES": str(args.frames)}
     allocation_sources = getattr(args, "allocation_sources", False)
+    if getattr(args, "bridge_callers", False):
+        env = env | {"ROCK_BRIDGE_CALLERS": str(output / "callers.tsv"),
+                     "ROCK_BRIDGE_WINDOW_START": str(gc_start),
+                     "ROCK_BRIDGE_WINDOW_LENGTH": str(gc_frames)}
     manifest = output / "manifest.txt"
     if allocation_sources:
         env["SKULL_ALLOCATION_REPORT"] = str(manifest)
@@ -319,6 +323,8 @@ def main():
                         help="use site capture to count requests by origin and report JIT traffic separately")
     parser.add_argument("--allocation-sources", action="store_true",
                         help="retain the compiler manifest for allocation-site ranking")
+    parser.add_argument("--bridge-callers", action="store_true",
+                        help="count generated value helper calls by caller (perturbs the counters)")
     parser.add_argument("--var", action="append", default=[], help="common compiler build var NAME=VALUE")
     parser.add_argument("--work", action="append", default=[], help="require equal work_units for this section")
     args = parser.parse_args()
@@ -355,6 +361,8 @@ def main():
         if ("SKULL_ALLOCATION_ACTIVATION" in os.environ
                 or os.environ.get("ROCK_SKULL_LINE_DIRECTIVES") == "1"):
             parser.error("--allocation-sources requires uninstrumented Lua with generated line numbers")
+    if args.bridge_callers and (args.timing or args.capture_sites):
+        parser.error("--bridge-callers requires a separate counter run without --capture-sites")
     if args.noise and not args.candidate:
         parser.error("--noise requires an A/B comparison")
     calibration = json.loads(args.noise.read_text()) if args.noise else None
@@ -381,6 +389,8 @@ def main():
             hook += "\n" + Path(__file__).with_name("measurement-churn.lua").read_text()
         if args.explain:
             hook = EXPLAIN_PROBE + hook
+        if args.bridge_callers:
+            hook = Path(__file__).with_name("bridge_callers.lua").read_text() + hook
         plan.update(fixed_work=args.fixed_work, capture_sites=args.capture_sites,
                     measurement_hook_sha256=hashlib.sha256(hook.encode()).hexdigest())
     if calibration and (not calibration["aa"] or calibration["plan"] != plan
@@ -405,6 +415,12 @@ def main():
     aa = args.candidate is None
     binaries = (args.base, args.candidate or args.base)
     references = {0: calibration["pairs"][0][0]["lua_sha256"]} if calibration else {}
+    if args.bridge_callers:
+        for arm in range(1 if aa else 2):
+            name = f"01-{'ab'[arm]}"
+            measure(args, binaries[arm], env, name)
+            print(args.out / name / "callers.tsv")
+        return
     pairs = []
     for pair in range(args.pairs):
         rows = [None, None]
