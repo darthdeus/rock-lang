@@ -152,7 +152,14 @@ struct Walk<'a, E> {
     visited: Vec<bool>,
     reaches_end: bool,
     loops: Vec<Idx<Block>>,
+    /// Open `if` arms around the block being printed.
+    depth: u32,
 }
+
+/// LuaJIT stops parsing at 200 syntax levels, so past this many open arms an
+/// arm that leaves is printed without nesting the rest of the body in the
+/// other arm. Shallower code keeps the nested shape.
+const FLAT_DEPTH: u32 = 100;
 
 fn index(block: Idx<Block>) -> usize {
     block.into_raw().into_u32() as usize
@@ -310,7 +317,43 @@ impl<E: PlacementEmit> Walk<'_, E> {
             }
             return Ok(());
         }
-        self.emit.condition(&mut ladder, cond, then_empty)?;
+        if self.depth >= FLAT_DEPTH {
+            let then_leaves = !then_empty && self.leaves(then_bb);
+            let else_leaves = !else_empty && self.leaves(else_bb);
+            // An arm that falls into the loop's next iteration leaves too, but
+            // only a spelled-out jump when nothing else would end the other arm.
+            let then_continues = then_empty && matches!(follow, Follow::Continue(_));
+            let else_continues = else_empty && matches!(follow, Follow::Continue(_));
+            let leave_then = then_leaves || (!else_leaves && then_continues);
+            if leave_then || else_leaves || else_continues {
+                let (leave, leave_empty, rest) = if leave_then {
+                    (then_bb, then_empty, else_bb)
+                } else {
+                    (else_bb, else_empty, then_bb)
+                };
+                self.emit.condition(&mut ladder, cond, !leave_then)?;
+                self.leave(leave, leave_empty, follow)?;
+                self.emit.end_ladder(ladder)?;
+                return self.branch_to(rest, follow);
+            }
+        }
+        self.depth += 1;
+        let printed = self.emit_arms(&mut ladder, cond, then_bb, else_bb, follow, then_empty);
+        self.depth -= 1;
+        printed?;
+        self.emit.end_ladder(ladder)
+    }
+
+    fn emit_arms(
+        &mut self,
+        ladder: &mut E::Ladder,
+        cond: Idx<Inst>,
+        then_bb: Idx<Block>,
+        else_bb: Idx<Block>,
+        follow: Follow,
+        then_empty: bool,
+    ) -> Result<(), E::Error> {
+        self.emit.condition(ladder, cond, then_empty)?;
         self.branch_to(if then_empty { else_bb } else { then_bb }, follow)?;
         if !then_empty {
             let mut remaining = else_bb;
@@ -319,17 +362,65 @@ impl<E: PlacementEmit> Walk<'_, E> {
                     && !self.falls_to(yes, follow)
                 {
                     self.visited[index(self.emit.thread(remaining))] = true;
-                    self.emit.condition(&mut ladder, cond, false)?;
+                    self.emit.condition(ladder, cond, false)?;
                     self.branch_to(yes, follow)?;
                     remaining = no;
                     continue;
                 }
-                self.emit.otherwise(&mut ladder)?;
+                self.emit.otherwise(ladder)?;
                 self.branch_to(remaining, follow)?;
                 break;
             }
         }
-        self.emit.end_ladder(ladder)
+        Ok(())
+    }
+
+    /// Prints `arm` ending in an explicit jump even where it would fall out of
+    /// the `if`.
+    fn leave(&mut self, arm: Idx<Block>, empty: bool, follow: Follow) -> Result<(), E::Error> {
+        let block = self.emit.thread(arm);
+        let Term::Goto(target) = self.func.blocks[block].term else {
+            return self.jump_to(arm, follow);
+        };
+        if empty || self.leaves_the_walk(block) {
+            return self.jump_to(arm, follow);
+        }
+        self.visited[index(block)] = true;
+        match self.emit.block(block)? {
+            BlockFlow::Done => Ok(()),
+            _ => self.jump_to(target, follow),
+        }
+    }
+
+    /// Whether printing `arm` ends in a jump or return, so code after the `if`
+    /// is reached only from the other arm.
+    fn leaves(&self, arm: Idx<Block>) -> bool {
+        let block = self.emit.thread(arm);
+        if self.leaves_the_walk(block) {
+            return true;
+        }
+        if self.placement.is_follower(block)
+            || self.placement.is_header(block)
+            || !self.placement.followers(block).is_empty()
+            || self.visited[index(block)]
+        {
+            return false;
+        }
+        match self.func.blocks[block].term {
+            Term::Return(_) | Term::Unreachable => true,
+            Term::Goto(target) => self.leaves_the_walk(self.emit.thread(target)),
+            _ => false,
+        }
+    }
+
+    /// An enclosing loop's header, latch or exit: reached by a jump.
+    fn leaves_the_walk(&self, target: Idx<Block>) -> bool {
+        self.loops.iter().any(|&header| {
+            let native = self.emit.native_loop(header);
+            target == header
+                || native
+                    .is_some_and(|lp| lp.latch == target || self.emit.thread(lp.exit) == target)
+        })
     }
 
     fn branch_to(&mut self, target: Idx<Block>, follow: Follow) -> Result<(), E::Error> {
@@ -337,6 +428,11 @@ impl<E: PlacementEmit> Walk<'_, E> {
         if self.falls_to(target, follow) {
             return Ok(());
         }
+        self.jump_to(target, follow)
+    }
+
+    fn jump_to(&mut self, target: Idx<Block>, follow: Follow) -> Result<(), E::Error> {
+        let target = self.emit.thread(target);
         for i in (0..self.loops.len()).rev() {
             let header = self.loops[i];
             let native = self.emit.native_loop(header);
@@ -376,6 +472,7 @@ pub fn emit<E: PlacementEmit>(
         visited: vec![false; n],
         reaches_end: false,
         loops: Vec::new(),
+        depth: 0,
     }
     .tree(entry, Follow::End)
 }

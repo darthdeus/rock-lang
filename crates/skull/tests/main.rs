@@ -7,6 +7,7 @@ mod private_vectors;
 mod sort_key;
 
 mod copy_code_refs;
+mod early_exit_depth;
 mod nested_strided_inspect;
 
 mod map_empty_snapshots;
