@@ -1252,11 +1252,179 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
 @nomangle inline(lua) fn __json_record_json_vec(data: any, count: int) -> any = """
     return { _data = data, len = count, ['@vec'] = __rock_vec_header('strided', 'JsonValue', 2) }
 """
-@nomangle inline(lua) fn __json_record_label(tag: any, items: any) -> string? = """
+@nomangle inline(lua) fn __json_record_label(codec: any, tag: any, items: any) -> string? = """
     if tag ~= 'Array' or items.len == 0 then return nil end
+    if codec.src then
+        if __json_record_source_kind(codec.src, items[1]) == 'Str' then return (__json_record_source_text(codec, items[1])) end
+        return nil
+    end
     local first_tag, label = __rock_json_vec_parts(items, 1)
     if first_tag == 'Str' then return label end
 """
+
+// Decoding reads a JsonValue, a JSON array row, or, when the context carries
+// `src`, the offset of a value in validated JSON text; arrays of offsets hold
+// their elements. All three report the same JsonValue tags and payloads.
+@nomangle inline(lua) fn __json_record_source_body(codec: any, at: int) -> any = """
+    local b = string.byte(codec.src, at + 1)
+    if b == 34 then return (__json_record_source_text(codec, at)) end
+    if b == 91 then return __json_record_source_items(codec.src, at) end
+    if b == 123 then return __json_record_source_fields(codec, at) end
+    if b == 45 or (b >= 48 and b <= 57) then return __json_record_source_number(codec, at) end
+    return nil
+"""
+
+@nomangle inline(lua) fn __json_record_input_value(codec: any, value: any, index: int?) -> any = """
+    if codec.src then return value and codec.source.value_at(codec.src, value) end
+    if index then return __rock_json_vec_at(value, index) end
+    return value
+"""
+
+@nomangle inline(lua) fn __json_record_source_kind(src: string, at: int) -> any = """
+    local b = string.byte(src, at + 1)
+    if b == 34 then return 'Str' end
+    if b == 91 then return 'Array' end
+    if b == 123 then return 'Object' end
+    if b == 116 then return 'True' end
+    if b == 102 then return 'False' end
+    if b == 110 then return 'Null' end
+    local _, is_float = __json_record_source_number_end(src, at)
+    return is_float and 'Float' or 'Int'
+"""
+
+// 0 ends a number, 1 continues it, 2 continues it and makes it a float.
+@nomangle inline(lua) fn __json_record_number_byte(b: int?) -> int = """
+    if b == 46 or b == 101 or b == 69 then return 2 end
+    if not b or b < 43 or b > 57 or b == 44 or b == 47 then return 0 end
+    return 1
+"""
+
+@nomangle inline(lua) fn __json_record_source_number_tail(src: string, i: int, is_float: bool) -> any = """
+    while true do
+        local c = __json_record_number_byte(string.byte(src, i + 1))
+        if c == 0 then return i, is_float end
+        is_float = is_float or c == 2
+        i = i + 1
+    end
+"""
+
+// Unrolled so that short numbers, the common case, do not start a loop inside
+// the visitor's trace; a looping scan here gets the caller blacklisted.
+@nomangle inline(lua) fn __json_record_source_number_end(src: string, at: int) -> any = """
+    local _, b2, b3, b4, b5, b6, b7, b8 = string.byte(src, at + 1, at + 8)
+    local c = __json_record_number_byte(b2)
+    if c == 0 then return at + 1, false end
+    local f = c == 2
+    c = __json_record_number_byte(b3); if c == 0 then return at + 2, f end; f = f or c == 2
+    c = __json_record_number_byte(b4); if c == 0 then return at + 3, f end; f = f or c == 2
+    c = __json_record_number_byte(b5); if c == 0 then return at + 4, f end; f = f or c == 2
+    c = __json_record_number_byte(b6); if c == 0 then return at + 5, f end; f = f or c == 2
+    c = __json_record_number_byte(b7); if c == 0 then return at + 6, f end; f = f or c == 2
+    c = __json_record_number_byte(b8); if c == 0 then return at + 7, f end; f = f or c == 2
+    return __json_record_source_number_tail(src, at + 8, f)
+"""
+
+@nomangle inline(lua) fn __json_record_source_number(codec: any, at: int) -> any = """
+    local src = codec.src
+    local stop, is_float = __json_record_source_number_end(src, at)
+    if is_float then return codec.source.float_at(src, at, stop) end
+    return math.floor(tonumber(string.sub(src, at + 1, stop)))
+"""
+
+// The text was validated when the reader was built, so indexing only finds
+// value boundaries. Strings jump to their closing quote with a plain find.
+@nomangle inline(lua) fn __json_record_source_quote(src: string, at: int) -> int = """
+    local q = string.find(src, '"', at + 2, true)
+    if string.byte(src, q - 1) ~= 92 then return q end
+    return __json_record_source_escaped_quote(src, q)
+"""
+
+@nomangle inline(lua) fn __json_record_source_escaped_quote(src: string, q: int) -> int = """
+    while true do
+        local slash = q - 1
+        while string.byte(src, slash) == 92 do slash = slash - 1 end
+        if (q - 1 - slash) % 2 == 0 then return q end
+        q = string.find(src, '"', q + 1, true)
+    end
+"""
+
+@nomangle inline(lua) fn __json_record_source_skip(src: string, at: int) -> int = """
+    local byte = string.byte
+    local i = at + 1
+    local b = byte(src, i)
+    if b == 34 then return __json_record_source_quote(src, at) end
+    if b ~= 91 and b ~= 123 then
+        repeat
+            i = i + 1
+            b = byte(src, i)
+        until b == nil or b == 44 or b == 93 or b == 125 or b == 32 or b == 10 or b == 13 or b == 9
+        return i - 1
+    end
+    local depth = 1
+    while true do
+        i = i + 1
+        b = byte(src, i)
+        if b == 34 then i = __json_record_source_quote(src, i - 1)
+        elseif b == 91 or b == 123 then depth = depth + 1
+        elseif b == 93 or b == 125 then
+            depth = depth - 1
+            if depth == 0 then return i end
+        end
+    end
+"""
+
+@nomangle inline(lua) fn __json_record_source_ws(src: string, at: int) -> int = """
+    local byte = string.byte
+    local b = byte(src, at + 1)
+    while b == 32 or b == 10 or b == 13 or b == 9 do
+        at = at + 1
+        b = byte(src, at + 1)
+    end
+    return at
+"""
+
+@nomangle inline(lua) fn __json_record_source_items(src: string, at: int) -> any = """
+    local byte = string.byte
+    local items, n = {}, 0
+    local pos = __json_record_source_ws(src, at + 1)
+    if byte(src, pos + 1) ~= 93 then
+        while true do
+            n = n + 1
+            items[n] = pos
+            pos = __json_record_source_ws(src, __json_record_source_skip(src, pos))
+            if byte(src, pos + 1) == 93 then break end
+            pos = __json_record_source_ws(src, pos + 1)
+        end
+    end
+    items.len = n
+    return items
+"""
+
+@nomangle inline(lua) fn __json_record_source_fields(codec: any, at: int) -> any = """
+    local src = codec.src
+    local byte = string.byte
+    local fields = {}
+    local pos = __json_record_source_ws(src, at + 1)
+    if byte(src, pos + 1) == 125 then return fields end
+    while true do
+        local key, after = __json_record_source_text(codec, pos)
+        local value = __json_record_source_ws(src, __json_record_source_ws(src, after) + 1)
+        fields[key] = value
+        pos = __json_record_source_ws(src, __json_record_source_skip(src, value))
+        if byte(src, pos + 1) == 125 then return fields end
+        pos = __json_record_source_ws(src, pos + 1)
+    end
+"""
+
+@nomangle inline(lua) fn __json_record_source_text(codec: any, at: int) -> any = """
+    local src = codec.src
+    local close = __json_record_source_quote(src, at)
+    for i = at + 2, close - 1 do
+        if string.byte(src, i) == 92 then return codec.source.string_at(src, at), close end
+    end
+    return string.sub(src, at + 2, close - 1), close
+"""
+
 @nomangle inline(lua) fn __json_record_finite(n: float) -> bool = "return n == n and n ~= math.huge and n ~= -math.huge"
 
 @nomangle inline(lua) fn __json_record_native_get(source: any, name: string, prefix: string, slots: any? = null) -> any = """
@@ -1441,10 +1609,12 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     return nil
 """
 
-@nomangle inline(lua) fn __json_record_failure(shape: any, value: any, index: int? = null) -> any = """
+@nomangle inline(lua) fn __json_record_failure(shape: any, value: any, index: int? = null, codec: any? = null) -> any = """
     if index then value = __rock_json_vec_at(value, index) end
-    local actual = value == nil and 'missing' or value.__variant or type(value)
-    if (actual == 'True' or actual == 'False') and getmetatable(value) == __rock_box_mts.JsonValue then
+    local source = value ~= nil and codec and codec.src
+    local actual = value == nil and 'missing' or source and __json_record_source_kind(source, value)
+        or value.__variant or type(value)
+    if (actual == 'True' or actual == 'False') and (source or getmetatable(value) == __rock_box_mts.JsonValue) then
         actual = 'Bool'
     end
     return setmetatable({ path = '', expected = shape.name or shape.k,
@@ -1463,16 +1633,24 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     value: any, reading: bool, seen: any, depth: int, defaults: any,
     row: bool = false, index: int? = null) -> any = """
     if depth > 128 then
-        if reading then return false, __json_record_failure(shape, value, index) end
+        if reading then return false, __json_record_failure(shape, value, index, codec) end
         error('json record nesting exceeds 128', 0)
     end
     -- Array input keeps its row until a codec callback or diagnostic needs a box.
+    local kind = shape.k
     local input_tag, input_payload
-    if reading then
+    if reading and codec.src then
+        if index then value, index = value[index], nil end
+        if value ~= nil then
+            input_tag = __json_record_source_kind(codec.src, value)
+            if kind ~= 'opt' and kind ~= 'field' and kind ~= 'float' then
+                input_payload = __json_record_source_body(codec, value)
+            end
+        end
+    elseif reading then
         if index then input_tag, input_payload = __rock_json_vec_parts(value, index)
         elseif type(value) == 'table' then input_tag, input_payload = value.__variant, value[1] end
     end
-    local kind = shape.k
     if kind == 'field' then
         if reading then
             if value == nil then return true, setmetatable({ present = false }, __rock_box_mts.JsonField) end
@@ -1490,16 +1668,19 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     end
     if kind == 'int' or kind == 'uint' then
         local n = value
-        if reading and (input_tag == 'Int' or input_tag == 'Float') then n = input_payload end
+        if reading then n = (input_tag == 'Int' or input_tag == 'Float') and input_payload or nil end
         if type(n) ~= 'number' or not __json_record_finite(n) or n ~= math.floor(n)
-            or (kind == 'uint' and n < 0) then return false, __json_record_failure(shape, value, index) end
+            or (kind == 'uint' and n < 0) then return false, __json_record_failure(shape, value, index, codec) end
         if reading then return true, n end
         return true, __json_record_node('Int', n, row)
     end
     if kind == 'float' then
         if reading then
-            local n = codec.decode_float(index and __rock_json_vec_at(value, index) or value)
-            if n == nil or not __json_record_finite(n) then return false, __json_record_failure(shape, value, index) end
+            local n
+            if codec.src and codec.decode_float == codec.source.finite_float then
+                n = (input_tag == 'Int' or input_tag == 'Float') and __json_record_source_number(codec, value) or nil
+            else n = codec.decode_float(__json_record_input_value(codec, value, index)) end
+            if n == nil or not __json_record_finite(n) then return false, __json_record_failure(shape, value, index, codec) end
             return true, n
         end
         if not __json_record_finite(value) then error('json record cannot encode a nonfinite float', 0) end
@@ -1508,20 +1689,20 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     if kind == 'string' then
         if not reading then return true, __json_record_node('Str', value, row) end
         if input_tag == 'Str' then return true, input_payload end
-        return false, __json_record_failure(shape, value, index)
+        return false, __json_record_failure(shape, value, index, codec)
     end
     if kind == 'bool' then
         if not reading then return true, json_bool(value) end
         if input_tag == 'True' then return true, true end
         if input_tag == 'False' then return true, false end
-        return false, __json_record_failure(shape, value, index)
+        return false, __json_record_failure(shape, value, index, codec)
     end
     if kind == 'vec' then
         local element = shape.elem.k == 'nom' and _G.__ROCK_TYPE_TABLE[shape.elem.name]
         if element and element.kind == 'c_enum' then
             error('json record does not support native enum arrays', 0)
         end
-        if reading and input_tag ~= 'Array' then return false, __json_record_failure(shape, value, index) end
+        if reading and input_tag ~= 'Array' then return false, __json_record_failure(shape, value, index, codec) end
         local items = reading and input_payload or value
         local json_items = element and shape.elem.name == 'JsonValue'
         local offsets = element and _G.__ROCK_STRIDED_ROWS[shape.elem.name]
@@ -1581,7 +1762,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
         if element and (element.kind == 'c_struct' or element.kind == 'c_enum') then
             error('json record does not support native value maps', 0)
         end
-        if reading and input_tag ~= 'Object' then return false, __json_record_failure(shape, value, index) end
+        if reading and input_tag ~= 'Object' then return false, __json_record_failure(shape, value, index, codec) end
         local items = reading and input_payload or value
         local result = {}
         for key, item in pairs(items) do
@@ -1597,21 +1778,21 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     local adapter = codec.adapters and codec.adapters[name]
     if adapter then
         if not reading then return true, (adapter.encode(value)) end
-        local result = adapter.decode(index and __rock_json_vec_at(value, index) or value)
-        if result == nil then return false, __json_record_failure(shape, value, index) end
+        local result = adapter.decode(__json_record_input_value(codec, value, index))
+        if result == nil then return false, __json_record_failure(shape, value, index, codec) end
         return true, result
     end
     local decl = _G.__ROCK_TYPE_TABLE[name]
     if not decl then error('json record missing declaration: ' .. name, 0) end
     if decl.kind == 'enum_tag' then
         if reading then
-            local label = __json_record_label(input_tag, input_payload)
-            if label == nil or input_payload.len ~= 1 then return false, __json_record_failure(shape, value, index) end
+            local label = __json_record_label(codec, input_tag, input_payload)
+            if label == nil or input_payload.len ~= 1 then return false, __json_record_failure(shape, value, index, codec) end
             for tag, name in pairs(decl.variants) do if name == label then return true, tag end end
-            return false, __json_record_failure(shape, value, index)
+            return false, __json_record_failure(shape, value, index, codec)
         end
         local label = decl.variants[value]
-        if not label then return false, __json_record_failure(shape, value, index) end
+        if not label then return false, __json_record_failure(shape, value, index, codec) end
         return true, __json_record_node('Array', __json_record_json_vec({'Str', label}, 1), row)
     end
     if not reading then
@@ -1624,8 +1805,8 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
         local tag, fields, payload, selected, json_bool_wire
         if decl.kind == 'c_enum' then
             if reading then
-                local label = __json_record_label(input_tag, input_payload)
-                if label == nil then return false, __json_record_failure(shape, value, index) end
+                local label = __json_record_label(codec, input_tag, input_payload)
+                if label == nil then return false, __json_record_failure(shape, value, index, codec) end
                 for index, candidate in pairs(decl.variants) do
                     if candidate.name == label then tag, selected = index, candidate; break end
                 end
@@ -1633,7 +1814,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
                 tag = tonumber(value.__tag)
                 selected = decl.variants[tag]
             end
-            if not selected then return false, __json_record_failure(shape, value, index) end
+            if not selected then return false, __json_record_failure(shape, value, index, codec) end
             fields, payload = selected.fields, {}
             for i, field in ipairs(fields) do
                 if field.name ~= tostring(i) then error('json record does not support record enum payloads', 0) end
@@ -1642,26 +1823,26 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
             end
         else
             if reading then
-                tag = __json_record_label(input_tag, input_payload)
-                if tag == nil then return false, __json_record_failure(shape, value, index) end
+                tag = __json_record_label(codec, input_tag, input_payload)
+                if tag == nil then return false, __json_record_failure(shape, value, index, codec) end
             else tag = value.__variant end
             -- Typed JsonValue records use ["Bool", value] on the wire.
             if name == 'JsonValue' then
                 local unit = tag == 'True' or tag == 'False'
-                if reading and unit then return false, __json_record_failure(shape, value, index) end
+                if reading and unit then return false, __json_record_failure(shape, value, index, codec) end
                 json_bool_wire = (reading and tag == 'Bool') or (not reading and unit)
                 if json_bool_wire then tag = 'Bool' end
             end
             selected = json_bool_wire and { pos = {{ k = 'bool' }} } or decl.variant_desc[tag]
             if not selected then
                 if not reading then error('json record invalid variant ' .. name .. ':' .. tostring(tag), 0) end
-                return false, __json_record_failure(shape, value, index)
+                return false, __json_record_failure(shape, value, index, codec)
             end
             if not selected.pos then error('json record does not support record enum payloads', 0) end
             payload = selected.pos
         end
         local count = #payload
-        if reading and input_payload.len ~= count + 1 then return false, __json_record_failure(shape, value, index) end
+        if reading and input_payload.len ~= count + 1 then return false, __json_record_failure(shape, value, index, codec) end
         local data
         if reading then
             if fields then
@@ -1691,7 +1872,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
             result, wire_tag = __json_record_json_vec(data, count + 1), 'Array'
         end
     elseif decl.kind == 'struct' or decl.kind == 'value_table' or decl.kind == 'c_struct' then
-        if reading and input_tag ~= 'Object' then return false, __json_record_failure(shape, value, index) end
+        if reading and input_tag ~= 'Object' then return false, __json_record_failure(shape, value, index, codec) end
         if codec.field_names then
             local names = codec.field_names[name]
             if not names then
@@ -1767,6 +1948,22 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     field_names: Map<string, Map<string, bool>>?,
     encode_float: fn(float) -> JsonValue,
     decode_float: fn(JsonValue) -> float?,
+    src: string? = null,
+    source: __JsonRecordSource? = null,
+}
+
+// Reading from source text reaches the parser only through these, so programs
+// that never call json_record_read do not carry it.
+@lua_named struct __JsonRecordSource {
+    finite_float: fn(JsonValue) -> float?,
+    float_at: fn(string, int, int) -> float,
+    string_at: fn(string, int) -> string,
+    value_at: fn(string, int) -> JsonValue,
+}
+
+fn json_record_source_string(src: string, at: int) -> string {
+    let (value, _) = parse_string_raw_at(src, at)
+    return value.unwrap()
 }
 
 @nomangle fn __json_record_context(codec: JsonRecordCodec, reading: bool) -> __JsonRecordContext {
@@ -1800,6 +1997,18 @@ inline(lua) fn __json_record_decode<T>(name: string, codec: JsonRecordCodec, val
     return nil
 """
 
+inline(lua) fn __json_record_read<T>(name: string, codec: JsonRecordCodec, src: string, at: int,
+    source: __JsonRecordSource) -> T? = """
+    local context = __json_record_context(codec, true)
+    context.src, context.source = src, source
+    local ok, result = __json_record_visit(context, { k = 'nom', name = name }, at, true, nil, 0)
+    if ok then return result end
+    if codec.on_error then codec.on_error(result) end
+    return nil
+"""
+
+inline(lua) fn __json_record_reads_source() -> bool = "return true"
+
 fn json_record_encode<T>(codec: JsonRecordCodec, value: T) -> JsonValue {
     return __json_record_encode(__json_record_type(value), codec, materialize(value))
 }
@@ -1810,4 +2019,19 @@ fn json_record_decode<T>(codec: JsonRecordCodec, value: JsonValue, prototype: T)
 
 fn json_record_decode<T>(codec: JsonRecordCodec, value: JsonValue) -> T? {
     return __json_record_decode<T>(__json_record_type(phantom<T>()), codec, value)
+}
+
+// Decodes straight from a reader's source text, without materializing a
+// JsonValue tree; the result and diagnostics match json_record_decode.
+fn json_record_read<T>(codec: JsonRecordCodec, reader: JsonReader) -> T? {
+    if reader.value == null && reader.at >= 0 && __json_record_reads_source() {
+        let source = __JsonRecordSource {
+            finite_float: json_record_finite_float,
+            float_at: (src, at, end) => src.parse_float_at(at, end),
+            string_at: json_record_source_string,
+            value_at: (src, at) => json_reader_materialize(JsonReader { src, at }),
+        }
+        return __json_record_read<T>(__json_record_type(phantom<T>()), codec, reader.src.unwrap(), reader.at, source)
+    }
+    return json_record_decode<T>(codec, json_reader_materialize(reader))
 }

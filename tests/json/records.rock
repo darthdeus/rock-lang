@@ -571,3 +571,105 @@ fn decode_json_rows_without_losing_callback_identity() {
     assert_eq(custom.values[0], 7.0)
     assert(same_ref(stored[0], items[0]))
 }
+
+// Decoding source text through a reader must agree with decoding its
+// JsonValue: same result, same diagnostic. The text is also read nested
+// inside another object, so offsets other than the root are exercised.
+fn json_record_read_agrees<T>(codec: JsonRecordCodec, text: string) {
+    let errors: [JsonRecordError] = []
+    let on_error = codec.on_error
+    codec.on_error = error => errors.push(error)
+    let direct = json_record_decode<T>(codec, json_decode(text).unwrap())
+    let read = json_record_read<T>(codec, json_reader_decode(text).unwrap())
+    let wrapper = json_reader_decode("{{\"before\": [1, {{\"x\": \"]\"}}], \"wrap\":\n {text} }}").unwrap()
+    let nested = json_record_read<T>(codec, json_reader_field(wrapper, "wrap").unwrap())
+    codec.on_error = on_error
+    assert_eq(direct == null, read == null, text)
+    assert_eq(direct == null, nested == null, text)
+    if let value = direct {
+        let expected = json_encode(json_record_encode(codec, value))
+        assert_eq(json_encode(json_record_encode(codec, read.unwrap())), expected, text)
+        assert_eq(json_encode(json_record_encode(codec, nested.unwrap())), expected, text)
+        assert_eq(errors.len(), 0, text)
+        return
+    }
+    assert_eq(errors.len(), 3, text)
+    for i in 1..3 {
+        assert_eq(errors[i].path, errors[0].path, text)
+        assert_eq(errors[i].expected, errors[0].expected, text)
+        assert_eq(errors[i].actual, errors[0].actual, text)
+    }
+}
+
+@test
+fn json_record_read_matches_value_decoding() {
+    let plain = JsonRecordCodec {}
+    let strict = JsonRecordCodec { reject_unknown_fields: true }
+    for text in ["{{}}", "{{\"title\":null}}", " {{ \"title\" : \"n\\u00e9w\\n\\\"\" , \"count\" : 0 , \"items\" : [ ] }} ",
+        "{{\"count\":null}}", "{{\"count\":1.5}}", "{{\"count\":1.0}}", "{{\"count\":-0}}", "{{\"count\":2e3}}",
+        "{{\"count\":false}}", "{{\"items\":[1,false]}}", "{{\"items\":[1, 2 ,3]}}", "{{\"extra\":0}}",
+        "{{\"title\":\"a\",\"title\":\"b\"}}", "[]", "\"text\"", "null"] {
+        json_record_read_agrees<JsonPresenceEdit>(strict, text)
+    }
+    for text in ["{{\"point\":{{\"x\":2,\"y\":3}}}}", "{{\"point\":null}}", "{{}}"] {
+        json_record_read_agrees<JsonPresenceNative>(plain, text)
+    }
+    for text in ["{{\"edit\":{{\"title\":null}},\"labels\":{{\"k\\\"ey\":\"y\\\\es\",\"a/b\":\"\\ud83d\\ude00\"}}}}",
+        "{{\"labels\":{{\"x\":1}}}}"] {
+        json_record_read_agrees<JsonPresenceNested>(strict, text)
+    }
+    for text in ["[\"Bool\",true]", "[\"Bool\"]", "[\"True\"]", "[\"Bool\",1]", "[\"Int\",-12]", "[\"Float\",2.5e-3]",
+        "[\"Array\",[[\"Str\",\"x\"],[\"Null\"]]]", "[\"Object\",{{\"a\":[\"Int\",1]}}]", "[\"Nope\"]", "[]", "[1]"] {
+        json_record_read_agrees<JsonValue>(plain, text)
+    }
+    for text in ["{{\"rows\":[{{\"count\":\"wrong\"}}]}}", "{{\"rows\":[{{\"count\":4,\"cout\":5}}]}}", "{{\"rows\":{{}}}}"] {
+        json_record_read_agrees<JsonDiagnosticRoot>(plain, text)
+        json_record_read_agrees<JsonDiagnosticRoot>(strict, text)
+    }
+    for text in ["{{\"values\":{{\"a/b~c\":{{}}}}}}", "{{\"values\":{{\"a\":{{\"count\":4}},\"b\":{{\"count\":5}}}}}}"] {
+        json_record_read_agrees<JsonDiagnosticMap>(plain, text)
+    }
+    for text in ["{{\"choice\":[\"Count\",false]}}", "{{\"choice\":[\"Count\",3]}}", "{{\"choice\":[\"Empty\"]}}",
+        "{{\"choice\":[\"Nope\"]}}", "{{\"choice\":[]}}", "{{\"choice\":[1]}}", "{{\"choice\":[\"Empty\",1]}}"] {
+        json_record_read_agrees<JsonDiagnosticEnum>(plain, text)
+    }
+    for text in ["{{\"points\":[{{\"x\":1,\"y\":2.5}},{{\"x\":3e0,\"y\":-4}}]}}", "{{\"points\":[]}}", "{{\"points\":[{{\"x\":1}}]}}"] {
+        json_record_read_agrees<JsonNativeRows>(plain, text)
+        json_record_read_agrees<JsonNativeRows>(JsonRecordCodec { decode_float: value => json_as_float(value) }, text)
+    }
+    json_record_read_agrees<JsonNestedNativeRows>(plain, "{{\"bounds\":[{{\"min\":{{\"x\":1,\"y\":2}},\"max\":{{\"x\":3,\"y\":4}}}}]}}")
+    for text in ["{{\"required\":7}}", "{{\"required\":7,\"label\":null}}", "{{}}", "{{\"required\":7,\"children\":false}}",
+        "{{\"required\":7,\"cache\":{{}}}}", "{{\"required\":7,\"children\":[{{\"values\":[1]}}]}}"] {
+        json_record_read_agrees<JsonDeclaredDefaults>(strict, text)
+    }
+    json_record_read_agrees<JsonNativeDefault>(plain, "{{}}")
+    for text in ["{{}}", "{{\"tile\":{{\"x\":2,\"y\":3}}}}"] { json_record_read_agrees<JsonOptionalTileContext>(plain, text) }
+    for text in ["{{\"wire_name\":\"x\"}}", "{{\"wire_name\":false}}", "{{\"name\":\"x\"}}"] {
+        json_record_read_agrees<JsonNamedRecord>(strict, text)
+    }
+    json_record_read_agrees<JsonEscapedNameRecord>(strict, json_encode(json_record_encode(plain, JsonEscapedNameRecord { value: 7 })))
+
+    let key = Key { namespace: "sample", name: "record" }
+    let marker = Marker { point: Point { x: 7, y: -3 }, tint: Tint { red: 0.25, visible: false } }
+    let adapted = JsonRecordCodec { adapters: [json_record_adapter(Kind::First, kind_encode, kind_decode),
+        json_record_adapter(marker, marker_encode, marker_decode)] }
+    let packet = json_record_encode(adapted, Packet { kind: Kind::Second, tint: Tint { red: 0.5, visible: false }, spare: null,
+        marker, backup: marker, rows: [Label { name: "first", marker, key }, Label { name: "empty", marker: null, key }] })
+    json_record_read_agrees<Packet>(adapted, json_encode(packet))
+    json_as_object(packet).unwrap()["marker"] = json_str("invalid")
+    json_record_read_agrees<Packet>(adapted, json_encode(packet))
+
+    for event in [Event::Empty, Event::Text("hello"), Event::Colored("red", Tint { red: 0.5, visible: false }), Event::Pair("count", 7)] {
+        let source = Record { event, envelope: Wrapper::Wrapped(event), optional: if event == Event::Empty { null } else { event } }
+        json_record_read_agrees<Record>(plain, json_encode(json_record_encode(plain, source)))
+    }
+    let weights: Map<string, float> = map_new()
+    weights["alpha"] = 1.25
+    let log = json_record_encode(plain, ChangeLog { rows: [Change { event: ChangeEvent::Empty, count: 1 },
+        Change { event: ChangeEvent::Pair(5, 2.5), count: 2 }, Change { event: ChangeEvent::Names(["a", "b"]), count: 3 }],
+        title: null, weights, tint: ValueTint { red: 0.75, visible: false } })
+    json_record_read_agrees<ChangeLog>(plain, json_encode(log))
+    json_record_read_agrees<ChangeLog>(plain, json_encode_pretty(log))
+    json_as_object(log).unwrap()["title"] = json_int(4)
+    json_record_read_agrees<ChangeLog>(plain, json_encode(log))
+}

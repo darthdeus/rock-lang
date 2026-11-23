@@ -1003,6 +1003,9 @@ inline(js) fn __json_record_decode<T>(name: string, codec: JsonRecordCodec, valu
     return __json_record_js_decode(codec, __json_record_js_context(codec, __rock_json_types), name, value, null);
 """
 
+inline(js) fn __json_record_reads_source() -> bool = "return false;"
+inline(js) fn __json_record_read<T>(name: string, codec: JsonRecordCodec, src: string, at: int, source: __JsonRecordSource) -> T? = 'throw new Error("json record source decoding is Lua-only");'
+
 inline(js) fn luajit_available() -> bool = "return false;"
 inline(js) fn luajit_enabled() -> bool = "return false;"
 @scalar_abi inline(js) fn luajit_status() -> (bool, string) = 'return __rock_publish(false, "");'
