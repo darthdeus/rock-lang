@@ -1491,6 +1491,7 @@ mod relight_rg8_gl_tests {
             assert_ne!(handle, 0, "depth fixture did not load");
             self.0.push(handle);
             stone_flush_image_uploads();
+            assert!(crate::image_publication::stone_image_ready(handle));
             handle
         }
 
@@ -1524,76 +1525,73 @@ mod relight_rg8_gl_tests {
         path
     }
 
-    fn read_rg(handle: u64, width: u32, height: u32) -> (i32, Vec<u8>) {
+    const PACK_PARAMETERS: [u32; 4] = [
+        glow::PACK_ALIGNMENT,
+        glow::PACK_ROW_LENGTH,
+        glow::PACK_SKIP_PIXELS,
+        glow::PACK_SKIP_ROWS,
+    ];
+
+    fn read_texture<const CHANNELS: usize>(
+        handle: u64,
+        width: u32,
+        height: u32,
+        format: u32,
+    ) -> (i32, Vec<u8>) {
         let texture = with_image(handle, |image| image.texture).unwrap();
         with_gl(|gl| unsafe {
             let old_binding = gl.get_parameter_i32(glow::TEXTURE_BINDING_2D);
             let old_pack_buffer = gl.get_parameter_i32(glow::PIXEL_PACK_BUFFER_BINDING);
-            let old_alignment = gl.get_parameter_i32(glow::PACK_ALIGNMENT);
-            let mut pixels = vec![0; width as usize * height as usize * 2];
+            let old_pack = PACK_PARAMETERS.map(|parameter| gl.get_parameter_i32(parameter));
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-            let internal =
-                gl.get_tex_level_parameter_i32(glow::TEXTURE_2D, 0, glow::TEXTURE_INTERNAL_FORMAT);
-            gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+            let get_level =
+                |parameter| gl.get_tex_level_parameter_i32(glow::TEXTURE_2D, 0, parameter);
+            assert_eq!(get_level(glow::TEXTURE_WIDTH), width as i32);
+            assert_eq!(get_level(glow::TEXTURE_HEIGHT), height as i32);
+            let internal = get_level(glow::TEXTURE_INTERNAL_FORMAT);
+
             gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+            for (parameter, value) in PACK_PARAMETERS.into_iter().zip([1, 0, 0, 0]) {
+                gl.pixel_store_i32(parameter, value);
+            }
+            let mut pixels = vec![0; width as usize * height as usize * CHANNELS];
+            let errors = crate::stone_gl_error_count();
             gl.get_tex_image(
                 glow::TEXTURE_2D,
                 0,
-                glow::RG,
+                format,
                 glow::UNSIGNED_BYTE,
                 glow::PixelPackData::Slice(Some(&mut pixels)),
             );
-            gl.pixel_store_i32(glow::PACK_ALIGNMENT, old_alignment);
+            assert_eq!(gl.get_error(), glow::NO_ERROR);
+            assert_eq!(
+                crate::stone_gl_error_count(),
+                errors,
+                "texture readback failed"
+            );
+
+            for (parameter, value) in PACK_PARAMETERS.into_iter().zip(old_pack) {
+                gl.pixel_store_i32(parameter, value);
+            }
             gl.bind_texture(
                 glow::TEXTURE_2D,
-                (old_binding != 0).then(|| {
-                    glow::NativeTexture(std::num::NonZeroU32::new(old_binding as u32).unwrap())
-                }),
+                std::num::NonZeroU32::new(old_binding as u32).map(glow::NativeTexture),
             );
             gl.bind_buffer(
                 glow::PIXEL_PACK_BUFFER,
-                (old_pack_buffer != 0).then(|| {
-                    glow::NativeBuffer(std::num::NonZeroU32::new(old_pack_buffer as u32).unwrap())
-                }),
+                std::num::NonZeroU32::new(old_pack_buffer as u32).map(glow::NativeBuffer),
             );
             (internal, pixels)
         })
         .expect("GL context unavailable while reading the fixture")
     }
 
+    fn read_rg(handle: u64, width: u32, height: u32) -> (i32, Vec<u8>) {
+        read_texture::<2>(handle, width, height, glow::RG)
+    }
+
     fn read_rgba(handle: u64, width: u32, height: u32) -> Vec<u8> {
-        let texture = with_image(handle, |image| image.texture).unwrap();
-        with_gl(|gl| unsafe {
-            let old_binding = gl.get_parameter_i32(glow::TEXTURE_BINDING_2D);
-            let old_pack_buffer = gl.get_parameter_i32(glow::PIXEL_PACK_BUFFER_BINDING);
-            let old_alignment = gl.get_parameter_i32(glow::PACK_ALIGNMENT);
-            let mut pixels = vec![0; width as usize * height as usize * 4];
-            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-            gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
-            gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
-            gl.get_tex_image(
-                glow::TEXTURE_2D,
-                0,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                glow::PixelPackData::Slice(Some(&mut pixels)),
-            );
-            gl.pixel_store_i32(glow::PACK_ALIGNMENT, old_alignment);
-            gl.bind_texture(
-                glow::TEXTURE_2D,
-                (old_binding != 0).then(|| {
-                    glow::NativeTexture(std::num::NonZeroU32::new(old_binding as u32).unwrap())
-                }),
-            );
-            gl.bind_buffer(
-                glow::PIXEL_PACK_BUFFER,
-                (old_pack_buffer != 0).then(|| {
-                    glow::NativeBuffer(std::num::NonZeroU32::new(old_pack_buffer as u32).unwrap())
-                }),
-            );
-            pixels
-        })
-        .expect("GL context unavailable while reading the RGBA control")
+        read_texture::<4>(handle, width, height, glow::RGBA).1
     }
 
     struct UnpackAlignmentGuard(i32);
@@ -1622,10 +1620,10 @@ mod relight_rg8_gl_tests {
             .expect("GL context unavailable while reading unpack alignment")
     }
 
-    fn pack_state() -> (i32, i32, i32) {
+    fn pack_state() -> ([i32; 4], i32, i32) {
         with_gl(|gl| unsafe {
             (
-                gl.get_parameter_i32(glow::PACK_ALIGNMENT),
+                PACK_PARAMETERS.map(|parameter| gl.get_parameter_i32(parameter)),
                 gl.get_parameter_i32(glow::PIXEL_PACK_BUFFER_BINDING),
                 gl.get_parameter_i32(glow::TEXTURE_BINDING_2D),
             )
@@ -1749,6 +1747,11 @@ mod relight_rg8_gl_tests {
         );
         for (index, actual) in packed.as_chunks::<2>().0.iter().enumerate() {
             assert_eq!(
+                &control[index * 4..index * 4 + 4],
+                &expected[index * 4..index * 4 + 4],
+                "RGBA control at code {index} matches the PNG fixture"
+            );
+            assert_eq!(
                 actual[0],
                 control[index * 4],
                 "depth high byte at code {index} matches the RGBA control"
@@ -1845,7 +1848,14 @@ mod relight_rg8_gl_tests {
 
         images.unload(first);
         assert_eq!(stone_get_image_byte_len(first), 0);
-        let reacquired = images.load(&full_path);
+        let reacquired = stone_load_image(full_path.as_ptr(), 0, LOAD_FLAGS | LOAD_DEFERRED, 0, 0);
+        assert_ne!(reacquired, 0);
+        images.0.push(reacquired);
+        stone_flush_image_uploads();
+        assert!(!crate::image_publication::stone_image_ready(reacquired));
+        stone_set_frame_image_upload_budget(0);
+        assert_eq!(stone_service_image_uploads(), 0);
+        assert!(crate::image_publication::stone_image_ready(reacquired));
         assert_eq!(stone_get_image_byte_len(reacquired), 256 * 256 * 2);
         let reacquired_readback_state = pack_state();
         assert_eq!(read_rg(reacquired, 256, 256).1, packed);
