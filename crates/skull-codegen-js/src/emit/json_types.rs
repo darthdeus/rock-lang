@@ -146,10 +146,13 @@ impl JsonTypes {
                     ));
                 }
                 Entry::FlatLayout {
-                    name, tuple_width, ..
+                    name,
+                    tuple_width,
+                    record_fields,
                 } => flat.push(format!(
-                    "{}: {{tuple_width: {tuple_width}}}",
-                    js_string_lit(name.as_str())
+                    "{}: {{tuple_width: {tuple_width}, record_fields: {}}}",
+                    js_string_lit(name.as_str()),
+                    strings_js(record_fields)
                 )),
                 Entry::Struct {
                     name,

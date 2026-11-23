@@ -813,3 +813,65 @@ fn json_record_adapters_keep_the_values_they_receive() {
     }
     assert(kept[0] == JsonKept { a: 1, b: "2" } && kept[1] == JsonKept { a: 4, b: "5" } && kept[2] == JsonKept { a: 7, b: "8" })
 }
+
+nobox value JsonGridPoint { x: int, y: int }
+value JsonBoxedPoint { x: int, y: int }
+enum JsonStep { Wait, Turn(int), Slide { dx: float, dy: float } }
+enum JsonHit { Struck { damage: int, at: JsonGridPoint, from: JsonBoxedPoint, echo: JsonGridPoint? }, Missed, Named(string) }
+struct JsonShapes {
+    steps: Vec<JsonStep>,
+    step: JsonStep,
+    hits: Vec<JsonHit>,
+    hit: JsonHit,
+    points: Map<string, JsonGridPoint>,
+    step_names: Map<string, JsonStep>,
+}
+
+fn json_shapes_round_trip(codec: JsonRecordCodec, value: JsonShapes, text: string) -> JsonShapes {
+    assert_eq(json_record_write(codec, value), text)
+    assert_eq(json_encode(json_record_encode(codec, value)), text)
+    let back = json_record_decode(codec, json_decode(text).unwrap(), value).unwrap()
+    assert_eq(json_record_write(codec, back), text)
+    let read: JsonShapes = json_record_read(codec, json_reader_decode(text).unwrap()).unwrap()
+    assert_eq(json_record_write(codec, read), text)
+    return back
+}
+
+@test
+fn json_record_native_enums_value_maps_and_record_payloads() {
+    let points: Map<string, JsonGridPoint> = map_new()
+    points["a"] = JsonGridPoint { x: 1, y: 2 }
+    points["gone"] = JsonGridPoint { x: 0, y: 0 }
+    points["b"] = JsonGridPoint { x: 3, y: 4 }
+    points.remove("gone")
+    let step_names: Map<string, JsonStep> = map_new()
+    step_names["t"] = JsonStep::Turn(2)
+    let struck = JsonHit::Struck { damage: 5, at: JsonGridPoint { x: 6, y: 7 }, from: JsonBoxedPoint { x: 8, y: 9 }, echo: JsonGridPoint { x: 1, y: 1 } }
+    let value = JsonShapes {
+        steps: [JsonStep::Wait, JsonStep::Turn(3), JsonStep::Slide { dx: 1.5, dy: -2.0 }],
+        step: JsonStep::Slide { dx: 0.5, dy: 1.0 },
+        hits: [JsonHit::Struck { damage: 1, at: JsonGridPoint { x: 2, y: 3 }, from: JsonBoxedPoint { x: 4, y: 5 }, echo: null },
+            JsonHit::Missed, JsonHit::Named("n")],
+        hit: struck,
+        points,
+        step_names,
+    }
+    let text = "{{\"hit\":[\"Struck\",{{\"at\":{{\"x\":6,\"y\":7}},\"damage\":5,\"echo\":{{\"x\":1,\"y\":1}},\"from\":{{\"x\":8,\"y\":9}}}}],"
+        + "\"hits\":[[\"Struck\",{{\"at\":{{\"x\":2,\"y\":3}},\"damage\":1,\"echo\":null,\"from\":{{\"x\":4,\"y\":5}}}}],[\"Missed\"],[\"Named\",\"n\"]],"
+        + "\"points\":{{\"a\":{{\"x\":1,\"y\":2}},\"b\":{{\"x\":3,\"y\":4}}}},"
+        + "\"step\":[\"Slide\",{{\"dx\":0.5,\"dy\":1}}],"
+        + "\"step_names\":{{\"t\":[\"Turn\",2]}},"
+        + "\"steps\":[[\"Wait\"],[\"Turn\",3],[\"Slide\",{{\"dx\":1.5,\"dy\":-2}}]]}}"
+    let back = json_shapes_round_trip(JsonRecordCodec {}, value, text)
+    assert(back.hit == struck)
+    assert(back.steps[2] == JsonStep::Slide { dx: 1.5, dy: -2.0 })
+    back.points["c"] = JsonGridPoint { x: 5, y: 6 }
+    back.points.remove("a")
+    assert(back.points.len() == 2 && back.points["b"] == JsonGridPoint { x: 3, y: 4 } && back.points["c"] == JsonGridPoint { x: 5, y: 6 })
+
+    let strict = JsonRecordCodec { reject_unknown_fields: true }
+    let unknown = "{{\"dx\":1,\"dy\":2,\"dz\":3}}"
+    assert(json_record_decode(strict, json_decode("[\"Slide\",{unknown}]").unwrap(), value.step) == null)
+    assert(json_record_decode(JsonRecordCodec {}, json_decode("[\"Slide\",{{\"dx\":1}}]").unwrap(), value.step) == null)
+    assert(json_record_decode(JsonRecordCodec {}, json_decode("[\"Struck\",{{\"damage\":1}}]").unwrap(), struck) == null)
+}

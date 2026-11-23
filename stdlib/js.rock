@@ -560,9 +560,12 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
         var tag = source[field.flat[0]];
         if (tag === null || tag === undefined) return null;
         var value = { __variant: tag, __ty: field.type };
+        var layout = __rock_json_types.flat[field.type];
         for (var i = 1; i < field.flat.length; i++) {
             var item = source[field.flat[i]];
-            if (item !== null && item !== undefined) value[i - 1] = item;
+            if (item !== null && item !== undefined) {
+                value[i > layout.tuple_width ? layout.record_fields[i - 1 - layout.tuple_width] : i - 1] = item;
+            }
         }
         return value;
     }
@@ -584,7 +587,11 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
     var key = field.name, absent = value === null || value === undefined;
     if (field.flat) {
         target[field.flat[0]] = absent ? null : value.__variant;
-        for (var i = 1; i < field.flat.length; i++) target[field.flat[i]] = absent ? null : value[i - 1];
+        var layout = __rock_json_types.flat[field.type];
+        for (var i = 1; i < field.flat.length; i++) {
+            var slot = i > layout.tuple_width ? layout.record_fields[i - 1 - layout.tuple_width] : i - 1;
+            target[field.flat[i]] = absent || value[slot] === undefined ? null : value[slot];
+        }
     } else if (field.embed) {
         if (field.nullable) target[key] = absent ? null : true;
         if (__rock_json_types.types[field.type].kind === "c_struct") {
@@ -654,6 +661,43 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
         var leaf = path.indexOf(".") < 0 ? value[path] : __json_record_js_row_leaf(value, path);
         put(slot + i, presence && presence[i] ? !!leaf : leaf);
     }
+"""
+
+// The native value at `slot` of a flat map's storage.
+@nomangle inline(js) fn __json_record_js_map_item(data: any, name: string, slot: int) -> any = """
+    var header = data["@vec"], row = { __ty: name }, path;
+    if (header.repr === "columns") {
+        var columns = __rock_json_types.types[name].vec_columns;
+        for (var c = 0; c < columns.length; c++) row[columns[c]] = data[columns[c]][slot];
+    } else {
+        var offsets = __rock_json_types.strided[name];
+        for (path in offsets) row[path] = data._data[slot * header.stride + offsets[path]];
+    }
+    return __json_record_js_native_get(row, name, "");
+"""
+
+// A decoded flat map in the storage the compiler gives `Map<string, name>`.
+@nomangle inline(js) fn __json_record_js_flat_map(values: any, name: string, decl: any) -> any = """
+    var keys = Array.from(values.keys()).sort(), len = keys.length;
+    var columns = decl.vec_columns, offsets = __rock_json_types.strided[name];
+    var spine = new Map(), data, stride = 0, path, c;
+    if (columns) {
+        data = { len: len, __ty: "Vec", "@vec": { repr: "columns", elem: name, cap: len } };
+        for (c = 0; c < columns.length; c++) data[columns[c]] = [];
+    } else if (offsets) {
+        for (path in offsets) stride = Math.max(stride, offsets[path] + 1);
+        data = { _data: [], len: len, __ty: "Vec", "@vec": { repr: "strided", elem: name, stride: stride, cap: len } };
+    } else throw new Error("json record does not support this map storage");
+    for (var i = 0; i < len; i++) {
+        var decoded = values.get(keys[i]);
+        spine.set(keys[i], i);
+        if (columns) {
+            for (c = 0; c < columns.length; c++) data[columns[c]][i] = __json_record_js_row_leaf(decoded, columns[c]);
+        } else {
+            for (path in offsets) data._data[i * stride + offsets[path]] = __json_record_js_row_leaf(decoded, path);
+        }
+    }
+    return { spine: spine, data: data, free_indices: { _data: [], len: 0, __ty: "Vec" }, occupied_count: len };
 """
 
 @nomangle inline(js) fn __json_record_js_row_object(row: any, name: string) -> any = """
@@ -752,9 +796,6 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
     }
     if (kind === "vec") {
         var element = shape.elem.k === "nom" ? types[shape.elem.name] : undefined;
-        if (element !== undefined && element.kind === "c_enum") {
-            throw new Error("json record does not support native enum arrays");
-        }
         if (reading && !tagged(value, "Array")) return fail(shape, value);
         var items = reading ? value[0] : value;
         var offsets = element !== undefined ? __rock_json_types.strided[shape.elem.name] : undefined;
@@ -807,28 +848,29 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
     if (kind === "map") {
         if (shape.key.k !== "string") throw new Error("json record maps require string keys");
         var held = shape.val.k === "nom" ? types[shape.val.name] : undefined;
-        if (held !== undefined && (held.kind === "c_struct" || held.kind === "c_enum")) {
-            throw new Error("json record does not support native value maps");
-        }
+        // Native values live in flat storage indexed through a key spine.
+        var flatMap = held !== undefined && held.kind === "c_struct";
         if (reading && !tagged(value, "Object")) return fail(shape, value);
-        var entries = reading ? value[0] : value;
+        var entries = reading ? value[0] : flatMap ? value.spine : value;
         var map = new Map();
         for (var entry of entries) {
-            r = __json_record_js_visit(codec, shape.val, entry[1], reading, seen, depth + 1, null);
+            item = flatMap && !reading ? __json_record_js_map_item(value.data, shape.val.name, entry[1]) : entry[1];
+            r = __json_record_js_visit(codec, shape.val, item, reading, seen, depth + 1, null);
             if (failed(r)) return at(r, entry[0]);
             map.set(entry[0], r);
         }
-        return reading ? map : node("Object", map);
+        if (!reading) return node("Object", map);
+        return flatMap ? __json_record_js_flat_map(map, shape.val.name, held) : map;
     }
     if (kind !== "nom") throw new Error("json record unsupported shape: " + String(kind));
     var name = shape.name;
-    var adapter = codec.adapters[name];
+    var adapter = shape.record ? undefined : codec.adapters[name];
     if (adapter !== undefined) {
         if (!reading) return __rock_call(adapter.encode, value);
         r = __rock_call(adapter.decode, value);
         return r === null || r === undefined ? fail(shape, value) : r;
     }
-    var decl = types[name];
+    var decl = shape.record || types[name];
     if (decl === undefined) throw new Error("json record missing declaration: " + name);
     if (decl.kind === "enum_tag") {
         if (reading) {
@@ -842,10 +884,13 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
         if (typeof label !== "string") return fail(shape, value);
         return node("Array", { _data: [node("Str", label)], len: 1, __ty: "Vec" });
     }
+    var tracked = !reading && !shape.record;
     if (!reading) {
         if (value === null || value === undefined) {
             throw new Error("json record missing value for " + name + " at depth " + depth);
         }
+    }
+    if (tracked) {
         if (seen.has(value)) throw new Error("json record cannot encode cycles");
         seen.add(value);
     }
@@ -868,10 +913,15 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
             }
             if (selected === undefined) return fail(shape, value);
             fields = selected.fields;
+            var record = { kind: "c_struct", fields: [], slots: {}, tag_key: "__tag" };
             for (i = 0; i < fields.length; i++) {
-                if (fields[i].name !== String(i + 1)) throw new Error("json record does not support record enum payloads");
-                payload.push(types[fields[i].type] !== undefined ? { k: "nom", name: fields[i].type } : { k: fields[i].type });
+                var desc = types[fields[i].type] !== undefined ? { k: "nom", name: fields[i].type } : { k: fields[i].type };
+                payload.push(desc);
+                record.named = record.named || fields[i].name !== String(i + 1);
+                record.fields.push({ name: fields[i].name, type: fields[i].type, desc: desc });
+                record.slots[fields[i].name] = fields[i].slot;
             }
+            if (record.named) payload = [{ k: "nom", name: name, variant: variant, record: record }];
         } else {
             variant = reading ? label[0] : value.__variant;
             // Typed JsonValue records use ["Bool", value] on the wire.
@@ -887,10 +937,21 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
                 if (!reading) throw new Error("json record invalid variant " + name + ":" + String(variant));
                 return fail(shape, value);
             }
-            if (!selected.pos) throw new Error("json record does not support record enum payloads");
             payload = selected.pos;
+            if (!payload) {
+                // A record payload is the object ["Tag", {..}], read and written as a struct.
+                var named = [];
+                for (var fieldName in selected.named) {
+                    var described = selected.named[fieldName], inner = described.k === "opt" ? described.inner : described;
+                    named.push({ name: fieldName, type: inner.name !== undefined ? inner.name : inner.k, desc: described,
+                        embed: described.leaves !== undefined, nullable: described.k === "opt" });
+                }
+                payload = [{ k: "nom", name: name, variant: variant,
+                    record: { kind: "struct", fields: named, tag_key: "__variant" } }];
+            }
         }
         count = payload.length;
+        var namedPayload = count === 1 && payload[0].record !== undefined;
         if (reading && value[0].len !== count + 1) return fail(shape, value);
         if (reading) {
             if (!jsonBoolWire) out = fields ? { __ty: name, __tag: variant } : { __variant: variant, __ty: name };
@@ -898,6 +959,7 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
         } else data = [];
         for (i = 0; i < count; i++) {
             if (reading) item = value[0]._data[i + 1];
+            else if (namedPayload) item = value;
             else if (fields) item = value[fields[i].slot];
             else if (jsonBoolWire) item = value.__variant === "True";
             else item = __json_record_js_payload_get(value, payload[i], i);
@@ -907,6 +969,9 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
                 return at(r, i + 1);
             }
             if (!reading) data.push(r);
+            else if (namedPayload) {
+                for (var slotKey in r) if (slotKey !== "__ty") out[slotKey] = r[slotKey];
+            }
             else if (fields) out[fields[i].slot] = r;
             else if (jsonBoolWire) out = json_bool(r);
             else __json_record_js_payload_put(out, payload[i], i, r);
@@ -919,14 +984,15 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
         if (reading && !tagged(value, "Object")) return fail(shape, value);
         var defaulted = defaults !== null && defaults !== undefined;
         if (reading && codec.reject_unknown_fields) {
-            var names = codec.field_names[name];
+            var namesKey = shape.record ? name + "::" + shape.variant : name;
+            var names = codec.field_names[namesKey];
             if (names === undefined) {
                 names = new Set();
                 for (i = 0; i < decl.fields.length; i++) {
                     var declared = decl.fields[i];
                     if (!declared.json_skip) names.add(declared.json_name !== undefined ? declared.json_name : declared.name);
                 }
-                codec.field_names[name] = names;
+                codec.field_names[namesKey] = names;
             }
             for (var key of value[0].keys()) {
                 if (!names.has(key)) {
@@ -944,6 +1010,7 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
             }
             var wire = field.json_name !== undefined ? field.json_name : field.name;
             if (reading) item = value[0].get(wire);
+            else if (decl.slots) item = value[decl.slots[field.name]];
             else if (decl.kind === "c_struct") item = value[field.name];
             else item = __json_record_js_field_get(value, field);
             var child = field.desc;
@@ -970,12 +1037,14 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
                 if (!reading) throw new Error("json record invalid field " + name + "." + field.name);
                 return at(r, wire);
             }
-            if (reading) __json_record_js_field_put(data, field, r);
+            if (reading && decl.slots) data[decl.slots[field.name]] = r;
+            else if (reading) __json_record_js_field_put(data, field, r);
             else data.set(wire, r);
         }
+        if (reading && shape.record) data[decl.tag_key] = shape.variant;
         out = reading ? data : node("Object", data);
     } else throw new Error("json record unsupported declaration: " + name);
-    if (!reading) seen.delete(value);
+    if (tracked) seen.delete(value);
     return out;
 """
 
