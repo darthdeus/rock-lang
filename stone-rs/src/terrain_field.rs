@@ -45,51 +45,35 @@ pub(super) fn compute(
         }
     }
 
-    // Cells are stored as f32 but Rock's float is f64: widen, keep mins in f64, round once on
-    // write.
-    for y in 0..sample_height {
-        if cancelled.load(Ordering::Acquire) {
-            return None;
-        }
-        for x in 0..sample_width {
-            let index = y * sample_width + x;
-            let mut d = f64::from(distance[index]);
-            if x > 0 {
-                d = d.min(f64::from(distance[index - 1]) + 1.0);
+    for backward in [false, true] {
+        let indices = |len| (0..len).map(move |i| if backward { len - 1 - i } else { i });
+        for y in indices(sample_height) {
+            if cancelled.load(Ordering::Acquire) {
+                return None;
             }
-            if y > 0 {
-                d = d.min(f64::from(distance[index - sample_width]) + 1.0);
-                if x > 0 {
-                    d = d.min(f64::from(distance[index - sample_width - 1]) + FIELD_DIAG);
+            let (above, rest) = distance.split_at_mut(y * sample_width);
+            let (row, below) = rest.split_at_mut(sample_width);
+            let previous = if backward {
+                below.get(..sample_width)
+            } else {
+                above.get(above.len().wrapping_sub(sample_width)..)
+            };
+            let mut side = FIELD_FAR;
+            for x in indices(sample_width) {
+                // Widen to Rock's f64 float, round once on write.
+                let mut d = f64::from(row[x]).min(f64::from(side) + 1.0);
+                if let Some(previous) = previous {
+                    // Clamping a missing diagonal gives the vertical neighbor,
+                    // whose straight step is always cheaper.
+                    let diagonal =
+                        previous[x.saturating_sub(1)].min(previous[(x + 1).min(sample_width - 1)]);
+                    d = d
+                        .min(f64::from(previous[x]) + 1.0)
+                        .min(f64::from(diagonal) + FIELD_DIAG);
                 }
-                if x + 1 < sample_width {
-                    d = d.min(f64::from(distance[index - sample_width + 1]) + FIELD_DIAG);
-                }
+                side = d as f32;
+                row[x] = side;
             }
-            distance[index] = d as f32;
-        }
-    }
-
-    for y in (0..sample_height).rev() {
-        if cancelled.load(Ordering::Acquire) {
-            return None;
-        }
-        for x in (0..sample_width).rev() {
-            let index = y * sample_width + x;
-            let mut d = f64::from(distance[index]);
-            if x + 1 < sample_width {
-                d = d.min(f64::from(distance[index + 1]) + 1.0);
-            }
-            if y + 1 < sample_height {
-                d = d.min(f64::from(distance[index + sample_width]) + 1.0);
-                if x > 0 {
-                    d = d.min(f64::from(distance[index + sample_width - 1]) + FIELD_DIAG);
-                }
-                if x + 1 < sample_width {
-                    d = d.min(f64::from(distance[index + sample_width + 1]) + FIELD_DIAG);
-                }
-            }
-            distance[index] = d as f32;
         }
     }
 
@@ -106,4 +90,20 @@ pub(super) fn compute(
     }
 
     Some(distance)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn both_sweeps_propagate_signed_distances_to_all_corners() {
+        let mut solid = [1; 49];
+        solid[24] = 0;
+        let field = compute(7, 7, 1, &solid, &AtomicBool::new(false)).unwrap();
+        assert_eq!(field[24], 0.5);
+        for corner in [0, 6, 42, 48] {
+            assert_eq!(field[corner], -4.3284273);
+        }
+    }
 }
