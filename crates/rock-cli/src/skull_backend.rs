@@ -2106,6 +2106,19 @@ pub(crate) fn body_numeric_edit(
     text: &str,
     body_range: std::ops::Range<usize>,
 ) -> Result<Option<String>> {
+    Ok(
+        numeric_replacement(text, body_range)?.map(|(range, replacement)| {
+            let mut edited = text.to_owned();
+            edited.replace_range(range, replacement);
+            edited
+        }),
+    )
+}
+
+pub(crate) fn numeric_replacement(
+    text: &str,
+    body_range: std::ops::Range<usize>,
+) -> Result<Option<(std::ops::Range<usize>, &'static str)>> {
     let body = text
         .get(body_range.clone())
         .ok_or_else(|| anyhow::anyhow!("survey body span is outside its source"))?;
@@ -2131,12 +2144,10 @@ pub(crate) fn body_numeric_edit(
             _ => continue,
         };
         let (start, end) = token.span.offset_range();
-        let mut edited = text.to_string();
-        edited.replace_range(
+        return Ok(Some((
             body_range.start + start..body_range.start + end,
             replacement,
-        );
-        return Ok(Some(edited));
+        )));
     }
     Ok(None)
 }

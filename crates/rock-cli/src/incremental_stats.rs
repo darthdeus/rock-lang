@@ -1,6 +1,9 @@
 //! Time edits through Stone's warm compiler and on-disk artifact publication.
 
-use crate::lsp_survey::{EditKind, FnStat, collect_stats, make_edit, read_survey_source};
+use crate::lsp_survey::{
+    EditKind, FnStat, collect_stats, is_rock_body, make_edit, read_survey_source,
+    special_candidates,
+};
 use crate::skull_backend::{IncrementalProject, SkullReload};
 use anyhow::Result;
 use bone_core::prelude::Instant;
@@ -78,7 +81,7 @@ fn make_signature_edit(orig: &str, f: &FnStat) -> Option<String> {
 fn edit_text(orig: &str, f: &FnStat, kind: EditKind) -> Result<Option<String>> {
     match kind {
         EditKind::Signature => Ok(make_signature_edit(orig, f)),
-        EditKind::Body | EditKind::Broken => make_edit(orig, f, kind),
+        _ => make_edit(orig, f, kind),
     }
 }
 
@@ -92,21 +95,23 @@ fn candidates(fns: &[FnStat]) -> Vec<(FnStat, EditKind)> {
             out.push((f.clone(), kind));
         }
     };
-    let mut by_body: Vec<&FnStat> = fns.iter().collect();
+    let rock_fns: Vec<_> = fns.iter().filter(|f| is_rock_body(f)).collect();
+    let mut by_body = rock_fns.clone();
     by_body.sort_by_key(|f| std::cmp::Reverse(f.body_bytes));
     for f in by_body.iter().take(3) {
         add(f, EditKind::Body);
     }
-    let mut by_calls: Vec<&FnStat> = fns.iter().collect();
+    let mut by_calls = rock_fns.clone();
     by_calls.sort_by_key(|f| std::cmp::Reverse(f.call_fan_in));
     for f in by_calls.iter().take(2) {
         add(f, EditKind::Signature);
     }
-    let mut by_mods: Vec<&FnStat> = fns.iter().filter(|f| f.mod_fan_in > 0).collect();
+    let mut by_mods: Vec<_> = rock_fns.into_iter().filter(|f| f.mod_fan_in > 0).collect();
     by_mods.sort_by_key(|f| std::cmp::Reverse(f.mod_fan_in));
     for f in by_mods.iter().take(2) {
         add(f, EditKind::Signature);
     }
+    out.extend(special_candidates(fns));
     out
 }
 
@@ -140,6 +145,18 @@ pub(crate) fn incremental_stats(
     let mut project = IncrementalProject::init(&dir_str, &main_path, &incremental_path)?;
     let init_ms = t.elapsed().as_secs_f64() * 1000.0;
     let main_bytes = std::fs::metadata(&main_path)?.len();
+
+    // A restart route updates the source session without publishing an artifact.
+    // Fold it as the runtime does, outside the timed edit, before reusing the cache.
+    let settle_reload = |project: &mut IncrementalProject, reload: &SkullReload| {
+        if matches!(
+            reload,
+            SkullReload::FullRequired { .. } | SkullReload::ShapeChanged { .. }
+        ) {
+            project.force_full(&main_path, &incremental_path)?;
+        }
+        Ok::<_, anyhow::Error>(())
+    };
 
     let iters = iters.max(1);
     let mut results = Vec::new();
@@ -184,6 +201,7 @@ pub(crate) fn incremental_stats(
                     break;
                 }
             };
+            settle_reload(&mut project, &reload)?;
             if i < warmup {
                 continue;
             }
@@ -220,7 +238,8 @@ pub(crate) fn incremental_stats(
             }
         }
         if project.source_text(source).as_deref() != Some(orig.as_str()) {
-            project.apply_edit(source, &orig, &main_path, &incremental_path)?;
+            let reload = project.apply_edit(source, &orig, &main_path, &incremental_path)?;
+            settle_reload(&mut project, &reload)?;
         }
         results.push(result);
     }

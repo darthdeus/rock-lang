@@ -9,7 +9,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::skull_backend::{body_numeric_edit, ms};
+use crate::skull_backend::{body_numeric_edit, ms, numeric_replacement};
 
 #[cfg(test)]
 mod tests {
@@ -23,6 +23,7 @@ mod tests {
             name_off: orig.find("get").unwrap(),
             span_end: orig.len(),
             body_range: orig.find('{').unwrap()..orig.rfind('}').unwrap() + 1,
+            special_edit: None,
             body_bytes: 0,
             params: 2,
             has_ret: true,
@@ -72,6 +73,9 @@ mod tests {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EditKind {
     Body,
+    GenericBody,
+    InlineBody,
+    Field,
     Signature,
     Broken,
 }
@@ -80,14 +84,17 @@ impl EditKind {
     pub(crate) fn label(self) -> &'static str {
         match self {
             EditKind::Body => "body",
+            EditKind::GenericBody => "generic-body",
+            EditKind::InlineBody => "inline-body",
+            EditKind::Field => "field",
             EditKind::Signature => "signature",
             EditKind::Broken => "broken",
         }
     }
     fn expected_tier(self) -> &'static str {
         match self {
-            EditKind::Body => "BodyOnly",
-            EditKind::Signature => "Interface",
+            EditKind::Body | EditKind::GenericBody => "BodyOnly",
+            EditKind::Signature | EditKind::InlineBody | EditKind::Field => "Interface",
             EditKind::Broken => "FullUser",
         }
     }
@@ -101,6 +108,7 @@ pub(crate) struct FnStat {
     pub(crate) name_off: usize,
     pub(crate) span_end: usize,
     pub(crate) body_range: std::ops::Range<usize>,
+    special_edit: Option<EditKind>,
     pub(crate) body_bytes: usize,
     pub(crate) params: usize,
     pub(crate) has_ret: bool,
@@ -213,31 +221,41 @@ pub(crate) fn collect_stats(
         let mut body_bytes = 0usize;
         let mut fn_count = 0usize;
         for (fid, func) in module.functions.iter() {
-            // Editable rock bodies only: skip externs and inline bodies.
-            if func.is_extern || func.inline_body.is_some() {
+            if func.is_extern {
                 continue;
             }
             let (s, e) = func.span.offset_range();
-            let Some(body) = module
-                .bodies
-                .get(&bone_semantic::hir::BodyOwner::Function(fid))
-            else {
-                continue;
-            };
-            let Some(root) = body.root else { continue };
-            let (body_start, body_end) = body.expr_spans[root].offset_range();
-            let bytes = e.saturating_sub(s);
-            body_bytes += bytes;
-            fn_count += 1;
             let name_off = func.name_span.offset_range().0;
+            let (body_range, special_edit) = if let Some((backend, _)) = func.inline_body {
+                if backend != bone_semantic::hir::FnBackend::Lua {
+                    continue;
+                }
+                (name_off..e, Some(EditKind::InlineBody))
+            } else {
+                let Some(body) = module
+                    .bodies
+                    .get(&bone_semantic::hir::BodyOwner::Function(fid))
+                else {
+                    continue;
+                };
+                let Some(root) = body.root else { continue };
+                let (start, end) = body.expr_spans[root].offset_range();
+                let range = start..end;
+                let generic = !func.generics.is_empty()
+                    && numeric_replacement(&text, range.clone()).is_ok_and(|edit| edit.is_some());
+                fn_count += 1;
+                body_bytes += e.saturating_sub(s);
+                (range, generic.then_some(EditKind::GenericBody))
+            };
             fns.push(FnStat {
                 file: file.clone(),
                 name: func.name.as_str().to_string(),
                 line: line_of(&text, name_off),
                 name_off,
                 span_end: e,
-                body_range: body_start..body_end,
-                body_bytes: bytes,
+                body_range,
+                special_edit,
+                body_bytes: e.saturating_sub(s),
                 params: func.param_decls.len(),
                 has_ret: func.return_ty.is_some(),
                 call_fan_in: call_tally.get(&(module.id, fid)).copied().unwrap_or(0),
@@ -246,6 +264,38 @@ pub(crate) fn collect_stats(
                     .get(&func.name)
                     .map(|s| s.iter().filter(|m| **m != module.id).count())
                     .unwrap_or(0),
+            });
+        }
+
+        // Add a defaulted field to an ordinary record, so existing literals
+        // still type-check. Avoid records with an explicitly exposed layout.
+        if let Some(s) = module.structs.values().find(|s| {
+            !s.is_value
+                && !s.consume
+                && !s.lua_named
+                && !s.nomangle
+                && s.generics.is_empty()
+                && s.fields.iter().all(|f| f.name.as_str() != "__survey_field")
+                && text
+                    .as_bytes()
+                    .get(s.span.offset_range().1.saturating_sub(1))
+                    == Some(&b'}')
+        }) {
+            let name_off = s.name_span.offset_range().0;
+            let end = s.span.offset_range().1;
+            fns.push(FnStat {
+                file: file.clone(),
+                name: s.name.as_str().to_string(),
+                line: line_of(&text, name_off),
+                name_off,
+                span_end: end,
+                body_range: end - 1..end - 1,
+                special_edit: Some(EditKind::Field),
+                body_bytes: 0,
+                params: 0,
+                has_ret: false,
+                call_fan_in: 0,
+                mod_fan_in: 0,
             });
         }
 
@@ -263,6 +313,21 @@ pub(crate) fn collect_stats(
         });
     }
     Ok((mods, fns))
+}
+
+pub(crate) fn special_candidates(fns: &[FnStat]) -> impl Iterator<Item = (FnStat, EditKind)> + '_ {
+    [EditKind::Field, EditKind::GenericBody, EditKind::InlineBody]
+        .into_iter()
+        .filter_map(|kind| {
+            fns.iter()
+                .filter(|f| f.special_edit == Some(kind))
+                .max_by_key(|f| f.call_fan_in)
+                .map(|f| (f.clone(), kind))
+        })
+}
+
+pub(crate) fn is_rock_body(f: &FnStat) -> bool {
+    !matches!(f.special_edit, Some(EditKind::InlineBody | EditKind::Field))
 }
 
 /// SIGNATURE edit: insert a dummy first param so the arity (interface) changes.
@@ -309,9 +374,42 @@ fn make_broken_edit(orig: &str, f: &FnStat) -> Option<String> {
     Some(out)
 }
 
+fn inline_body_edit(orig: &str, range: std::ops::Range<usize>) -> Option<String> {
+    let source = orig.get(range.clone())?;
+    let tokens = crate::Tokenizer::from_code("survey-inline.rock", source)
+        .tokenize()
+        .ok()?;
+    // The final string token is the body. A parameter default may also be a string.
+    let token = tokens.iter().rev().find(|t| {
+        matches!(
+            t.kind,
+            crate::TokenKind::String(_) | crate::TokenKind::RawString(_)
+        )
+    })?;
+    let (start, end) = token.span.offset_range();
+    let literal = &source[start..end];
+    let quote = literal.find('"')?;
+    let width = if literal[quote..].starts_with("\"\"\"") {
+        3
+    } else {
+        1
+    };
+    let mut edited = orig.to_owned();
+    edited.insert_str(range.start + start + quote + width, "--[[survey]] ");
+    Some(edited)
+}
+
 pub(crate) fn make_edit(orig: &str, f: &FnStat, kind: EditKind) -> Result<Option<String>> {
     Ok(match kind {
-        EditKind::Body => return body_numeric_edit(orig, f.body_range.clone()),
+        EditKind::Body | EditKind::GenericBody => {
+            return body_numeric_edit(orig, f.body_range.clone());
+        }
+        EditKind::InlineBody => inline_body_edit(orig, f.body_range.clone()),
+        EditKind::Field => {
+            let mut edited = orig.to_owned();
+            edited.insert_str(f.body_range.start, "\n    __survey_field: int = 0,\n");
+            Some(edited)
+        }
         EditKind::Signature => make_sig_edit(orig, f),
         EditKind::Broken => make_broken_edit(orig, f),
     })
@@ -337,6 +435,8 @@ pub(crate) fn lsp_survey(
         .map_err(|e| anyhow::anyhow!("bone session warm failed: {}", e.message))?;
 
     let (mut mods, mut fns) = collect_stats(&session, &dir)?;
+    let special: Vec<_> = special_candidates(&fns).collect();
+    fns.retain(is_rock_body);
     if fns.is_empty() {
         anyhow::bail!("no editable project functions found under `{path}`");
     }
@@ -393,6 +493,8 @@ pub(crate) fn lsp_survey(
     for f in by_modfan.iter().filter(|f| f.mod_fan_in > 0).take(5) {
         add(f, EditKind::Signature, &mut candidates, &mut seen);
     }
+
+    candidates.extend(special);
 
     let iters = iters.max(15);
     let full_range = Range {

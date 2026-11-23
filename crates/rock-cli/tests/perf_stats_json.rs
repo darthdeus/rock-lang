@@ -46,6 +46,68 @@ fn lsp_survey_accepts_the_current_directory() {
     );
 }
 
+#[test]
+fn both_surveys_include_field_generic_and_inline_edits() {
+    let root = project();
+    crate::support::write_files(
+        root.path(),
+        &[
+            (
+                "main.rock",
+                r#"
+mod main;
+
+use super::survey::generic;
+use super::survey::inline_body;
+
+fn main() {
+    print(generic(1) + inline_body())
+}
+"#,
+            ),
+            (
+                "survey.rock",
+                r#"
+mod survey;
+
+pub struct Record { value: int }
+
+pub fn generic<T>(x: T) -> T {
+    let count = 1
+    if count > 0 { return x }
+    return x
+}
+
+pub inline(lua) fn inline_body() -> int = "return 2"
+"#,
+            ),
+        ],
+    );
+    for (command, key) in [("incremental-stats", "edits"), ("lsp-survey", "candidates")] {
+        let report = json_report(root.path(), command, "1", "0");
+        let candidates = report[key].as_array().unwrap();
+        for (kind, name) in [
+            ("field", "::Record"),
+            ("generic-body", "::generic"),
+            ("inline-body", "::inline_body"),
+        ] {
+            let edit = candidates
+                .iter()
+                .find(|edit| edit["kind"] == kind)
+                .unwrap_or_else(|| panic!("missing {kind} in {command}: {candidates:?}"));
+            assert!(edit["name"].as_str().unwrap().ends_with(name), "{edit:?}");
+            assert!(edit["error"].is_null(), "{edit:?}");
+            if command == "incremental-stats" && kind == "generic-body" {
+                assert_eq!(edit["reload"], "incremental", "{edit:?}");
+            }
+            assert!(
+                !edit["samples_ms"].as_array().unwrap().is_empty(),
+                "{edit:?}"
+            );
+        }
+    }
+}
+
 /// Larger than any body of the project, so an edit that picked test-only
 /// sources would pick this one.
 const SIM: &str = r#"
