@@ -123,7 +123,14 @@ impl<'a> Builder<'a> {
                         Expr::Call { callee, args, .. } => s.lower_call_repr(e, callee, args)?,
                         Expr::Index { base, index } => s.lower_index_repr(e, base, index)?,
                         _ => {
-                            let value = s.lower_expr_repr_unscoped(e)?;
+                            let value = match s.lower_expr_repr_unscoped(e)? {
+                                ValueRepr::Scalar(value)
+                                    if matches!(s.body.expr_arena[e], Expr::FieldAccess { .. }) =>
+                                {
+                                    s.stored_read_repr(e, value)?
+                                }
+                                other => other,
+                            };
                             s.value_bundle_for_expr(e, value)?
                         }
                     },
@@ -783,7 +790,7 @@ impl<'a> Builder<'a> {
                         name,
                         self.concrete_expr_ty(e),
                     )?)),
-                    None => self.stored_read_repr(e, fv),
+                    None => Ok(ValueRepr::Scalar(fv)),
                 }
             }
             Expr::Global(g)
@@ -1015,7 +1022,13 @@ impl<'a> Builder<'a> {
                 }
                 Some(r) => r.clone(),
                 None => {
-                    let r = self.lower_expr_repr_inner(lf.value)?.into_value();
+                    let bundle = self.lower_expr_repr_inner(lf.value)?;
+                    // A tuple field occupies one storage slot, even when its ABI splats.
+                    let r = if matches!(bundle.value(), ValueRepr::Tuple { .. }) {
+                        ValueRepr::Scalar(self.pack_stored(bundle)?)
+                    } else {
+                        bundle.into_value()
+                    };
                     by_value.insert(key, r.clone());
                     r
                 }

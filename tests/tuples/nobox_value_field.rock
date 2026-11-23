@@ -1,0 +1,15 @@
+nobox value Point { x: int, y: int }
+value Holder { k: int, pair: (Point, int) }
+struct Outer { holder: Holder }
+
+fn make_outer() -> Outer {
+    return Outer { holder: Holder { k: 1, pair: (Point { x: 2, y: 5 }, 9) } }
+}
+
+@test fn tuple_field_in_returned_value() {
+    let outer = make_outer()
+    assert_eq(outer.holder.k, 1)
+    assert_eq(outer.holder.pair.1, 9)
+    let (point, n) = outer.holder.pair
+    assert(point.x == 2 && point.y == 5 && n == 9)
+}
