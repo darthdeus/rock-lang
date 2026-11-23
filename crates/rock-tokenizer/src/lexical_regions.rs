@@ -1,3 +1,4 @@
+use crate::interp::{Flavor, Piece, scan_string};
 use crate::tokenizer::directive;
 
 /// What the source at a byte offset lexically is.
@@ -9,96 +10,105 @@ pub enum LexRegion {
 }
 
 pub fn region_at(src: &str, offset: usize) -> LexRegion {
-    // Regions nest (a literal in a hole in a string): the innermost, latest-starting one wins.
-    let (mut found, mut latest) = (LexRegion::Code, 0);
-    scan(src, offset, &mut |start, end, region| {
-        if start < offset && offset <= end && start >= latest {
-            found = region;
-            latest = start;
-        }
-    });
-    found
-}
-
-fn is_ident_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
-}
-
-/// Emits `(start, end, region)` with `end` the closing delimiter's LAST byte (end of input
-/// when unterminated), so a cursor up to and including the closer is inside.
-fn scan(src: &str, limit: usize, emit: &mut dyn FnMut(usize, usize, LexRegion)) {
     let b = src.as_bytes();
-    let n = b.len();
     let mut i = 0;
-    while i < n && i <= limit {
+    while i < src.len() && i < offset {
         match b[i] {
             b'/' if b.get(i + 1) == Some(&b'/') => {
-                let end = line_end(b, i + 2);
-                emit(i, end, LexRegion::Comment);
-                i = end;
+                i = line_end(b, i + 2);
+                if offset <= i {
+                    return LexRegion::Comment;
+                }
             }
             b'/' if b.get(i + 1) == Some(&b'*') => {
-                if let Some(len) = src[i + 2..].find("*/") {
-                    let close = i + 2 + len;
-                    emit(i, close + 1, LexRegion::Comment);
-                    i = close + 2;
-                } else {
-                    emit(i, n, LexRegion::Comment);
-                    i = n;
+                let Some(len) = src[i + 2..].find("*/") else {
+                    return LexRegion::Comment;
+                };
+                i += 2 + len + 2;
+                if offset < i {
+                    return LexRegion::Comment;
                 }
             }
             b'#' => {
                 if let Some((_, len)) = directive(&src[i + 1..]) {
                     i += 1 + len;
                 } else {
-                    let end = line_end(b, i + 1);
-                    emit(i, end, LexRegion::Comment);
-                    i = end;
+                    i = line_end(b, i + 1);
+                    if offset <= i {
+                        return LexRegion::Comment;
+                    }
                 }
             }
             b'"' | b'\'' | b'r' if literal_opens_at(src, i) => {
-                i = string_regions(src, i, emit);
+                let scan = scan_string(src, i);
+                if offset < scan.end || (!scan.terminated && offset == scan.end) {
+                    for piece in &scan.pieces {
+                        let Piece::Hole {
+                            range,
+                            expr,
+                            spec,
+                            closed,
+                        } = piece
+                        else {
+                            continue;
+                        };
+                        let end = range.1 - usize::from(*closed);
+                        if range.0 < offset
+                            && (offset <= end && (*closed || offset < end || end == src.len()))
+                        {
+                            let spec = spec.filter(|&(start, _)| offset >= start);
+                            let part = spec.unwrap_or(*expr);
+                            let classify = if spec.is_some() {
+                                format_region
+                            } else {
+                                region_at
+                            };
+                            let hole = &src[part.0..part.1];
+                            if scan.flavor == Flavor::Quoted && hole.contains('\\') {
+                                let (cooked, offsets) = scan.hole_source(src, part);
+                                let at = offsets.partition_point(|&raw| raw < offset);
+                                return classify(&cooked, at);
+                            }
+                            return classify(hole, offset - part.0);
+                        }
+                    }
+                    return LexRegion::StringText;
+                }
+                i = scan.end;
             }
             _ => i += 1,
         }
+    }
+    LexRegion::Code
+}
+
+fn format_region(spec: &str, offset: usize) -> LexRegion {
+    let (mut depth, mut start) = (0usize, 0);
+    for (at, &b) in spec.as_bytes().iter().take(offset).enumerate() {
+        match b {
+            b'{' => {
+                if depth == 0 {
+                    start = at + 1;
+                }
+                depth += 1;
+            }
+            b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    if depth == 0 {
+        LexRegion::StringText
+    } else {
+        region_at(&spec[start..], offset - start)
     }
 }
 
 fn literal_opens_at(src: &str, i: usize) -> bool {
     let b = src.as_bytes();
-    if b[i] == b'r' && (i > 0 && is_ident_byte(b[i - 1])) {
+    if b[i] == b'r' && i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_') {
         return false;
     }
-    crate::interp::Flavor::at(src, i).is_some()
-}
-
-fn string_regions(src: &str, start: usize, emit: &mut dyn FnMut(usize, usize, LexRegion)) -> usize {
-    let scan = crate::interp::scan_string(src, start);
-    let last = if scan.terminated {
-        scan.end - 1
-    } else {
-        scan.end
-    };
-    emit(start, last, LexRegion::StringText);
-    for piece in &scan.pieces {
-        if let crate::interp::Piece::Hole { range, closed, .. } = piece {
-            let hole_last = if !closed && range.1 == src.len() {
-                range.1
-            } else {
-                range.1 - 1
-            };
-            emit(range.0, hole_last, LexRegion::Code);
-            let mut j = range.0 + 1;
-            while j < range.1 {
-                if literal_opens_at(src, j) {
-                    j = string_regions(src, j, emit).max(j + 1);
-                } else {
-                    j += 1;
-                }
-            }
-        }
-    }
-    scan.end
+    Flavor::at(src, i).is_some()
 }
 
 fn line_end(b: &[u8], from: usize) -> usize {

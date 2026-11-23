@@ -457,6 +457,16 @@ fn code_around_comments_and_strings_completes() {
         (MOB, "    print(\"hp={mob.hea<|>}\")\n}\n", "health: int"),
         (
             MOB,
+            "    print(\"{mob.health:#{mob.hea<|>}x}\")\n}\n",
+            "health: int",
+        ),
+        (
+            MOB,
+            "    print(\"{ \\\"tag\\\" + hel<|>}\")\n}\n",
+            "helper_thing",
+        ),
+        (
+            MOB,
             "    print(\"a {mob.health} b {hel<|>}\")\n}\n",
             "helper_thing",
         ),
@@ -494,6 +504,9 @@ fn comments_strings_and_numbers_offer_nothing() {
         (MOB, "    let t = \"\"\"triple hel<|>\"\"\"\n}\n"),
         (MOB, "    print(\"some hel<|>\n}\n"),
         (MOB, "    print(\"{join(v, \"hel<|>\")}\")\n}\n"),
+        (MOB, "    print(\"{join(v, \\\"hel<|>\\\")}\")\n}\n"),
+        (MOB, "    print(\"{mob.health /* hel<|> */}\")\n}\n"),
+        (MOB, "    print(\"{mob.health:hel<|>}\")\n}\n"),
     ];
     for (head, body) in bodies {
         assert_eq!(
