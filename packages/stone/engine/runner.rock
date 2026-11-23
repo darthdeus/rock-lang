@@ -242,7 +242,7 @@ fn native_engine_imgui_boot(window: StoneWindow) {
         imgui_enable_docking()
         log_debug("IMGUI", "C backend initialized")
     } else {
-        log_error("IMGUI", "Failed to initialize")
+        // The fallback reports initialization failures from every caller.
         __imgui_note_platform_init_failed()
     }
 }

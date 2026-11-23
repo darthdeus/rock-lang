@@ -37,14 +37,33 @@ inline(lua) fn cimgui_failure_restore_imgui_state() = """
 fn cimgui_failure_sweep_under_forced_stub() -> (int, int, string) {
     cimgui_failure_save_imgui_state()
     defer { cimgui_failure_restore_imgui_state() }
-    __imgui_note_platform_init_failed()
+    cimgui_failure_install_logged_stub()
     return cimgui_failure_sweep_stub_enums()
+}
+
+inline(lua) fn cimgui_failure_stub_log_count() -> int = """
+    local site = "stone-imgui:platform-stub"
+    local stats = _G.__rock_log_dedup
+    local sites = _G.__rock_log_sites
+    if stats and sites and (sites[site] or ""):sub(1, 5) == "STUB|" then
+        return stats[site]
+    end
+    return 0
+"""
+
+fn cimgui_failure_install_logged_stub() {
+    let expected: [string] = if cimgui_failure_stub_log_count() == 0 {
+        ["[STUB] ImGui platform initialization failed. Using an inert ImGui interface."]
+    } else { [] }
+    assert_error_logs(expected, () => { __imgui_note_platform_init_failed() })
 }
 
 @test
 fn cimgui_failure_stub_answers_no_enum_with_a_function() {
     assert(cimgui_failure_has_native_binding(), "the live bindings supply the enum names")
+    let before = cimgui_failure_stub_log_count()
     let (violations, swept, first) = cimgui_failure_sweep_under_forced_stub()
+    assert_eq(cimgui_failure_stub_log_count(), before + 1, "stub installation is logged")
     assert(swept > 0, "the production table contains enums")
     assert_eq(violations, 0,
         "stub answers {violations} enum lookups with functions, first: {first}")
@@ -53,7 +72,7 @@ fn cimgui_failure_stub_answers_no_enum_with_a_function() {
 fn cimgui_failure_probe_tool_key_under_stub() -> (int, bool) {
     cimgui_failure_save_imgui_state()
     defer { cimgui_failure_restore_imgui_state() }
-    __imgui_note_platform_init_failed()
+    cimgui_failure_install_logged_stub()
     let id = tool_key_id_dynamic("a")
     if id == -2 {
         tool_input_sample_frame()

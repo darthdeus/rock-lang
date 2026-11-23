@@ -98,6 +98,8 @@ inline(lua) fn __imgui_prelude_init(
 // leave every direct imgui.C call site a path into cimgui with no live
 // context, so it is replaced with an inert stub.
 inline(lua) fn __imgui_note_platform_init_failed() = """
+    _log_once_impl(0, "STUB", "ImGui platform initialization failed. Using an inert ImGui interface.",
+        "stone-imgui:platform-stub")
     _G.__imgui_install_stub()
 """
 
