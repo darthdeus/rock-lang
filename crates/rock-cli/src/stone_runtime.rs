@@ -192,38 +192,47 @@ pub fn program_preamble(dir: &str, kind: ProgramKind) -> Result<String> {
     Ok(full)
 }
 
-/// Sound assets must be ready before the compiler evaluates build-time inputs.
-pub(crate) fn prepare_run(dir: &str) -> Result<()> {
-    if rock_engine_host::project::is_game_project(Path::new(dir)).unwrap_or(false) {
-        crate::package::prepare_sound_bank(dir)?;
-    } else {
+pub(crate) fn run(
+    dir: &str,
+    app_args: &[String],
+    compile: impl FnOnce() -> Result<(GameProgram, bool)>,
+) -> Result<()> {
+    if !rock_engine_host::project::is_game_project(Path::new(dir)).unwrap_or(false) {
         for lib in rock_engine_host::engine_build::game_engine_libs(dir)? {
             rock_engine_host::engine_build::build_optional_engine_lib(&lib)?;
         }
-    }
-    Ok(())
-}
-
-/// Select the runtime recipe after the public compiler has emitted definitions.
-pub fn launch(dir: &str, lua: &GameProgram, emits_main: bool, app_args: &[String]) -> Result<()> {
-    if !rock_engine_host::project::is_game_project(Path::new(dir)).unwrap_or(false) {
+        let (lua, emits_main) = compile()?;
         return crate::compile_cmd::run_lua_program(
             &program_preamble(dir, ProgramKind::Project)?,
-            lua,
+            &lua,
             emits_main,
         );
     }
-    if !std::env::var("ROCK_SKIP_ENGINE_BUILD").is_ok_and(|v| v == "1") {
-        if let Err(e) = rock_engine_host::engine_build::build_engine_libs(dir) {
-            log::error!(target: "SKULL", "engine build failed: {}", e);
-            crate::invocation_log::exit(1);
-        }
-    }
+    // The compiler may read the generated sound bank as a build-time input.
+    rock_host::timed("sound bank", || crate::package::prepare_sound_bank(dir))?;
+    let compile = || rock_host::timed("compile", compile);
+    let (lua, emits_main) = if std::env::var("ROCK_SKIP_ENGINE_BUILD").as_deref() == Ok("1") {
+        compile()?
+    } else {
+        std::thread::scope(|scope| {
+            let engine = scope.spawn(|| {
+                rock_host::timed("engine libraries", || {
+                    rock_engine_host::engine_build::build_engine_libs(dir)
+                })
+                .map_err(|error| anyhow::anyhow!("engine build failed: {error:#}"))
+            });
+            let compiled = compile()?;
+            engine
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
+            Ok::<_, anyhow::Error>(compiled)
+        })?
+    };
     // A fresh baseline must not reload an overlay from an earlier session.
     let lua_file = rock_engine_host::project::stone_session_main_lua_path(dir, std::process::id());
     if let Err(e) = write_full_main(
         &program_preamble(dir, ProgramKind::Game)?,
-        lua,
+        &lua,
         emits_main,
         &lua_file,
         &lua_file.with_file_name("incremental.lua"),

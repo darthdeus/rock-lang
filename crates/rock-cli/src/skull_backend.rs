@@ -1659,51 +1659,45 @@ pub(crate) fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError])
     crate::bone_backend::render_errs(&sf, errs)
 }
 
-fn skull_emit_project(dir: &str) -> Result<(GameProgram, bool)> {
-    let inputs = crate::comptime::ProjectInputs::resolve(std::path::Path::new(dir));
-    skull_emit_project_with_inputs(dir, inputs)
-}
-
 fn skull_emit_project_with_inputs(
     dir: &str,
     inputs: crate::comptime::ProjectInputs,
 ) -> Result<(GameProgram, bool)> {
     let _slot = crate::compile_slots::acquire(dir)?;
     crate::compile_budget::phase("compile slot");
-    let build = match cli_build(CliBuildMode::ProductionProject { dir, inputs }) {
-        Ok(build) => build,
-        Err(CliBuildFailure::Setup { context, error }) => {
-            if context == Some("cannot load project") {
-                log::error!(target: "SKULL", "cannot load project {}: {:#}", dir, error);
-                crate::invocation_log::exit(1);
-            }
-            return Err(error);
-        }
-        Err(CliBuildFailure::Compile {
-            stage,
-            sources,
-            errors,
-        }) => {
-            eprintln!("{}", render_project_errs(&sources, &errors));
-            match stage {
-                Some(skull::pipeline::Stage::Lint) => {
-                    log::error!(target: "SKULL", "{} lint error(s) in project {}", errors.len(), dir)
+    let build =
+        cli_build(CliBuildMode::ProductionProject { dir, inputs }).map_err(
+            |error| match error {
+                CliBuildFailure::Setup { context, error } => match context {
+                    Some(context) => anyhow::anyhow!("{context} {dir}: {error:#}"),
+                    None => error,
+                },
+                CliBuildFailure::Compile {
+                    stage,
+                    sources,
+                    errors,
+                } => {
+                    eprintln!("{}", render_project_errs(&sources, &errors));
+                    let message = match stage {
+                        Some(skull::pipeline::Stage::Lint) => {
+                            format!("{} lint error(s) in project {dir}", errors.len())
+                        }
+                        Some(skull::pipeline::Stage::Emit) => {
+                            format!("skull emit failed for project {dir}")
+                        }
+                        Some(
+                            skull::pipeline::Stage::Parse
+                            | skull::pipeline::Stage::Check
+                            | skull::pipeline::Stage::Comptime,
+                        ) => {
+                            format!("bone type-check failed for project {dir}")
+                        }
+                        None => format!("cannot compile project {dir}"),
+                    };
+                    anyhow::anyhow!(message)
                 }
-                Some(skull::pipeline::Stage::Emit) => {
-                    log::error!(target: "SKULL", "skull emit failed for project {}", dir)
-                }
-                Some(
-                    skull::pipeline::Stage::Parse
-                    | skull::pipeline::Stage::Check
-                    | skull::pipeline::Stage::Comptime,
-                ) => {
-                    log::error!(target: "SKULL", "bone type-check failed for project {}", dir)
-                }
-                None => {}
-            }
-            crate::invocation_log::exit(1);
-        }
-    };
+            },
+        )?;
     let CliBuild {
         sources,
         compiled,
@@ -1714,10 +1708,8 @@ fn skull_emit_project_with_inputs(
         ws, mut emission, ..
     } = compiled;
     crate::compile_budget::emission(&emission);
-    if let Err(e) = write_allocation_report(None, &emission.allocation_report) {
-        log::error!(target: "SKULL", "cannot write allocation report for {}: {:#}", dir, e);
-        crate::invocation_log::exit(1);
-    }
+    write_allocation_report(None, &emission.allocation_report)
+        .map_err(|error| anyhow::anyhow!("cannot write allocation report for {dir}: {error:#}"))?;
     let emits_main = emission.emits_main;
     let lua = std::mem::take(&mut emission.lua);
     crate::bone_backend::log_compile_stats(&sources, &ws, compile);
@@ -1855,9 +1847,10 @@ pub(crate) fn skull_compile_project_with_recorded_inputs(
 }
 
 fn skull_run_project(dir: &str, app_args: &[String]) -> Result<()> {
-    crate::stone_runtime::prepare_run(dir)?;
-    let (lua, emits_main) = skull_emit_project(dir)?;
-    crate::stone_runtime::launch(dir, &lua, emits_main, app_args)
+    crate::stone_runtime::run(dir, app_args, || {
+        let inputs = crate::comptime::ProjectInputs::resolve(std::path::Path::new(dir));
+        skull_emit_project_with_inputs(dir, inputs)
+    })
 }
 
 /// One JSON line per finished `@test`: `{unit, name, ms, status}`.
