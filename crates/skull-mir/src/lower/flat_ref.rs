@@ -143,9 +143,7 @@ impl<'a> Builder<'a> {
         if let Some(flat) = self.vec_flat_elem_of(container)? {
             return Ok(Some(flat));
         }
-        Ok(self
-            .map_column_value_of(container)?
-            .map(|elem| (elem, FlatStorage::Columns)))
+        self.map_flat_elem_of(container)
     }
 
     pub(crate) fn flat_target_shape(&self, key: &FlatRefKey) -> Result<ValueShape, CompilerError> {
@@ -989,7 +987,7 @@ impl<'a> Builder<'a> {
         let FlatRefVal { vec, slot, key } = place;
         match key.storage {
             FlatStorage::Columns => {
-                let col = self.read_field(vec, key.prefix);
+                let col = self.read_field(vec, super::shape::column_key(key.prefix));
                 Ok((col, slot, ContainerKind::VecColumn))
             }
             FlatStorage::Strided => {

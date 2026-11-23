@@ -249,13 +249,13 @@ impl<'a> Builder<'a> {
         Ok(shape)
     }
 
-    pub(crate) fn map_column_value_of(
+    pub(crate) fn map_flat_elem_of(
         &self,
         e: Idx<Expr>,
-    ) -> Result<Option<ColumnElem>, CompilerError> {
+    ) -> Result<Option<(ColumnElem, FlatStorage)>, CompilerError> {
         Ok(self
             .container_plan_for(e, ContainerFamily::Map)?
-            .and_then(|plan| plan.column_elem(self.scx.rep_arena())))
+            .and_then(|plan| plan.flat_elem(self.scx.rep_arena())))
     }
 
     pub(crate) fn concrete_ty(&self, e: Idx<Expr>) -> Result<Option<&'a MonoTy>, CompilerError> {

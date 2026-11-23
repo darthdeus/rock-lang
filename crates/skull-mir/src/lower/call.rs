@@ -1157,13 +1157,13 @@ impl<'a> Builder<'a> {
             }
             // `len`/`clear` are intercepted too: the generic `clear` unsets while
             // iterating the table it walks, and `len` can read the spine in O(1).
-            if let Some(r) = self.map_column_primitive(e, name.as_str(), &arg_idxs)? {
+            if let Some(r) = self.map_flat_primitive(e, name.as_str(), &arg_idxs)? {
                 return Ok(r);
             }
             // The value type comes from the call's own type, not an argument.
             if name.as_str() == "map_new" && arg_idxs.is_empty() {
-                if let Some(elem) = self.map_column_value_of(e)? {
-                    let value = ValueRepr::Scalar(self.empty_column_map(elem)?);
+                if let Some((elem, storage)) = self.map_flat_elem_of(e)? {
+                    let value = ValueRepr::Scalar(self.empty_flat_map(elem, storage)?);
                     return self.value_bundle_for_expr(e, value);
                 }
             }

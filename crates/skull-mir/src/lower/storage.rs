@@ -829,30 +829,35 @@ impl<'a> Builder<'a> {
             == Some(ValueStorage::GcTable)
     }
 
-    fn column_unset(
+    fn flat_unset(
         &mut self,
         vec: Idx<Inst>,
         index: Idx<Inst>,
         elem: ColumnElem,
+        storage: FlatStorage,
     ) -> Result<(), CompilerError> {
         if !self.column_contains_references(elem) {
             return Ok(());
         }
-        let shape = self.column_shape(elem)?;
+        let row = self.flat_row(elem, storage)?;
         let slot = self.checked_column_index(vec, index);
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
-        for path in column_leaf_paths(&shape) {
-            let col = self.read_field(vec, path);
-            self.write_index(col, slot, nil, ContainerKind::VecColumn);
+        let leaves = vec![nil; row.width];
+        if let Some(paths) = row.columns {
+            self.store_column_leaves(vec, slot, paths, leaves);
+        } else {
+            let at = self.strided_row_of(slot);
+            self.strided_store_leaves_at(vec, at, leaves, row.width, elem);
         }
         Ok(())
     }
 
-    fn map_column_free(
+    fn map_flat_free(
         &mut self,
         map: Idx<Inst>,
         key: Idx<Inst>,
         elem: ColumnElem,
+        storage: FlatStorage,
     ) -> Result<(), CompilerError> {
         let slot = self.call_spine("__map_col_free", vec![map, key])?;
         if !self.column_contains_references(elem) {
@@ -865,23 +870,24 @@ impl<'a> Builder<'a> {
         self.branch_to(present, hit, join);
         self.cur = hit;
         let data = self.map_col_data(map);
-        self.column_unset(data, slot, elem)?;
+        self.flat_unset(data, slot, elem, storage)?;
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = join;
         Ok(())
     }
 
-    fn column_release_all(
+    fn flat_release_all(
         &mut self,
         vec: Idx<Inst>,
         elem: ColumnElem,
+        storage: FlatStorage,
     ) -> Result<(), CompilerError> {
         if !self.column_contains_references(elem) {
             return Ok(());
         }
         let len = self.read_field(vec, crate::names::ustr("len"));
         self.for_each_row(len, |s, _, i| {
-            s.column_unset(vec, i, elem)?;
+            s.flat_unset(vec, i, elem, storage)?;
             Ok(s.int_plus_one(i))
         })
     }
@@ -925,7 +931,7 @@ impl<'a> Builder<'a> {
                         if self.column_contains_references(elem) {
                             let vec = self.lower_expr(recv)?;
                             let index = self.lower_expr(index)?;
-                            self.column_unset(vec, index, elem)?;
+                            self.flat_unset(vec, index, elem, storage)?;
                         }
                     }
                     FlatStorage::Strided => {
@@ -1088,15 +1094,15 @@ impl<'a> Builder<'a> {
         self.read_field(vec, crate::names::ustr(VEC_COLUMN_HEADER_FIELD))
     }
 
-    /// The `data` columns must exist before the first store.
-    /// Even an empty flat Vec has one column per leaf. The field names
-    /// match Arena's bookkeeping SoA: the two are one structure.
-    pub(crate) fn empty_column_map(
+    /// A keyed spine indexes the same flat backing storage as a Vec.
+    /// The bookkeeping fields match Arena's slot allocator.
+    pub(crate) fn empty_flat_map(
         &mut self,
         elem: ColumnElem,
+        storage: FlatStorage,
     ) -> Result<Idx<Inst>, CompilerError> {
         let zero_cap = self.emit_cur(Inst::Const(Lit::Int(0)));
-        let data = self.empty_flat_vec(elem, FlatStorage::Columns, zero_cap)?;
+        let data = self.empty_flat_vec(elem, storage, zero_cap)?;
         // The spine's key space is user data; a JS object literal would inherit
         // host object-model names.
         let spine = self.call_spine("__map_col_new_spine", Vec::new())?;
@@ -1115,7 +1121,7 @@ impl<'a> Builder<'a> {
 
     /// Generic snapshots keep table storage; concrete instantiations resolve
     /// through `SpecSubst` and use spine operations.
-    pub(crate) fn map_column_primitive(
+    pub(crate) fn map_flat_primitive(
         &mut self,
         e: Idx<Expr>,
         name: &str,
@@ -1123,25 +1129,25 @@ impl<'a> Builder<'a> {
     ) -> Result<Option<ValueBundle>, CompilerError> {
         match (name, arg_idxs) {
             ("get", [recv, key]) => {
-                let Some(elem) = self.map_column_value_of(*recv)? else {
+                let Some((elem, storage)) = self.map_flat_elem_of(*recv)? else {
                     return Ok(None);
                 };
                 let m = self.lower_expr(*recv)?;
                 let k = self.lower_expr(*key)?;
-                Ok(Some(self.map_column_get_repr(m, k, elem)?))
+                Ok(Some(self.map_flat_get_repr(m, k, elem, storage)?))
             }
             ("table_unset", [recv, key]) => {
-                let Some(elem) = self.map_column_value_of(*recv)? else {
+                let Some((elem, storage)) = self.map_flat_elem_of(*recv)? else {
                     return Ok(None);
                 };
                 let m = self.lower_expr(*recv)?;
                 let k = self.lower_expr(*key)?;
-                self.map_column_free(m, k, elem)?;
+                self.map_flat_free(m, k, elem, storage)?;
                 let value = ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)));
                 Ok(Some(self.value_bundle_for_expr(e, value)?))
             }
             ("len" | "map_len", [recv]) => {
-                let Some(_) = self.map_column_value_of(*recv)? else {
+                let Some(_) = self.map_flat_elem_of(*recv)? else {
                     return Ok(None);
                 };
                 let m = self.lower_expr(*recv)?;
@@ -1149,7 +1155,7 @@ impl<'a> Builder<'a> {
                 Ok(Some(self.value_bundle_for_expr(e, value)?))
             }
             ("contains", [recv, key]) => {
-                let Some(_) = self.map_column_value_of(*recv)? else {
+                let Some(_) = self.map_flat_elem_of(*recv)? else {
                     return Ok(None);
                 };
                 let m = self.lower_expr(*recv)?;
@@ -1158,13 +1164,13 @@ impl<'a> Builder<'a> {
                 Ok(Some(self.value_bundle_for_expr(e, value)?))
             }
             ("clear", [recv]) => {
-                let Some(elem) = self.map_column_value_of(*recv)? else {
+                let Some((elem, storage)) = self.map_flat_elem_of(*recv)? else {
                     return Ok(None);
                 };
                 let m = self.lower_expr(*recv)?;
                 if self.column_contains_references(elem) {
                     let data = self.map_col_data(m);
-                    self.column_release_all(data, elem)?;
+                    self.flat_release_all(data, elem, storage)?;
                 }
                 self.call_spine("__map_col_clear", vec![m])?;
                 let value = ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)));
@@ -1253,7 +1259,7 @@ impl<'a> Builder<'a> {
             let Expr::Index { base, index } = s.body.expr_arena[e] else {
                 return Err(s.gap_here("flat place must name an indexed element"));
             };
-            let map = key.storage == FlatStorage::Columns && s.map_column_value_of(base)?.is_some();
+            let map = s.map_flat_elem_of(base)?.is_some();
             let mut vec = s.lower_expr(base)?;
             let mut index = s.lower_expr(index)?;
             if map {
@@ -1374,13 +1380,26 @@ impl<'a> Builder<'a> {
 
     /// The value never materializes. A nullable value collapses to key removal
     /// when absent, since a nil store already removes a Map key.
-    pub(crate) fn map_column_store(
+    pub(crate) fn map_flat_store(
         &mut self,
         m: Idx<Inst>,
         key: Idx<Inst>,
         value: Idx<Expr>,
         elem: ColumnElem,
+        storage: FlatStorage,
     ) -> Result<(), CompilerError> {
+        // A strided row takes an owned snapshot of its leaves. An explicit
+        // materialize used to permit a boxed Map store; no box escapes here.
+        let value = if storage == FlatStorage::Strided
+            && self.is_explicit_materialize_call(value)
+            && let Expr::Call { args, .. } = self.body.expr_arena[value]
+            && args.into_iter().nth(1).is_none()
+            && let Some(arg) = args.into_iter().next()
+        {
+            arg
+        } else {
+            value
+        };
         let bundle = self.lower_expr_repr(value)?;
         let repr = bundle.value();
         // The instance graph decides the absent arm from the value's type, so this
@@ -1398,7 +1417,7 @@ impl<'a> Builder<'a> {
             };
             let slot = self.call_spine("__map_col_slot", vec![m, key])?;
             let data = self.map_col_data(m);
-            return self.store_flat_element(data, slot, &stored, elem, FlatStorage::Columns);
+            return self.store_flat_element(data, slot, &stored, elem, storage);
         }
         // Read leaves only on the present arm: `s.x` faults on a literal-null store.
         let (present, boxed) = match &repr {
@@ -1413,7 +1432,7 @@ impl<'a> Builder<'a> {
         let Some(present) = present else {
             let slot = self.call_spine("__map_col_slot", vec![m, key])?;
             let data = self.map_col_data(m);
-            return self.store_flat_element(data, slot, &bundle, elem, FlatStorage::Columns);
+            return self.store_flat_element(data, slot, &bundle, elem, storage);
         };
         let set_bb = self.f.new_block();
         let del_bb = self.f.new_block();
@@ -1429,35 +1448,37 @@ impl<'a> Builder<'a> {
         };
         let slot = self.call_spine("__map_col_slot", vec![m, key])?;
         let data = self.map_col_data(m);
-        self.store_flat_element(data, slot, &stored, elem, FlatStorage::Columns)?;
+        self.store_flat_element(data, slot, &stored, elem, storage)?;
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = del_bb;
-        self.map_column_free(m, key, elem)?;
+        self.map_flat_free(m, key, elem, storage)?;
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = join;
         Ok(())
     }
 
     /// Errors on a miss, like the boxed `__map_get_checked`.
-    pub(crate) fn map_column_index_repr(
+    pub(crate) fn map_flat_index_repr(
         &mut self,
         m: Idx<Inst>,
         key: Idx<Inst>,
         elem: ColumnElem,
+        storage: FlatStorage,
     ) -> Result<ValueBundle, CompilerError> {
         let slot = self.call_spine("__map_col_slot_checked", vec![m, key])?;
         let data = self.map_col_data(m);
-        self.column_element_repr(data, slot, elem)
+        self.flat_element_repr(data, slot, elem, storage)
     }
 
     /// Read columns only in the present arm: a missing slot is `-1`, and freed
     /// slots may hold stale leaves.
     /// `nobox` results remain leaf groups across the join.
-    pub(crate) fn map_column_get_repr(
+    pub(crate) fn map_flat_get_repr(
         &mut self,
         m: Idx<Inst>,
         key: Idx<Inst>,
         elem: ColumnElem,
+        storage: FlatStorage,
     ) -> Result<ValueBundle, CompilerError> {
         let shape = self.column_shape(elem)?;
         let unboxed = elem.is_nobox();
@@ -1476,7 +1497,7 @@ impl<'a> Builder<'a> {
         self.branch_to(present, hit, miss);
         self.cur = hit;
         let data = self.map_col_data(m);
-        let found = self.column_element_repr(data, slot, elem)?;
+        let found = self.flat_element_repr(data, slot, elem, storage)?;
         let stored: Vec<Idx<Inst>> = if unboxed {
             self.repr_to_leaves_bundle(&found)?
         } else {
@@ -1520,7 +1541,7 @@ impl<'a> Builder<'a> {
         leaves: Vec<Idx<Inst>>,
     ) {
         for (path, leaf) in paths.into_iter().zip(leaves) {
-            let col = self.read_field(vec, path);
+            let col = self.read_field(vec, super::shape::column_key(path));
             self.write_index(col, slot, leaf, ContainerKind::VecColumn);
         }
     }

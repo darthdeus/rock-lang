@@ -156,10 +156,13 @@ impl<'a> Builder<'a> {
         let plan = self.container_plan_for_type(mono, family)?;
         let arena = self.scx.rep_arena();
         match plan.storage() {
-            ContainerStorage::Columns { .. } => {
-                let elem = plan
-                    .column_elem(arena)
-                    .ok_or_else(|| gap("column container plan has no element shape"))?;
+            ContainerStorage::Columns { .. } | ContainerStorage::Strided { .. }
+                if plan.family() == ContainerFamily::Map
+                    || matches!(plan.storage(), ContainerStorage::Columns { .. }) =>
+            {
+                let (elem, _) = plan
+                    .flat_elem(arena)
+                    .ok_or_else(|| gap("flat container plan has no element shape"))?;
                 let rendered = match plan.family() {
                     ContainerFamily::Vec => format!("[{}]", elem.name),
                     ContainerFamily::Map => format!("Map<_, {}>", elem.name),

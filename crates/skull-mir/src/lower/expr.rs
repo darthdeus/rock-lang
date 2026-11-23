@@ -1542,8 +1542,8 @@ impl<'a> Builder<'a> {
                 }
                 // A column-stored Map has no slot at the key: the write goes through the
                 // spine to a slot, then leaf-wise into `data`.
-                if let Some(elem) = s.map_column_value_of(base)? {
-                    return s.map_column_store(b, i, value, elem);
+                if let Some((elem, storage)) = s.map_flat_elem_of(base)? {
+                    return s.map_flat_store(b, i, value, elem, storage);
                 }
                 if let ContainerKind::NativeBufferValue(elem) = kind {
                     if s.is_leaf_addressed(elem)? {

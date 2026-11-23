@@ -674,11 +674,11 @@ impl<'a> Builder<'a> {
         iter: Idx<Expr>,
         body: Idx<Expr>,
     ) -> Result<(), CompilerError> {
-        // A column-stored Map iterates its spine, yielding (key, slot), and reads the
+        // A flat Map iterates its spine, yielding (key, slot), and reads the
         // value leaf-wise out of `data`; no element table exists.
-        let col = self.map_column_value_of(iter)?;
+        let flat = self.map_flat_elem_of(iter)?;
         let m = self.lower_expr(iter)?;
-        let table = match col {
+        let table = match flat {
             Some(_) => self.read_field(m, crate::names::ustr("spine")),
             None => m,
         };
@@ -728,11 +728,11 @@ impl<'a> Builder<'a> {
             BindingPattern::Tuple(subs) if subs.len() == 2 => self.loop_pattern_used(&subs[1]),
             _ => self.loop_pattern_used(vars),
         };
-        let vv = match col.filter(|_| needs_value) {
-            Some(elem) => {
+        let vv = match flat.filter(|_| needs_value) {
+            Some((elem, storage)) => {
                 let slot = self.emit_cur(Inst::Load(val_cell));
                 let data = self.map_col_data(m);
-                let repr = self.column_element_repr(data, slot, elem)?;
+                let repr = self.flat_element_repr(data, slot, elem, storage)?;
                 Some(self.pack(repr.into_value())?)
             }
             None => None,

@@ -362,7 +362,13 @@ pub fn struct_entries(
         if let Some(shape) = plan.element_shape(arena) {
             let paths = crate::lower::value_leaf_paths(&shape);
             match plan.storage() {
-                ContainerStorage::Columns { .. } => vec_columns = Some(paths),
+                // Box reconstruction uses logical field paths. Escaped columns
+                // belong to nobox elements, which can only be read as leaves.
+                ContainerStorage::Columns { .. }
+                    if crate::lower::column_leaf_paths(&shape) == paths =>
+                {
+                    vec_columns = Some(paths);
+                }
                 ContainerStorage::Strided { .. } => out.push(Entry::StridedRows {
                     name: type_symbol(ws, s.name),
                     paths,

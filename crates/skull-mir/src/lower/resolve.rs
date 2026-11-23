@@ -413,8 +413,8 @@ impl<'a> Builder<'a> {
         if let Some((elem, storage)) = FlatStorage::of_vec_kind(kind) {
             return self.flat_element_repr(b, i, elem, storage);
         }
-        if let Some(elem) = self.map_column_value_of(base)? {
-            return self.map_column_index_repr(b, i, elem);
+        if let Some((elem, storage)) = self.map_flat_elem_of(base)? {
+            return self.map_flat_index_repr(b, i, elem, storage);
         }
         let name = if self.scx.values_first_class {
             None

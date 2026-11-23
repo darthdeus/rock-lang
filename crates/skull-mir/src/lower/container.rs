@@ -117,7 +117,7 @@ impl ContainerPlan {
         // A column per leaf costs a lookup, bounds check and barrier per leaf, which
         // ended hot traces at LuaJIT's constant limit for wide structs.
         // A generic field stays one opaque leaf, so type arguments do not move row offsets.
-        let wide_nobox_struct = matches!(family, ContainerFamily::Vec)
+        let wide_nobox_struct = matches!(family, ContainerFamily::Vec | ContainerFamily::Map)
             && !nullable
             && column_eligible
             && arena.get(element_rep).nobox()
@@ -132,23 +132,14 @@ impl ContainerPlan {
                 .as_ref()
                 .is_some_and(|shape| shape.leaf_count() > crate::lower::MAX_COLUMN_LEAVES);
         let columns = match (family, shape.as_ref()) {
-            (ContainerFamily::Vec, _) if wide_nobox_struct => false,
-            (ContainerFamily::Vec, Some(shape)) if column_eligible => {
-                let paths = crate::lower::value_leaf_paths(shape);
-                if paths.len() + usize::from(nullable) <= crate::lower::MAX_COLUMN_LEAVES
-                    || arena.get(element_rep).nobox()
-                {
-                    !paths.iter().any(|path| path.as_str() == "len")
-                } else {
-                    false
-                }
-            }
-            (ContainerFamily::Map | ContainerFamily::Arena, Some(shape))
-                if !nullable && column_eligible =>
+            (_, _) if wide_nobox_struct => false,
+            (ContainerFamily::Vec | ContainerFamily::Map | ContainerFamily::Arena, Some(shape))
+                if column_eligible && (!nullable || family == ContainerFamily::Vec) =>
             {
                 let paths = crate::lower::value_leaf_paths(shape);
-                paths.len() <= crate::lower::MAX_COLUMN_LEAVES
-                    && !paths.iter().any(|path| path.as_str() == "len")
+                (family != ContainerFamily::Arena && arena.get(element_rep).nobox())
+                    || (paths.len() + usize::from(nullable) <= crate::lower::MAX_COLUMN_LEAVES
+                        && !paths.iter().any(|path| path.as_str() == "len"))
             }
             _ => false,
         };

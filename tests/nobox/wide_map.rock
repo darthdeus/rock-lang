@@ -1,0 +1,44 @@
+nobox value Wide { a: int, b: int, c: int, d: int, e: int }
+
+@test fn wide_nobox_map_index_store() {
+    let m: Map<string, Wide> = map_new()
+    m["a"] = Wide { a: 1, b: 2, c: 3, d: 4, e: 5 }
+    assert(m["a"].e == 5)
+    m["a"].e += 1
+    assert(m["a"].e == 6)
+    m["b"] = materialize(m["a"])
+    m["a"].e = 7
+    assert(m["b"].e == 6)
+}
+
+@test fn wide_nobox_map_insert_and_reuse() {
+    let m: Map<int, Wide?> = map_new()
+    m.insert(1, Wide { a: 1, b: 2, c: 3, d: 4, e: 5 })
+    m.insert(2, Wide { a: 6, b: 7, c: 8, d: 9, e: 10 })
+    let removed = m.remove(1).unwrap()
+    m.insert(3, Wide { a: 11, b: 12, c: 13, d: 14, e: 15 })
+    assert(removed.a + removed.b + removed.c + removed.d + removed.e == 15)
+    assert(!m.contains(1))
+    assert(m[2].unwrap().e == 10)
+    assert(m[3].unwrap().e == 15)
+    let sum = 0
+    for (k, v) in m { sum += k + v.unwrap().a }
+    assert(sum == 22)
+    m.clear()
+    assert(m.len() == 0)
+    assert(m.get(3) == null)
+}
+
+nobox value SizedRow { len: int, amount: int }
+
+@test fn map_value_len_is_distinct_from_backing_length() {
+    let m: Map<string, SizedRow> = map_new()
+    m.insert("a", SizedRow { len: 41, amount: 1 })
+    m.insert("b", SizedRow { len: 51, amount: 2 })
+    m["a"].len += 1
+    assert(m.get("a").unwrap().len == 42)
+    assert(m["b"].len == 51)
+    assert(m.len() == 2)
+    let values = m.values()
+    assert(values[0].len + values[1].len == 93)
+}

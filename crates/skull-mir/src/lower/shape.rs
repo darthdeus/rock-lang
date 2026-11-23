@@ -84,17 +84,25 @@ pub(crate) fn dense_flat_enum_vec_eligible(ws: &Workspace, name: Ustr) -> bool {
         })
 }
 
+/// Keep a data leaf named `len` distinct from the backing Vec's length.
+pub(crate) fn column_key(path: Ustr) -> Ustr {
+    if path == "len" {
+        crate::names::ustr("@len")
+    } else {
+        path
+    }
+}
+
 /// Nullable presence first: a top-level presence leaf has no field path, so
 /// this adds the key [`value_leaf_paths`] omits.
 pub(crate) fn column_leaf_paths(shape: &ValueShape) -> Vec<Ustr> {
-    let paths = value_leaf_paths(shape);
-    if !shape.nullable {
-        return paths;
-    }
-    let mut out = Vec::with_capacity(paths.len() + 1);
-    out.push(crate::names::ustr(VEC_COLUMN_PRESENCE_FIELD));
-    out.extend(paths);
-    out
+    let presence = shape
+        .nullable
+        .then(|| crate::names::ustr(VEC_COLUMN_PRESENCE_FIELD));
+    presence
+        .into_iter()
+        .chain(value_leaf_paths(shape).into_iter().map(column_key))
+        .collect()
 }
 
 /// Dotted column keys: `.` cannot appear in a Rock identifier, so keys never
