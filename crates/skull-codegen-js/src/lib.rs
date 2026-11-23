@@ -671,6 +671,7 @@ var __rock_inspect_ty = {};
 var __rock_col_mat = {};
 var __rock_enum_inspect_payloads = Object.create(null);
 var __rock_enum_inline_payloads = Object.create(null);
+var __rock_type_display = Object.create(null);
 // A column-stored Vec has no `_data`: one plain array per leaf, sharing the
 // Vec's `len`. Rendering its own keys would show the PHYSICAL layout (`@vec`,
 // `x = { 1 }`), so materialize each element first -- luajit's
@@ -889,7 +890,8 @@ function __rock_inspect_value(v, indent, path, visited, precision) {
     if (visited) visited.delete(t);
     return type_name + "::" + variant;
   }
-  var header = (type_name !== undefined && variant !== undefined) ? (type_name + "::" + variant)
+  var header = (type_name !== undefined && variant !== undefined)
+    ? ((__rock_type_display[type_name] || type_name) + "::" + variant)
     : (type_name !== undefined ? type_name : "");
   var result;
   // A boxed enum's positional payload takes native 0-based keys ("0".., for `==`

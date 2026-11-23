@@ -119,7 +119,11 @@ impl<'a> Builder<'a> {
         lanes: &mut [EqualityLane],
     ) -> Result<(), CompilerError> {
         let (tag, indices) = indices.split_first().expect("flat enum has a tag");
-        let Some(eid) = self.ws.nominals.enum_id(flat.name()) else {
+        let Some(eid) = self
+            .ws
+            .nominals
+            .enum_id(crate::enum_instance::decl_name(flat.name()))
+        else {
             return Err(self.gap_here("flat enum has no declaration"));
         };
         let def = &self.ws.module(eid.module).enums[eid.def];

@@ -273,11 +273,14 @@ pub fn struct_field_plan(
         )));
     };
     let (resolved, nullable) = resolved_field_type(ws, fdef.ty)?;
-    let TypeExpr::App {
-        ctor: TypeCtor::Nominal(child_name),
-        ..
-    } = resolved
-    else {
+    let child_name = match resolved {
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(_),
+            ..
+        } => super::shape::nominal_name_from_ty(ws, fdef.ty).map(|(name, _)| name),
+        _ => None,
+    };
+    let Some(child_name) = child_name else {
         return Ok(StructFieldPlan::Direct {
             child: None,
             nullable,
@@ -289,7 +292,10 @@ pub fn struct_field_plan(
         .map(|sid| &ws.modules[sid.module.index()].structs[sid.def]);
     let known_nominal = bone_core::modules::is_intrinsic_key(child_name, "Coroutine")
         || child.is_some()
-        || ws.nominals.enum_id(child_name).is_some()
+        || ws
+            .nominals
+            .enum_id(crate::enum_instance::decl_name(child_name))
+            .is_some()
         || ws.nominals.newtype_id(child_name).is_some();
     if !known_nominal {
         return Err(plan_error(format!(
@@ -388,7 +394,11 @@ fn leaf_eq(ws: &Workspace, shape: &ValueShape, nested: bool, out: &mut Vec<GcFie
     if shape.nullable && nested {
         out.push(GcFieldEq::Native);
     }
-    if ws.nominals.enum_id(shape.name).is_some() {
+    if ws
+        .nominals
+        .enum_id(crate::enum_instance::decl_name(shape.name))
+        .is_some()
+    {
         // Native equality on flat enum payload slots would skip the enum's contents walk.
         let payload_eq = if super::shape::flat_enum_equality_is_leafwise(ws, shape.name) {
             GcFieldEq::Native

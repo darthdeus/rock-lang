@@ -1236,73 +1236,7 @@ pub(crate) fn infer_expr_used(
             nullable_of(gamma, ret, expr_span)
         }
 
-        Expr::EnumVariant {
-            enum_name,
-            variant,
-            args,
-            ..
-        } => {
-            let (enum_name, variant, args) = (*enum_name, *variant, *args);
-
-            let eid = resolve_enum(gamma, enum_name).ok_or_else(|| {
-                CompilerError::new_with_label(expr_span, format!("unknown enum `{}`", enum_name))
-            })?;
-
-            let def = &gamma.workspace.module(eid.module).enums[eid.def];
-            let (subs, arg_tys) = gamma.instantiate_generics(&def.generics, expr_span)?;
-
-            let vdef = def
-                .variants
-                .iter()
-                .find(|v| v.name == variant)
-                .ok_or_else(|| {
-                    CompilerError::new_with_label(
-                        expr_span,
-                        format!("enum `{}` has no variant `{}`", enum_name, variant),
-                    )
-                })?;
-
-            let what = format!("variant: `{}::{}`", enum_name, variant);
-
-            match (&vdef.payload, args) {
-                (VariantPayload::Unit, VariantArgs::Unit) => {}
-
-                (VariantPayload::Tuple(tys), VariantArgs::Tuple(range)) => {
-                    check_positional_args(
-                        c,
-                        gamma,
-                        tys,
-                        range,
-                        tys.len(),
-                        &subs,
-                        expr_span,
-                        &what,
-                    )?;
-                }
-
-                (VariantPayload::Record(fields), VariantArgs::Record(range)) => {
-                    let provided: Vec<(Ustr, Idx<Expr>)> = range
-                        .into_iter()
-                        .map(|fi| {
-                            let f = c.body.struct_lit_field_arena[fi];
-                            (f.name, f.value)
-                        })
-                        .collect();
-
-                    check_named_fields(
-                        c, gamma, None, fields, &provided, &subs, expr_span, &what, false,
-                    )?;
-                }
-
-                _ => comp_error!(
-                    expr_span,
-                    "mismatched enum variant payload and arguments for {}",
-                    what
-                ),
-            }
-
-            gamma.nominal_app(enum_name, &arg_tys, expr_span)
-        }
+        Expr::EnumVariant { .. } => infer_enum_variant(c, gamma, e, None)?,
 
         Expr::Assign { target, value } => {
             let (target, value) = (*target, *value);
@@ -2037,6 +1971,15 @@ pub(crate) fn check_expr(
         }
     }
 
+    if matches!(c.body.expr_arena[e], Expr::EnumVariant { .. })
+        && !gamma.out.expr_types.contains_idx(e)
+    {
+        let ty = infer_enum_variant(c, gamma, e, Some(expected))?;
+        coerce(gamma, ty, expected, span)?;
+        gamma.assign_expr_type(c, e, ty)?;
+        return Ok(());
+    }
+
     if let Expr::SiblingRef(field) = c.body.expr_arena[e] {
         let exp_r = resolve(gamma, expected, span);
 
@@ -2436,4 +2379,91 @@ pub(crate) fn coroutine_yrn(
 
         _ => comp_error!(span, "Expected a Coroutine type, got {}", gamma.render(r)),
     }
+}
+
+/// A generic variant checked against an expected application takes the
+/// expected type arguments, so `R::Ok(n)` returned as `R<N?>` is an `R<N?>`
+/// whose payload coerces, not an `R<N>` with a different layout.
+fn infer_enum_variant(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    e: Idx<Expr>,
+    expected: Option<TyId>,
+) -> Result<TyId, CompilerError> {
+    let expr_span = c.body.expr_spans[e];
+    let Expr::EnumVariant {
+        enum_name,
+        variant,
+        args,
+        ..
+    } = c.body.expr_arena[e]
+    else {
+        unreachable!("infer_enum_variant on a non-variant expression");
+    };
+    let eid = resolve_enum(gamma, enum_name).ok_or_else(|| {
+        CompilerError::new_with_label(expr_span, format!("unknown enum `{}`", enum_name))
+    })?;
+
+    let def = &gamma.workspace.module(eid.module).enums[eid.def];
+    let (subs, arg_tys) = gamma.instantiate_generics(&def.generics, expr_span)?;
+    if let Some(expected) = expected {
+        let mut expected = resolve(gamma, expected, expr_span);
+        if let TypeExpr::Nullable(inner) = *gamma.get(expected) {
+            expected = resolve(gamma, expected.with_idx(inner), expr_span);
+        }
+        if let TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            params,
+        } = *gamma.get(expected)
+            && resolve_enum(gamma, name) == Some(eid)
+            && params.len() == arg_tys.len()
+        {
+            for (&fresh, param) in arg_tys.iter().zip(params) {
+                unify(gamma, fresh, expected.with_idx(param), expr_span)?;
+            }
+        }
+    }
+
+    let vdef = def
+        .variants
+        .iter()
+        .find(|v| v.name == variant)
+        .ok_or_else(|| {
+            CompilerError::new_with_label(
+                expr_span,
+                format!("enum `{}` has no variant `{}`", enum_name, variant),
+            )
+        })?;
+
+    let what = format!("variant: `{}::{}`", enum_name, variant);
+
+    match (&vdef.payload, args) {
+        (VariantPayload::Unit, VariantArgs::Unit) => {}
+
+        (VariantPayload::Tuple(tys), VariantArgs::Tuple(range)) => {
+            check_positional_args(c, gamma, tys, range, tys.len(), &subs, expr_span, &what)?;
+        }
+
+        (VariantPayload::Record(fields), VariantArgs::Record(range)) => {
+            let provided: Vec<(Ustr, Idx<Expr>)> = range
+                .into_iter()
+                .map(|fi| {
+                    let f = c.body.struct_lit_field_arena[fi];
+                    (f.name, f.value)
+                })
+                .collect();
+
+            check_named_fields(
+                c, gamma, None, fields, &provided, &subs, expr_span, &what, false,
+            )?;
+        }
+
+        _ => comp_error!(
+            expr_span,
+            "mismatched enum variant payload and arguments for {}",
+            what
+        ),
+    }
+
+    Ok(gamma.nominal_app(enum_name, &arg_tys, expr_span))
 }

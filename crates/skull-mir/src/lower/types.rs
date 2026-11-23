@@ -20,6 +20,15 @@ impl<'a> Builder<'a> {
         scx.interner().get_ref(id)
     }
 
+    /// The layout name a variant expression of the declared enum `enum_name`
+    /// builds: the instance its concrete type names, if any.
+    pub(crate) fn variant_enum(&self, e: Idx<Expr>, enum_name: Ustr) -> Ustr {
+        self.concrete_expr_ty(e)
+            .and_then(|ty| ty.peel_nullable().0.nominal())
+            .filter(|name| crate::enum_instance::decl_name(*name) == enum_name)
+            .unwrap_or(enum_name)
+    }
+
     pub(crate) fn concrete_expr_ty(&self, e: Idx<Expr>) -> Option<&'a MonoTy> {
         let plan: &'a ConcreteBodyPlan = self.concrete_plan;
         let id = plan.domain_types(&self.cur_domain)?.expr_type(e)?;
@@ -125,7 +134,7 @@ impl<'a> Builder<'a> {
             Some(ty) => std::borrow::Cow::Borrowed(ty),
             None => {
                 let enum_name = match self.body.expr_arena[e] {
-                    Expr::EnumVariant { enum_name, .. } => Some(enum_name),
+                    Expr::EnumVariant { enum_name, .. } => Some(self.variant_enum(e, enum_name)),
                     _ => match self.expr_ty(e) {
                         Some(TypeExpr::App {
                             ctor: TypeCtor::Nominal(name),

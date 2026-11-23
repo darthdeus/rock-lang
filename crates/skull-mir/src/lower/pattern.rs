@@ -187,7 +187,7 @@ impl<'a> Builder<'a> {
                 sub,
                 ..
             } => {
-                let en = enum_name.or(scrut_enum);
+                let en = enum_layout(ty, enum_name.or(scrut_enum));
                 self.test_tag(scrut, variant, en, fail);
                 let plan = en.and_then(|e| EnumPlan::for_name(self.ws, e));
                 let cdata = plan.as_ref().is_some_and(|plan| plan.cdata().is_some());
@@ -363,7 +363,7 @@ impl<'a> Builder<'a> {
                 } else {
                     name
                 };
-                let en = enum_name.or(scrut_enum);
+                let en = enum_layout(ty, enum_name.or(scrut_enum));
                 if let Some(variant) = name {
                     if enum_name.is_some() || (top && variants.contains(&variant)) {
                         self.test_tag(scrut, variant, en, fail);
@@ -529,13 +529,15 @@ impl<'a> Builder<'a> {
         i: usize,
     ) -> Option<Ustr> {
         let ty = shape::enum_position_ty(self.ws, enum_name, variant, i)?;
-        match static_ty(self.ws, ty)? {
-            TypeExpr::App {
-                ctor: TypeCtor::Nominal(n),
-                ..
-            } if self.ws.nominals.enum_id(n).is_some() => Some(n),
-            _ => None,
-        }
+        let n = match shape::instance_payload_ty(self.ws, enum_name, ty) {
+            Some(mono) => mono.nominal()?,
+            None => shape::static_layout_nominal(self.ws, ty)?,
+        };
+        self.ws
+            .nominals
+            .enum_id(crate::enum_instance::decl_name(n))
+            .is_some()
+            .then_some(n)
     }
 
     /// A flattened enum field stays a `Scrut::Flat` read from the parent's slots,
@@ -1031,7 +1033,11 @@ impl<'a> Builder<'a> {
         else {
             return None;
         };
-        let (generics, decl) = if let Some(eid) = self.ws.nominals.enum_id(*name) {
+        let (generics, decl) = if let Some(eid) = self
+            .ws
+            .nominals
+            .enum_id(crate::enum_instance::decl_name(*name))
+        {
             let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
             let v = ed.variants.iter().find(|v| v.name == owner)?;
             let decl = match (&v.payload, member) {
@@ -1263,4 +1269,16 @@ enum Member {
     Position(usize),
     Field(Ustr),
     Wrapped,
+}
+
+/// A pattern names an enum's declaration; its scrutinee's concrete type names
+/// the instance whose layout the pattern reads.
+fn enum_layout(ty: Option<&MonoTy>, en: Option<Ustr>) -> Option<Ustr> {
+    let en = en?;
+    let concrete = ty
+        .and_then(|ty| ty.peel_nullable().0.nominal())
+        .filter(|name| {
+            crate::enum_instance::decl_name(*name) == crate::enum_instance::decl_name(en)
+        });
+    Some(concrete.unwrap_or(en))
 }

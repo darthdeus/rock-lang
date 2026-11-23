@@ -5,7 +5,7 @@ use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
 use ustr::Ustr;
 
-use crate::monoty::{MonoCtor, MonoTy};
+use crate::monoty::{MonoCtor, MonoSubst, MonoTy};
 
 /// Stdlib descriptors (`Ptr`, `NativeBuffer`) are excluded: the backend supplies
 /// their one host slot, which a copy shares and never rebuilds.
@@ -24,9 +24,12 @@ pub(crate) const MAX_COLUMN_LEAVES: usize = 4;
 
 pub(crate) fn is_json_value(ws: &Workspace, name: Ustr) -> bool {
     name.as_str() == "JsonValue"
-        && ws.nominals.enum_id(name).is_some_and(|id| {
-            bone_core::modules::is_stdlib_module_file(ws.module(id.module).file.as_str())
-        })
+        && ws
+            .nominals
+            .enum_id(crate::enum_instance::decl_name(name))
+            .is_some_and(|id| {
+                bone_core::modules::is_stdlib_module_file(ws.module(id.module).file.as_str())
+            })
 }
 
 pub(crate) fn dense_flat_enum_vec_eligible(ws: &Workspace, name: Ustr) -> bool {
@@ -69,7 +72,7 @@ pub(crate) fn dense_flat_enum_vec_eligible(ws: &Workspace, name: Ustr) -> bool {
     if shape.leaf_count() <= MAX_COLUMN_LEAVES {
         return false;
     }
-    let Some(eid) = ws.nominals.enum_id(name) else {
+    let Some(eid) = ws.nominals.enum_id(crate::enum_instance::decl_name(name)) else {
         return false;
     };
     ws.modules[eid.module.index()].enums[eid.def]
@@ -468,10 +471,124 @@ pub(super) fn nominal_name_from_ty(ws: &Workspace, ty: TyId) -> Option<(Ustr, bo
     match node {
         TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
+            params,
+        } if !params.is_empty() && is_generic_enum(ws, name) => {
+            // A layout that depends on an unbound generic has no name to plan
+            // under, so it stays opaque.
+            let inner = if nullable {
+                let TypeExpr::Nullable(inner) = static_ty(ws, ty)? else {
+                    return None;
+                };
+                ty.with_idx(inner)
+            } else {
+                ty
+            };
+            let mono = crate::monoty::convert_decl(ws, inner, &MonoSubst::default()).ok()?;
+            Some((mono.nominal()?, nullable))
+        }
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
             ..
         } => Some((name, nullable)),
         _ => None,
     }
+}
+
+/// The nominal a declared type is planned under; see [`nominal_name_from_ty`].
+pub fn static_layout_nominal(ws: &Workspace, ty: TyId) -> Option<Ustr> {
+    nominal_name_from_ty(ws, ty).map(|(name, _)| name)
+}
+
+/// A declaration's or an instance's enum definition.
+pub fn enum_decl(ws: &Workspace, name: Ustr) -> Option<&EnumDef> {
+    enum_definition(ws, name)
+}
+
+/// A payload type of `enum_name` substituted for that instance, when it names
+/// one of the instance's generics.
+pub fn instance_payload_ty(ws: &Workspace, enum_name: Ustr, ty: TyId) -> Option<MonoTy> {
+    let inst = crate::enum_instance::instance(enum_name)?;
+    let subst = crate::enum_instance::instance_subst(ws, &inst)?;
+    match PayloadTy::of(ws, ty, Some(&subst))? {
+        PayloadTy::Mono(mono) => Some(mono),
+        PayloadTy::Decl(_) => None,
+    }
+}
+
+/// Every enum instance a build reaches through its types, declarations and
+/// plans, sorted by name so emission is deterministic.
+pub fn enum_instances_in(ws: &Workspace, arena: &RepArena) -> Vec<Ustr> {
+    fn mono(ty: &MonoTy, out: &mut Vec<Ustr>) {
+        match ty {
+            MonoTy::Nullable(inner) => mono(inner, out),
+            MonoTy::Tuple(parts) => parts.iter().for_each(|part| mono(part, out)),
+            MonoTy::App { ctor, params } => {
+                if let MonoCtor::Nominal(name) = ctor
+                    && crate::enum_instance::instance(*name).is_some()
+                {
+                    out.push(*name);
+                }
+                params.iter().for_each(|param| mono(param, out));
+            }
+            MonoTy::Function { params, ret } => {
+                params.iter().for_each(|param| mono(param, out));
+                mono(ret, out);
+            }
+            _ => {}
+        }
+    }
+    fn shape(vs: &ValueShape, out: &mut Vec<Ustr>) {
+        if crate::enum_instance::instance(vs.name).is_some() {
+            out.push(vs.name);
+        }
+        for (_, field) in &vs.fields {
+            if let FieldShape::Nested(child) = field {
+                shape(child, out);
+            }
+        }
+    }
+    let mut work = Vec::new();
+    arena.interner().iter().for_each(|ty| mono(ty, &mut work));
+    for module in ws.modules.iter() {
+        for (_, sd) in module.structs.iter() {
+            for field in &sd.fields {
+                if let Some(name) = static_layout_nominal(ws, field.ty)
+                    && crate::enum_instance::instance(name).is_some()
+                {
+                    work.push(name);
+                }
+            }
+            if let Some(plan) = planned_value(ws, sd.name) {
+                shape(&plan.shape, &mut work);
+            }
+        }
+        work.extend(module.enums.iter().map(|(_, ed)| ed.name));
+    }
+    let mut seen = HashSet::default();
+    let mut out = Vec::new();
+    while let Some(name) = work.pop() {
+        if !seen.insert(name) {
+            continue;
+        }
+        if crate::enum_instance::instance(name).is_some() {
+            out.push(name);
+        }
+        let Some(flat) = EnumPlan::for_name(ws, name).and_then(|plan| plan.flat().cloned()) else {
+            continue;
+        };
+        for position in &flat.positions {
+            position.shapes.iter().for_each(|vs| shape(vs, &mut work));
+        }
+        for named in flat.named_shapes.iter() {
+            shape(&named.shape, &mut work);
+        }
+    }
+    out.sort();
+    out
+}
+
+pub(crate) fn is_generic_enum(ws: &Workspace, name: Ustr) -> bool {
+    enum_definition(ws, name).is_some_and(|ed| !ed.generics.is_empty())
 }
 
 fn is_registry_handle(name: Ustr) -> bool {
@@ -526,9 +643,9 @@ fn planned_value_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Op
         } else {
             let child = match ty {
                 Some(TypeExpr::App {
-                    ctor: TypeCtor::Nominal(child),
+                    ctor: TypeCtor::Nominal(_),
                     ..
-                }) => Some((child, false)),
+                }) => nominal_name_from_ty(ws, field.storage_ty),
                 Some(TypeExpr::Nullable(_)) => nominal_name_from_ty(ws, field.ty)
                     .filter(|&(child, nullable)| nullable && is_nobox_nominal(ws, child)),
                 _ => None,
@@ -703,8 +820,9 @@ pub(crate) fn planned_value_contains_flat_enum(ws: &Workspace, name: Ustr) -> bo
     planned_value(ws, name).is_some_and(|plan| plan.contains_flat_enum)
 }
 
+/// Accepts an instance name and answers its declaration.
 pub(super) fn enum_definition(ws: &Workspace, name: Ustr) -> Option<&EnumDef> {
-    let id = ws.nominals.enum_id(name)?;
+    let id = ws.nominals.enum_id(crate::enum_instance::decl_name(name))?;
     Some(&ws.modules[id.module.index()].enums[id.def])
 }
 
@@ -1104,7 +1222,10 @@ pub(crate) fn uniform_values_return_shape(
             "`{block_name}.leaves` must contain a named canonical leaf enum"
         ));
     };
-    let Some(eid) = ws.nominals.enum_id(leaf_enum) else {
+    let Some(eid) = ws
+        .nominals
+        .enum_id(crate::enum_instance::decl_name(leaf_enum))
+    else {
         return Err(format!("canonical leaf type `{leaf_enum}` is not an enum"));
     };
     let ed = &ws.modules[eid.module.index()].enums[eid.def];
@@ -1487,7 +1608,11 @@ pub fn gc_field_eq(ws: &Workspace, ty: TyId) -> GcFieldEq {
                 || EnumPlan::for_name(ws, name).is_some_and(|plan| plan.cdata().is_some())
             {
                 GcFieldEq::Native
-            } else if ws.nominals.enum_id(name).is_some() {
+            } else if ws
+                .nominals
+                .enum_id(crate::enum_instance::decl_name(name))
+                .is_some()
+            {
                 GcFieldEq::Structural
             } else {
                 GcFieldEq::Reference
@@ -1508,6 +1633,8 @@ pub struct EnumFlatShape {
     named_shapes: std::sync::Arc<[EnumNamedPayload]>,
     /// Physical named slots, including dotted record leaves.
     pub(crate) record_fields: std::sync::Arc<[Ustr]>,
+    /// `(variant, position, index into that position's shapes)`.
+    payloads: std::sync::Arc<[(Ustr, usize, usize)]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1567,16 +1694,27 @@ impl EnumFlatShape {
             .find(|shape| shape.name == name && shape.nullable == nullable)
     }
 
-    /// The constructor, pattern and descriptor use the variant's declared type.
+    /// The constructor, pattern and descriptor use the variant's declared type,
+    /// substituted for an instance.
     pub(crate) fn payload_shape(
         &self,
-        ws: &Workspace,
+        _ws: &Workspace,
         variant: Ustr,
         pos: usize,
     ) -> Option<&ValueShape> {
-        let (name, nullable) =
-            nominal_name_from_ty(ws, enum_position_ty(ws, self.name, variant, pos)?)?;
-        self.find_position_shape(pos, name, nullable)
+        let &(_, _, index) = self
+            .payloads
+            .iter()
+            .find(|(v, p, _)| *v == variant && *p == pos)?;
+        self.positions.get(pos)?.shapes.get(index)
+    }
+
+    fn same_layout(&self, other: &Self) -> bool {
+        self.positions == other.positions
+            && self.width == other.width
+            && self.named_shapes == other.named_shapes
+            && self.record_fields == other.record_fields
+            && self.payloads == other.payloads
     }
 
     pub fn has_inline_record_payload(&self, ws: &Workspace) -> bool {
@@ -1614,13 +1752,20 @@ impl EnumFlatShape {
     }
 }
 
-fn build_flat_enum_shape(ws: &Workspace, ed: &EnumDef, visiting: &mut Vec<Ustr>) -> EnumFlatShape {
-    visiting.push(ed.name);
+fn build_flat_enum_shape(
+    ws: &Workspace,
+    ed: &EnumDef,
+    name: Ustr,
+    subst: Option<&MonoSubst>,
+    visiting: &mut Vec<Ustr>,
+) -> EnumFlatShape {
+    visiting.push(name);
     // Distinct value payload shapes share a position by width. Letting one fall
     // back to the opaque slot would reintroduce an aggregate at the enum boundary.
     let mut positions: Vec<Vec<ValueShape>> = Vec::new();
     let mut record_fields: Vec<Ustr> = Vec::new();
     let mut named_shapes = Vec::new();
+    let mut payloads = Vec::new();
     for v in &ed.variants {
         match &v.payload {
             VariantPayload::Unit => {}
@@ -1629,20 +1774,29 @@ fn build_flat_enum_shape(ws: &Workspace, ed: &EnumDef, visiting: &mut Vec<Ustr>)
                     positions.resize(tys.len(), Vec::new());
                 }
                 for (i, ty) in tys.iter().enumerate() {
-                    let Some(vs) = flat_payload_shape(ws, *ty, visiting) else {
+                    let Some(vs) = PayloadTy::of(ws, *ty, subst)
+                        .and_then(|ty| flat_payload_shape(ws, &ty, visiting))
+                    else {
                         continue;
                     };
-                    if !positions[i]
+                    let index = match positions[i]
                         .iter()
-                        .any(|prev| prev.name == vs.name && prev.nullable == vs.nullable)
+                        .position(|prev| prev.name == vs.name && prev.nullable == vs.nullable)
                     {
-                        positions[i].push(vs);
-                    }
+                        Some(index) => index,
+                        None => {
+                            positions[i].push(vs);
+                            positions[i].len() - 1
+                        }
+                    };
+                    payloads.push((v.name, i, index));
                 }
             }
             VariantPayload::Record(fields) => {
                 for f in fields {
-                    if let Some(shape) = nobox_payload_shape(ws, f.ty, visiting) {
+                    if let Some(shape) = PayloadTy::of(ws, f.ty, subst)
+                        .and_then(|ty| nobox_payload_shape(ws, &ty, visiting))
+                    {
                         let keys: Vec<_> = leaf_keys(&shape, f.name.as_str())
                             .into_iter()
                             .map(|(key, _)| key)
@@ -1681,11 +1835,12 @@ fn build_flat_enum_shape(ws: &Workspace, ed: &EnumDef, visiting: &mut Vec<Ustr>)
         })
         .collect();
     EnumFlatShape {
-        name: ed.name,
+        name,
         positions,
         width,
         named_shapes: named_shapes.into(),
         record_fields: record_fields.into(),
+        payloads: payloads.into(),
     }
 }
 
@@ -1722,11 +1877,24 @@ impl EnumPlan {
             },
             || {
                 let layout = nonflat_enum_layout(ws, ed).unwrap_or_else(|| {
-                    EnumLayout::Flat(build_flat_enum_shape(ws, ed, &mut Vec::new()))
+                    EnumLayout::Flat(flat_enum_shape(ws, ed, name, &mut Vec::new()))
                 });
                 Rc::new(Self { name, layout })
             },
         ))
+    }
+
+    /// Whether an instance plans exactly like its declaration, which then
+    /// serves it under the declaration's name.
+    pub(crate) fn instance_matches_declaration(ws: &Workspace, name: Ustr) -> bool {
+        let base = crate::enum_instance::decl_name(name);
+        match (Self::for_name(ws, name), Self::for_name(ws, base)) {
+            (Some(inst), Some(decl)) => match (&inst.layout, &decl.layout) {
+                (EnumLayout::Flat(inst), EnumLayout::Flat(decl)) => inst.same_layout(decl),
+                _ => true,
+            },
+            _ => true,
+        }
     }
 
     pub fn layout(&self) -> &EnumLayout {
@@ -1752,11 +1920,60 @@ impl EnumPlan {
     }
 }
 
-fn nobox_payload_shape(ws: &Workspace, ty: TyId, visiting: &[Ustr]) -> Option<ValueShape> {
-    let (name, nullable) = nominal_name_from_ty(ws, ty)?;
-    if !is_nobox_nominal(ws, name)
-        || reaches_enum_in(ws, ty, visiting, true, &mut HashSet::default())
-    {
+/// A payload's declared type, or its substitution when it names a generic of
+/// the instance being planned.
+enum PayloadTy {
+    Decl(TyId),
+    Mono(MonoTy),
+}
+
+impl PayloadTy {
+    fn of(ws: &Workspace, ty: TyId, subst: Option<&MonoSubst>) -> Option<Self> {
+        match subst {
+            Some(subst) if mentions_generic(ws, ty) => crate::monoty::convert_decl(ws, ty, subst)
+                .ok()
+                .map(Self::Mono),
+            _ => Some(Self::Decl(ty)),
+        }
+    }
+
+    fn nominal(&self, ws: &Workspace) -> Option<(Ustr, bool)> {
+        match self {
+            Self::Decl(ty) => nominal_name_from_ty(ws, *ty),
+            Self::Mono(ty) => {
+                let (inner, nullable) = ty.peel_nullable();
+                Some((inner.nominal()?, nullable))
+            }
+        }
+    }
+
+    fn reaches(&self, ws: &Workspace, goals: &[Ustr], skip_boxed_optional: bool) -> bool {
+        let mut seen = HashSet::default();
+        match self {
+            Self::Decl(ty) => reaches_enum_in(ws, *ty, goals, skip_boxed_optional, &mut seen),
+            Self::Mono(ty) => reaches_enum_in_mono(ws, ty, goals, skip_boxed_optional, &mut seen),
+        }
+    }
+}
+
+fn mentions_generic(ws: &Workspace, ty: TyId) -> bool {
+    let TyId::Static(mid, idx) = ty else {
+        return false;
+    };
+    let sub = |idx| mentions_generic(ws, TyId::Static(mid, idx));
+    match ws.module(mid).ty_arena[idx] {
+        TypeExpr::Generic(..) | TypeExpr::Infer(..) => true,
+        TypeExpr::Nullable(inner) => sub(inner),
+        TypeExpr::Tuple { elements } => elements.into_iter().any(sub),
+        TypeExpr::App { params, .. } => params.into_iter().any(sub),
+        TypeExpr::Function { params, ret } => params.into_iter().any(sub) || sub(ret),
+        TypeExpr::Builtin(_) => false,
+    }
+}
+
+fn nobox_payload_shape(ws: &Workspace, ty: &PayloadTy, visiting: &[Ustr]) -> Option<ValueShape> {
+    let (name, nullable) = ty.nominal(ws)?;
+    if !is_nobox_nominal(ws, name) || ty.reaches(ws, visiting, true) {
         return None;
     }
     let mut shape = value_shape_of_nominal(ws, name)?;
@@ -1766,24 +1983,115 @@ fn nobox_payload_shape(ws: &Workspace, ty: TyId, visiting: &[Ustr]) -> Option<Va
 
 /// Keyed on the declared payload type, so the ctor and the match arm derive
 /// the same layout without seeing each other.
-fn flat_payload_shape(ws: &Workspace, ty: TyId, visiting: &mut Vec<Ustr>) -> Option<ValueShape> {
-    let (n, nullable) = nominal_name_from_ty(ws, ty)?;
+fn flat_payload_shape(
+    ws: &Workspace,
+    ty: &PayloadTy,
+    visiting: &mut Vec<Ustr>,
+) -> Option<ValueShape> {
+    let (n, nullable) = ty.nominal(ws)?;
     if nullable || is_nobox_nominal(ws, n) {
         return nobox_payload_shape(ws, ty, visiting);
     }
     if is_value_struct(ws, n) {
         // Planned without `visiting`, so a payload cycling back to an enum under
         // construction stays opaque.
-        if reaches_enum_in(ws, ty, visiting, false, &mut HashSet::default()) {
+        if ty.reaches(ws, visiting, false) {
             return None;
         }
         return value_shape_of_nominal(ws, n);
     }
     let ed = enum_definition(ws, n)?;
-    if visiting.contains(&n) || nonflat_enum_layout(ws, ed).is_some() {
+    if visiting
+        .iter()
+        .any(|v| crate::enum_instance::decl_name(*v) == ed.name)
+        || nonflat_enum_layout(ws, ed).is_some()
+    {
         return None;
     }
-    Some(build_flat_enum_shape(ws, ed, visiting).value_shape())
+    Some(flat_enum_shape(ws, ed, n, visiting).value_shape())
+}
+
+/// `name` is the declaration or one of its instances.
+fn flat_enum_shape(
+    ws: &Workspace,
+    ed: &EnumDef,
+    name: Ustr,
+    visiting: &mut Vec<Ustr>,
+) -> EnumFlatShape {
+    let subst = crate::enum_instance::instance(name)
+        .and_then(|inst| crate::enum_instance::instance_subst(ws, &inst));
+    build_flat_enum_shape(ws, ed, name, subst.as_ref(), visiting)
+}
+
+/// The substituted counterpart of [`reaches_enum_in`]; a declaration reached
+/// from here is walked as declared.
+fn reaches_enum_in_mono(
+    ws: &Workspace,
+    ty: &MonoTy,
+    goals: &[Ustr],
+    skip_boxed_optional: bool,
+    seen: &mut HashSet<Ustr>,
+) -> bool {
+    let reaches = |ty: &MonoTy, seen: &mut HashSet<Ustr>| {
+        reaches_enum_in_mono(ws, ty, goals, skip_boxed_optional, seen)
+    };
+    match ty {
+        MonoTy::Nullable(inner) => {
+            (!skip_boxed_optional
+                || inner
+                    .nominal()
+                    .is_some_and(|name| is_nobox_nominal(ws, name)))
+                && reaches(inner, seen)
+        }
+        MonoTy::Tuple(parts) => parts.iter().any(|part| reaches(part, seen)),
+        MonoTy::App { ctor, params } => {
+            if params.iter().any(|param| reaches(param, seen)) {
+                return true;
+            }
+            let MonoCtor::Nominal(n) = ctor else {
+                return false;
+            };
+            let decl = crate::enum_instance::decl_name(*n);
+            if goals
+                .iter()
+                .any(|goal| crate::enum_instance::decl_name(*goal) == decl)
+            {
+                return true;
+            }
+            if !seen.insert(decl) {
+                return false;
+            }
+            if let Some(sid) = ws.nominals.struct_id(decl) {
+                let sd = &ws.modules[sid.module.index()].structs[sid.def];
+                return sd.is_value
+                    && sd
+                        .fields
+                        .iter()
+                        .any(|f| reaches_enum_in(ws, f.ty, goals, skip_boxed_optional, seen));
+            }
+            let Some(ed) = enum_definition(ws, decl) else {
+                return false;
+            };
+            let subst = crate::enum_instance::instance(*n)
+                .and_then(|inst| crate::enum_instance::instance_subst(ws, &inst));
+            let payload_reaches =
+                |ty: TyId, seen: &mut HashSet<Ustr>| match PayloadTy::of(ws, ty, subst.as_ref()) {
+                    Some(PayloadTy::Mono(mono)) => reaches(&mono, seen),
+                    Some(PayloadTy::Decl(ty)) => {
+                        reaches_enum_in(ws, ty, goals, skip_boxed_optional, seen)
+                    }
+                    None => false,
+                };
+            ed.variants.iter().any(|v| match &v.payload {
+                VariantPayload::Unit => false,
+                VariantPayload::Tuple(tys) => tys.iter().any(|t| payload_reaches(*t, seen)),
+                VariantPayload::Record(fields) => {
+                    fields.iter().any(|f| payload_reaches(f.ty, seen))
+                }
+            })
+        }
+        _ => false,
+    }
 }
 
 fn reaches_enum_in(
@@ -1817,7 +2125,10 @@ fn reaches_enum_in(
             let TypeCtor::Nominal(n) = ctor else {
                 return false;
             };
-            if goals.contains(&n) {
+            if goals
+                .iter()
+                .any(|goal| crate::enum_instance::decl_name(*goal) == n)
+            {
                 return true;
             }
             if !seen.insert(n) {
@@ -1827,7 +2138,7 @@ fn reaches_enum_in(
                 let sd = &ws.modules[sid.module.index()].structs[sid.def];
                 return sd.is_value && sd.fields.iter().any(|f| reaches(f.ty, seen));
             }
-            if let Some(eid) = ws.nominals.enum_id(n) {
+            if let Some(eid) = ws.nominals.enum_id(crate::enum_instance::decl_name(n)) {
                 let ed = &ws.modules[eid.module.index()].enums[eid.def];
                 return ed.variants.iter().any(|v| match &v.payload {
                     VariantPayload::Unit => false,
@@ -1853,7 +2164,7 @@ fn flat_enum_equality_is_leafwise_inner(
     if visiting.contains(&name) {
         return false;
     }
-    let Some(eid) = ws.nominals.enum_id(name) else {
+    let Some(eid) = ws.nominals.enum_id(crate::enum_instance::decl_name(name)) else {
         return false;
     };
     visiting.push(name);

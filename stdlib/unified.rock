@@ -2239,7 +2239,7 @@ const EPSILON: float = 0.0000001
         -- Header
         local header
         if type_name and variant then
-            header = type_name .. "::" .. variant
+            header = (decl and decl.display or type_name) .. "::" .. variant
         elseif type_name then
             header = type_name
         else

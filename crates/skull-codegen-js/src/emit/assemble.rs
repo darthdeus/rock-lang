@@ -236,7 +236,7 @@ pub(super) fn check_bodies(
             .map_err(|error| err(error.message))?;
     let registry = registry.as_ref();
     let mut tables = emit_enum_singletons(&st.gctx, &st.enum_defs);
-    tables.push_str(&emit_inspect_enum_payloads(ws));
+    tables.push_str(&emit_inspect_enum_payloads(ws, scx.rep_arena()));
     tables.push_str(&emit_vt_eq(ws, registry)?);
     tables.push_str(&emit_tostring_ty(ws, registry)?);
     tables.push_str(&emit_inspect_ty(ws, registry)?);

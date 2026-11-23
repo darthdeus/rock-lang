@@ -677,6 +677,10 @@ impl RepArena {
         self.plans.is_empty()
     }
 
+    pub(crate) fn interner(&self) -> &crate::monoty::MonoInterner {
+        &self.interner
+    }
+
     fn type_facts(&self, ty: &crate::monoty::MonoTy) -> &TypeFacts {
         self.facts
             .get_or_init(self.interner.id_of(ty).index(), TypeFacts::default)

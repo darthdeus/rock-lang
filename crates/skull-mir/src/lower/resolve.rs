@@ -864,10 +864,10 @@ impl<'a> Builder<'a> {
             // A flat enum construction stays an unboxed Group so it threads as scalars;
             // `pack` builds the `{__variant}` box only if a boxed context needs it.
             Expr::EnumVariant { enum_name, .. }
-                if EnumPlan::for_name(self.ws, enum_name)
+                if EnumPlan::for_name(self.ws, self.variant_enum(e, enum_name))
                     .is_some_and(|plan| plan.flat().is_some()) =>
             {
-                let shape = EnumPlan::for_name(self.ws, enum_name)
+                let shape = EnumPlan::for_name(self.ws, self.variant_enum(e, enum_name))
                     .and_then(|plan| plan.flat().cloned())
                     .expect("flat enum plan disappeared");
                 let cells = self.lower_flat_value(&shape, e)?;

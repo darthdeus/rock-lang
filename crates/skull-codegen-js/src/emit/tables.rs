@@ -196,7 +196,10 @@ pub(super) fn emit_inspect_cdata_enums(ws: &Workspace) -> String {
         let cdata = skull_mir::lower::EnumPlan::for_name(ws, name)
             .and_then(|plan| plan.cdata().cloned())
             .is_some();
-        let Some(eid) = ws.nominals.enum_id(name) else {
+        let Some(eid) = ws
+            .nominals
+            .enum_id(skull_mir::enum_instance::decl_name(name))
+        else {
             continue;
         };
         let ed = &ws.modules[eid.module.index()].enums[eid.def];
@@ -286,26 +289,41 @@ pub(super) fn emit_inspect_cdata_enums(ws: &Workspace) -> String {
 
 /// Descriptors for flat enum tuple payloads with a direct record-field walk, emitted from
 /// declarations so an inspect reached through a flattened field always has metadata.
-pub(super) fn emit_inspect_enum_payloads(ws: &Workspace) -> String {
+pub(super) fn emit_inspect_enum_payloads(
+    ws: &Workspace,
+    arena: &skull_mir::lower::RepArena,
+) -> String {
     use bone_core::hir::{TypeCtor, TypeExpr, VariantPayload};
     use bone_core::prelude::TyId;
 
     let mut names: Vec<ustr::Ustr> = ws.nominals.enum_names().collect();
     names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    let instances = skull_mir::lower::enum_instances_in(ws, arena);
     let mut out = String::new();
-    for name in names {
+    for &name in &instances {
+        let decl = skull_mir::enum_instance::decl_name(name);
+        out.push_str(&format!(
+            "__rock_type_display[{}] = {};\n",
+            js_string_lit(skull_mir::mangle::type_symbol(ws, name).as_str()),
+            js_string_lit(skull_mir::mangle::type_symbol(ws, decl).as_str()),
+        ));
+    }
+    for name in names.into_iter().chain(instances) {
         let Some(flat) =
             skull_mir::lower::EnumPlan::for_name(ws, name).and_then(|plan| plan.flat().cloned())
         else {
             continue;
         };
-        let Some(eid) = ws.nominals.enum_id(name) else {
+        let Some(eid) = ws
+            .nominals
+            .enum_id(skull_mir::enum_instance::decl_name(name))
+        else {
             continue;
         };
         let ed = &ws.modules[eid.module.index()].enums[eid.def];
         if flat.has_inline_record_payload(ws) {
             let enum_name = js_string_lit(skull_mir::mangle::type_symbol(ws, name).as_str());
-            for entry in skull_mir::type_table::enum_entries(ws, ed) {
+            for entry in skull_mir::type_table::enum_entries(ws, name) {
                 if let skull_mir::type_table::Entry::Enum { variants, .. } = entry {
                     for (variant, payload) in variants {
                         if payload.has_inline_record_payload() {
@@ -327,7 +345,11 @@ pub(super) fn emit_inspect_enum_payloads(ws: &Workspace) -> String {
             let mut positions = Vec::with_capacity(types.len());
             let mut any_record = false;
             for (position, ty) in types.iter().enumerate() {
+                let substituted = skull_mir::lower::instance_payload_ty(ws, name, *ty);
                 let nominal = match *ty {
+                    _ if substituted.is_some() => substituted
+                        .as_ref()
+                        .and_then(skull_mir::monoty::MonoTy::nominal),
                     TyId::Static(module, index) => match ws.module(module).ty_arena[index] {
                         TypeExpr::App {
                             ctor: TypeCtor::Nominal(child),

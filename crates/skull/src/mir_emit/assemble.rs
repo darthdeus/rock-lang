@@ -740,7 +740,7 @@ end
     out.push_str(&crate::c_struct_inspect_defs(ws, &vstructs, &value_emitted));
     out.push_str(&crate::type_table_defs(ws, &value_gc, rep_arena)?);
     out.push_str(&cg.record_slot_metadata(ws));
-    out.push_str(&crate::enum_runtime_defs(ws));
+    out.push_str(&crate::enum_runtime_defs(ws, rep_arena));
     Ok((out, value_ctors))
 }
 

@@ -1,7 +1,7 @@
 // `Result<T, E = string>`: a failure that carries a reason, where `T?` only
-// says "absent". The Ok path stays allocation-free for scalar and handle
-// payloads, which `@noalloc` pins. A payload enum or value struct inside the
-// generic payload slot is still boxed, so `open` is not `@noalloc`.
+// says "absent". The Ok path stays allocation-free for scalar, handle and
+// value payloads, which `@noalloc` pins. A payload enum in a payload slot is
+// boxed, as it is in a non-generic enum, so `open` is not `@noalloc`.
 
 newtype Handle(int)
 

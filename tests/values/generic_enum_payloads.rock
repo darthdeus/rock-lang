@@ -1,0 +1,207 @@
+// A generic enum instantiated at a value struct, a `nobox` value or a flat enum
+// lays out like the same enum written without generics: the payload's leaves
+// are the enum's slots, so the Ok path allocates nothing.
+
+value P { x: float, y: float }
+nobox value N { x: float, y: float }
+enum Pick { Left, Right(int) }
+
+enum R<T> { Ok(T), Err(string) }
+enum Two<A, B> { First(A, int), Second(B) }
+enum Rec<T> { Item { value: T, tag: int }, Empty }
+enum Opt<T> { Some(T), None }
+
+// The non-generic spelling every instance must agree with.
+enum RN { Ok(N), Err(string) }
+
+@noalloc
+fn ok_p(i: int) -> R<P> {
+    if i < 0 { return R::Err("neg") }
+    return R::Ok(P { x: i as float, y: 0.5 })
+}
+
+@noalloc
+fn ok_n(i: int) -> R<N> {
+    if i < 0 { return R::Err("neg") }
+    return R::Ok(N { x: i as float, y: 0.5 })
+}
+
+@noalloc
+fn ok_rn(i: int) -> RN {
+    if i < 0 { return RN::Err("neg") }
+    return RN::Ok(N { x: i as float, y: 0.5 })
+}
+
+@noalloc
+fn std_ok(i: int) -> Result<N> {
+    if i < 0 { return Result::Err("neg") }
+    return Result::Ok(N { x: i as float, y: 2.0 })
+}
+
+@noalloc
+fn aim(x: float) -> Result<Vec2> {
+    if x < 0.0 { return Result::Err("behind") }
+    return Result::Ok(Vec2 { x: x, y: 1.0 })
+}
+
+@noalloc
+fn wrap<T>(value: T) -> Result<T> {
+    return Result::Ok(value)
+}
+
+@noalloc
+fn ok_path_sum(n: int) -> float {
+    let total = 0.0
+    for i in 0..n {
+        match ok_p(i) { R::Ok(p) => { total += p.x + p.y }, R::Err(_) => {} }
+        match ok_n(i) { R::Ok(p) => { total += p.x + p.y }, R::Err(_) => {} }
+        total += std_ok(i).unwrap().y
+        total += wrap(N { x: 1.0, y: 0.0 }).expect("wrapped").x
+        total += wrap(P { x: 0.0, y: 1.0 }).unwrap().y
+        if std_ok(-1).is_err() { total += 10.0 }
+        total += aim(1.0).unwrap().y
+        if aim(-1.0).is_err() { total += 1.0 }
+    }
+    return total
+}
+
+@test
+fn the_ok_path_flattens_value_and_nobox_payloads() {
+    // Per i: (i + 0.5) twice, then 2, 1, 1, 10, 1 and 1.
+    assert_eq(ok_path_sum(4), 2.0 * (6.0 + 2.0) + 4.0 * 16.0)
+}
+
+fn describe_n(r: R<N>) -> string {
+    return match r {
+        R::Ok(p) => "ok {p.x},{p.y}",
+        R::Err(e) => "err {e}",
+    }
+}
+
+@test(output = "ok 3,0.5\nerr neg")
+fn construction_and_match_round_trip_through_calls() {
+    print(describe_n(ok_n(3)))
+    print(describe_n(ok_n(-1)))
+}
+
+fn describe_two(t: Two<N, P>) -> string {
+    return match t {
+        Two::First(n, k) => "first {n.x},{n.y},{k}",
+        Two::Second(p) => "second {p.x},{p.y}",
+    }
+}
+
+@test(output = "first 1,2,3 second 4,5")
+fn positions_after_a_widened_one_read_their_own_slots() {
+    let a = describe_two(Two::First(N { x: 1.0, y: 2.0 }, 3))
+    let b = describe_two(Two::Second(P { x: 4.0, y: 5.0 }))
+    print("{a} {b}")
+}
+
+fn describe_rec(r: Rec<N>) -> string {
+    return match r {
+        Rec::Item { value, tag } => "item {value.x},{value.y},{tag}",
+        Rec::Empty => "empty",
+    }
+}
+
+@test(output = "item 6,7,8 empty")
+fn record_variants_flatten_a_nobox_field() {
+    let a = describe_rec(Rec::Item { value: N { x: 6.0, y: 7.0 }, tag: 8 })
+    print("{a} {describe_rec(Rec::Empty)}")
+}
+
+fn nested(k: int) -> R<Opt<N>> {
+    if k < 0 { return R::Err("neg") }
+    if k == 0 { return R::Ok(Opt::None) }
+    return R::Ok(Opt::Some(N { x: k as float, y: 1.0 }))
+}
+
+fn describe_nested(r: R<Opt<N>>) -> string {
+    return match r {
+        R::Ok(Opt::Some(n)) => "some {n.x}",
+        R::Ok(Opt::None) => "none",
+        R::Err(e) => e,
+    }
+}
+
+enum Outer { Wrapped(R<N>), Plain(int) }
+
+fn describe_outer(o: Outer) -> string {
+    return match o {
+        Outer::Wrapped(R::Ok(n)) => "wrapped ok {n.y}",
+        Outer::Wrapped(R::Err(e)) => "wrapped {e}",
+        Outer::Plain(k) => "plain {k}",
+    }
+}
+
+@test(output = "some 2 none neg / wrapped ok 0.5 wrapped neg plain 4 / left right 9")
+fn nested_instances_flatten_inside_each_other() {
+    print("{describe_nested(nested(2))} {describe_nested(nested(0))} {describe_nested(nested(-1))} / {describe_outer(Outer::Wrapped(ok_n(1)))} {describe_outer(Outer::Wrapped(ok_n(-1)))} {describe_outer(Outer::Plain(4))} / {describe_pick(R::Ok(Pick::Left))} {describe_pick(R::Ok(Pick::Right(9)))}")
+}
+
+fn describe_pick(r: R<Pick>) -> string {
+    return match r {
+        R::Ok(Pick::Left) => "left",
+        R::Ok(Pick::Right(k)) => "right {k}",
+        R::Err(e) => e,
+    }
+}
+
+fn maybe(k: int) -> R<N?> {
+    if k < 0 { return R::Err("neg") }
+    if k == 0 { return R::Ok(null) }
+    return R::Ok(N { x: k as float, y: 3.0 })
+}
+
+fn describe_maybe(r: R<N?>) -> string {
+    return match r {
+        R::Ok(n) => if n == null { "absent" } else { "present {n.x}" },
+        R::Err(e) => e,
+    }
+}
+
+fn optional(k: int) -> R<N>? {
+    if k < 0 { return null }
+    return ok_n(k)
+}
+
+fn describe_optional(r: R<N>?) -> string {
+    if r == null { return "null" }
+    return describe_n(r)
+}
+
+@test(output = "present 5 absent neg / ok 2,0.5 null")
+fn nullable_payloads_and_nullable_instances_keep_absence() {
+    print("{describe_maybe(maybe(5))} {describe_maybe(maybe(0))} {describe_maybe(maybe(-1))} / {describe_optional(optional(2))} {describe_optional(optional(-1))}")
+}
+
+struct Holder { id: int, result: R<N> }
+
+struct Boxed<T> { result: R<T> }
+
+global KEPT: [R<N>] = []
+
+@test(output = "1 ok 4,0.5 / 2 err neg / ok 7,0.5 err neg / ok 8,0.5")
+fn instances_survive_struct_fields_vectors_and_generic_structs() {
+    let a = Holder { id: 1, result: ok_n(4) }
+    let b = Holder { id: 2, result: ok_n(-1) }
+    KEPT.push(ok_n(7))
+    KEPT.push(ok_n(-1))
+    let boxed: Boxed<N> = Boxed { result: ok_n(8) }
+    print("{a.id} {describe_n(a.result)} / {b.id} {describe_n(b.result)} / {describe_n(KEPT[0])} {describe_n(KEPT[1])} / {describe_n(boxed.result)}")
+}
+
+@test
+fn inspect_and_equality_match_the_non_generic_enum() {
+    assert_eq(inspect(ok_n(3)).replace("R::", "RN::"), inspect(ok_rn(3)))
+    assert_eq(inspect(ok_n(-1)).replace("R::", "RN::"), inspect(ok_rn(-1)))
+    assert_eq("{ok_n(3)}".replace("R::", "RN::"), "{ok_rn(3)}")
+    assert_eq("{nested(2)}", "R::Ok(Opt::Some(N {{ x: 2, y: 1 }}))")
+    assert_eq(inspect(KEPT_INSPECT()), "Vec {{ R::Ok {{ x = 1, y = 0.5 }} }}")
+    assert(ok_n(2) == ok_n(2))
+    assert(ok_n(2) != ok_n(3))
+    assert(ok_p(2) == ok_p(2))
+}
+
+fn KEPT_INSPECT() -> [R<N>] { return [ok_n(1)] }

@@ -1378,6 +1378,7 @@ fn enum_variant_display(
 ) -> String {
     use bone_semantic::hir::VariantPayload;
     let mut ts = String::new();
+    let name = skull_mir::enum_instance::decl_name(name);
     let Some(eid) = ws.nominals.enum_id(name) else {
         return ts;
     };
@@ -1589,9 +1590,13 @@ pub(crate) fn enum_names_defs(ws: &Workspace, read: &rustc_hash::FxHashSet<ustr:
 
 /// Mixed enums keep unit singletons across reloads, so preserved values keep
 /// their identity.
-fn enum_runtime_defs(ws: &Workspace) -> String {
+fn enum_runtime_defs(ws: &Workspace, arena: &skull_mir::lower::RepArena) -> String {
     use bone_semantic::hir::VariantPayload;
     let mut out = String::new();
+    // An instance box has its own metatable and shares its declaration's units.
+    for name in skull_mir::lower::enum_instances_in(ws, arena) {
+        out.push_str(&enum_tostring_def(ws, name));
+    }
     for module in ws.modules.iter() {
         for (_, e) in module.enums.iter() {
             if skull_mir::lower::EnumPlan::for_name(ws, e.name)
@@ -1605,19 +1610,7 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
                     .all(|v| matches!(v.payload, VariantPayload::Unit));
             if all_unit {
             } else {
-                let sym = skull_mir::mangle::type_symbol(ws, e.name);
-                out.push_str(&format!(
-                    "__rock_box_mts[\"{sym}\"].__tostring = function(v)\n    local t = v.__variant\n{}    return \"?\"\nend\n",
-                    enum_variant_display(
-                        ws,
-                        e.name,
-                        |_, var| format!("t == \"{var}\""),
-                        |slot| match slot {
-                            EnumSlot::Tuple(j) => format!("v[{}]", j + 1),
-                            EnumSlot::Field(f) => lua_key_read("v", f),
-                        },
-                    ),
-                ));
+                out.push_str(&enum_tostring_def(ws, e.name));
                 let mut units = Vec::new();
                 for v in e.variants.iter() {
                     if matches!(v.payload, VariantPayload::Unit) {
@@ -1642,6 +1635,22 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
         }
     }
     out
+}
+
+fn enum_tostring_def(ws: &Workspace, name: ustr::Ustr) -> String {
+    let sym = skull_mir::mangle::type_symbol(ws, name);
+    format!(
+        "__rock_box_mts[\"{sym}\"].__tostring = function(v)\n    local t = v.__variant\n{}    return \"?\"\nend\n",
+        enum_variant_display(
+            ws,
+            name,
+            |_, var| format!("t == \"{var}\""),
+            |slot| match slot {
+                EnumSlot::Tuple(j) => format!("v[{}]", j + 1),
+                EnumSlot::Field(f) => lua_key_read("v", f),
+            },
+        ),
+    )
 }
 
 /// A reload invalidates the ctype lookup cache so it sees the new registry.
@@ -1964,7 +1973,14 @@ fn type_entry_lua(entry: &skull_mir::type_table::Entry, out: &mut String, decls:
                 &format!("{{ kind = \"enum_tag\", variants = {{ {variants} }} }}"),
             );
         }
-        Entry::Enum { name, variants } => {
+        Entry::Enum {
+            name,
+            display,
+            variants,
+        } => {
+            let display = display.map_or_else(String::new, |shown| {
+                format!(", display = {:?}", shown.as_str())
+            });
             let vd = variants
                 .iter()
                 .map(|(variant, entry)| {
@@ -1975,7 +1991,9 @@ fn type_entry_lua(entry: &skull_mir::type_table::Entry, out: &mut String, decls:
             push_decl(
                 decls,
                 name,
-                &format!("{{ kind = \"enum\", fields = {{ }}, variant_desc = {{ {vd} }} }}"),
+                &format!(
+                    "{{ kind = \"enum\", fields = {{ }}, variant_desc = {{ {vd} }}{display} }}"
+                ),
             );
         }
         Entry::CEnum {
@@ -2069,11 +2087,14 @@ fn type_table_defs(
             );
         }
     }
-    for module in ws.modules.iter() {
-        for (_, e) in module.enums.iter() {
-            for entry in type_table::enum_entries(ws, e) {
-                type_entry_lua(&entry, &mut out, &mut decls);
-            }
+    let instances = skull_mir::lower::enum_instances_in(ws, arena);
+    let enums = ws
+        .modules
+        .iter()
+        .flat_map(|module| module.enums.iter().map(|(_, e)| e.name));
+    for name in enums.chain(instances) {
+        for entry in type_table::enum_entries(ws, name) {
+            type_entry_lua(&entry, &mut out, &mut decls);
         }
     }
     out.push_str("__rock_type_sources({\n");

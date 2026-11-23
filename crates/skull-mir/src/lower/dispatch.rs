@@ -341,7 +341,11 @@ impl<'a> DispatchCtx<'a> {
                 ctor: MonoCtor::Nominal(name),
                 ..
             } if self.ws.nominals.struct_id(*name).is_some()
-                || self.ws.nominals.enum_id(*name).is_some() =>
+                || self
+                    .ws
+                    .nominals
+                    .enum_id(crate::enum_instance::decl_name(*name))
+                    .is_some() =>
             {
                 StringifyRoute::Inspect
             }
@@ -406,7 +410,13 @@ impl<'a> DispatchCtx<'a> {
                 let name = ty.peel_nullable().0.nominal()?;
                 let leaf_table = super::shape::planned_value(self.ws, name)
                     .is_some_and(|plan| plan.storage == super::ValueStorage::LeafTable);
-                if !self.ws.nominals.enum_id(name).is_some() && !leaf_table {
+                if !self
+                    .ws
+                    .nominals
+                    .enum_id(crate::enum_instance::decl_name(name))
+                    .is_some()
+                    && !leaf_table
+                {
                     return None;
                 }
                 Some((arg, self.structural_route(arg)?))
@@ -466,7 +476,11 @@ impl<'a> DispatchCtx<'a> {
                     ..
                 } => {
                     self.ws.nominals.struct_id(*name).is_some()
-                        || self.ws.nominals.enum_id(*name).is_some()
+                        || self
+                            .ws
+                            .nominals
+                            .enum_id(crate::enum_instance::decl_name(*name))
+                            .is_some()
                 }
                 _ => false,
             })

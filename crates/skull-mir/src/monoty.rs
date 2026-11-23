@@ -100,7 +100,9 @@ impl MonoTy {
                     MonoCtor::Array => out.push_str("Vec"),
                     MonoCtor::Map => out.push_str("Map"),
                     MonoCtor::Ref => out.push_str("ref"),
-                    MonoCtor::Nominal(n) => out.push_str(n.as_str()),
+                    MonoCtor::Nominal(n) => {
+                        out.push_str(crate::enum_instance::decl_name(*n).as_str())
+                    }
                 }
                 if !params.is_empty() {
                     out.push('<');
@@ -206,6 +208,7 @@ impl MonoTy {
                     MonoCtor::Map => out.push('m'),
                     MonoCtor::Ref => out.push('r'),
                     MonoCtor::Nominal(name) => {
+                        let name = &crate::enum_instance::decl_name(*name);
                         // The length prefix measures the spelled text, so the encoding stays
                         // self-delimiting under either spelling.
                         let spelled = match spelling {
@@ -669,6 +672,10 @@ impl MonoInterner {
         Ok(self.intern(convert_decl(ws, ty, subst)?))
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = &MonoTy> + '_ {
+        self.types.iter()
+    }
+
     /// Borrowed from the arena without a lock.
     pub fn get_ref(&self, id: MonoTyId) -> &MonoTy {
         &self.types[id.index()]
@@ -782,16 +789,18 @@ fn convert_at<S: std::hash::BuildHasher>(
             MonoTy::Tuple(parts)
         }
         TypeExpr::App { ctor, params } => {
-            let ctor = match ctor {
-                TypeCtor::Array => MonoCtor::Array,
-                TypeCtor::Map => MonoCtor::Map,
-                TypeCtor::Ref => MonoCtor::Ref,
-                TypeCtor::Nominal(n) => MonoCtor::Nominal(n),
-            };
             let mut ps = Vec::new();
             for p in params {
                 ps.push(convert_at(ws, env, ty.with_idx(p), subst, depth + 1)?);
             }
+            let ctor = match ctor {
+                TypeCtor::Array => MonoCtor::Array,
+                TypeCtor::Map => MonoCtor::Map,
+                TypeCtor::Ref => MonoCtor::Ref,
+                TypeCtor::Nominal(n) => {
+                    MonoCtor::Nominal(crate::enum_instance::layout_name(ws, n, &ps))
+                }
+            };
             MonoTy::App { ctor, params: ps }
         }
         TypeExpr::Function { params, ret } => {

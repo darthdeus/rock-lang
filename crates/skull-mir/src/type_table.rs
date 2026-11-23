@@ -46,6 +46,61 @@ pub fn type_shape(ws: &Workspace, ty: TyId) -> Option<Shape> {
     found.then_some(shape)
 }
 
+/// [`type_shape`] of a substituted type.
+fn mono_shape(ws: &Workspace, ty: &MonoTy, depth: u32) -> Option<Shape> {
+    const MAX_DEPTH: u32 = 12;
+    if depth >= MAX_DEPTH {
+        return None;
+    }
+    let nested = |ty| mono_shape(ws, ty, depth + 1).unwrap_or(Shape::Prim("any"));
+    let found = |shape: Shape| {
+        let mut nominals = Vec::new();
+        shape.nominals(&mut nominals);
+        (!nominals.is_empty() || shape_has_prim(&shape)).then_some(shape)
+    };
+    match ty {
+        MonoTy::Int => Some(Shape::Prim("int")),
+        MonoTy::Uint => Some(Shape::Prim("uint")),
+        MonoTy::Float => Some(Shape::Prim("float")),
+        MonoTy::Bool => Some(Shape::Prim("bool")),
+        MonoTy::String => Some(Shape::Prim("string")),
+        MonoTy::Nullable(inner) => found(Shape::Opt(Box::new(nested(inner)))),
+        MonoTy::Tuple(parts) => found(Shape::Tuple(parts.iter().map(nested).collect())),
+        MonoTy::App {
+            ctor: MonoCtor::Array,
+            params,
+        } => found(Shape::Vec(Box::new(nested(params.first()?)))),
+        MonoTy::App {
+            ctor: MonoCtor::Map,
+            params,
+        } => found(Shape::Map(
+            Box::new(nested(params.first()?)),
+            Box::new(nested(params.get(1)?)),
+        )),
+        MonoTy::App {
+            ctor: MonoCtor::Nominal(name),
+            params,
+        } if name.as_str() == "JsonField" && params.len() == 1 => {
+            found(Shape::Field(Box::new(nested(&params[0]))))
+        }
+        MonoTy::App {
+            ctor: MonoCtor::Nominal(name),
+            ..
+        } => Some(Shape::Nom(type_symbol(ws, *name))),
+        _ => None,
+    }
+}
+
+fn shape_has_prim(shape: &Shape) -> bool {
+    match shape {
+        Shape::Prim(name) => *name != "any",
+        Shape::Opt(inner) | Shape::Vec(inner) | Shape::Field(inner) => shape_has_prim(inner),
+        Shape::Tuple(parts) => parts.iter().any(shape_has_prim),
+        Shape::Map(key, val) => shape_has_prim(key) || shape_has_prim(val),
+        Shape::Nom(_) => true,
+    }
+}
+
 /// Nominal leaves stop recursion; structural nesting has a finite depth bound.
 fn shape_of(ws: &Workspace, ty: TyId, depth: u32) -> (Shape, bool) {
     const MAX_DEPTH: u32 = 12;
@@ -129,7 +184,9 @@ fn shape_of(ws: &Workspace, ty: TyId, depth: u32) -> (Shape, bool) {
                     return (Shape::Field(Box::new(inner)), found);
                 }
                 // A struct's own fields are reached through its own entry.
-                (Shape::Nom(type_symbol(ws, name)), true)
+                // Over an unbound generic, the declaration names the type.
+                let layout = crate::lower::static_layout_nominal(ws, ty).unwrap_or(name);
+                (Shape::Nom(type_symbol(ws, layout)), true)
             }
         },
     }
@@ -154,7 +211,10 @@ pub fn reflect_field_type(ws: &Workspace, ty: TyId) -> (String, bool) {
         Some(TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
             ..
-        }) => (type_symbol(ws, name).as_str().to_string(), false),
+        }) => {
+            let layout = crate::lower::static_layout_nominal(ws, ty).unwrap_or(name);
+            (type_symbol(ws, layout).as_str().to_string(), false)
+        }
         Some(TypeExpr::App {
             ctor: TypeCtor::Array,
             ..
@@ -283,6 +343,8 @@ pub enum Entry {
     },
     Enum {
         name: Ustr,
+        /// An instance shows its declaration's name.
+        display: Option<Ustr>,
         variants: Vec<(Ustr, VariantEntry)>,
     },
     CEnum {
@@ -422,11 +484,20 @@ pub fn struct_entries(
     Ok(out)
 }
 
-/// The flat layout, if any, then the enum when it has a walkable form.
-pub fn enum_entries(ws: &Workspace, e: &EnumDef) -> Vec<Entry> {
+/// The flat layout, if any, then the enum when it has a walkable form. `name`
+/// is a declaration or one of its instances.
+pub fn enum_entries(ws: &Workspace, name: Ustr) -> Vec<Entry> {
     let mut out = Vec::new();
-    let name = type_symbol(ws, e.name);
-    let plan = EnumPlan::for_name(ws, e.name);
+    let Some(e) = crate::lower::enum_decl(ws, name) else {
+        return out;
+    };
+    let plan = EnumPlan::for_name(ws, name);
+    let payload_shape = |ty: TyId| match crate::lower::instance_payload_ty(ws, name, ty) {
+        Some(mono) => mono_shape(ws, &mono, 0),
+        None => type_shape(ws, ty),
+    };
+    let display = (e.name != name).then(|| type_symbol(ws, e.name));
+    let name = type_symbol(ws, name);
     if let Some(flat) = plan.as_ref().and_then(|plan| plan.flat()) {
         out.push(Entry::FlatLayout {
             name,
@@ -446,9 +517,14 @@ pub fn enum_entries(ws: &Workspace, e: &EnumDef) -> Vec<Entry> {
         });
         return out;
     }
-    let Some(shape) = plan.and_then(|plan| plan.cdata().cloned()) else {
-        if let Some(variants) = boxed_variants(ws, e) {
-            out.push(Entry::Enum { name, variants });
+    let Some(shape) = plan.as_ref().and_then(|plan| plan.cdata().cloned()) else {
+        let flat = plan.as_ref().and_then(|plan| plan.flat());
+        if let Some(variants) = boxed_variants(ws, e, flat, payload_shape) {
+            out.push(Entry::Enum {
+                name,
+                display,
+                variants,
+            });
         }
         return out;
     };
@@ -488,8 +564,12 @@ pub fn enum_entries(ws: &Workspace, e: &EnumDef) -> Vec<Entry> {
 }
 
 /// Complete alternatives, including units and primitive payloads.
-fn boxed_variants(ws: &Workspace, e: &EnumDef) -> Option<Vec<(Ustr, VariantEntry)>> {
-    let flat = EnumPlan::for_name(ws, e.name).and_then(|plan| plan.flat().cloned());
+fn boxed_variants(
+    ws: &Workspace,
+    e: &EnumDef,
+    flat: Option<&crate::lower::EnumFlatShape>,
+    payload_shape: impl Fn(TyId) -> Option<Shape>,
+) -> Option<Vec<(Ustr, VariantEntry)>> {
     let mut any = false;
     let mut variants = Vec::new();
     for variant in e.variants.iter() {
@@ -500,12 +580,10 @@ fn boxed_variants(ws: &Workspace, e: &EnumDef) -> Option<Vec<(Ustr, VariantEntry
                     .iter()
                     .enumerate()
                     .map(|(i, ty)| {
-                        let layout = flat
-                            .as_ref()
-                            .and_then(|flat| flat.payload_shape(ws, variant.name, i));
+                        let layout = flat.and_then(|flat| flat.payload_shape(ws, variant.name, i));
                         PositionEntry::from_layout(
-                            type_shape(ws, *ty),
-                            flat.as_ref().map(|flat| flat.slot_offset(i)),
+                            payload_shape(*ty),
+                            flat.map(|flat| flat.slot_offset(i)),
                             layout,
                             layout
                                 .is_some_and(|s| crate::lower::track_enum_payload_presence(ws, s)),
@@ -521,9 +599,8 @@ fn boxed_variants(ws: &Workspace, e: &EnumDef) -> Option<Vec<(Ustr, VariantEntry
                 let entries: Vec<_> = fields
                     .iter()
                     .filter_map(|f| {
-                        let shape = type_shape(ws, f.ty)?;
+                        let shape = payload_shape(f.ty)?;
                         let layout = flat
-                            .as_ref()
                             .and_then(|flat| flat.named_payload(variant.name, f.name))
                             .map(|payload| &payload.shape);
                         Some((

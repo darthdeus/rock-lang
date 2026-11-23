@@ -9,6 +9,7 @@ pub mod concrete;
 pub mod decorator;
 pub mod definition;
 pub mod display;
+pub mod enum_instance;
 pub mod global_storage;
 pub mod gpu_layout;
 pub mod instance;

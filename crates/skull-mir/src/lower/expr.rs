@@ -555,7 +555,7 @@ impl<'a> Builder<'a> {
                 bases,
             } => self.lower_struct_literal(e, name, fields, bases),
             Expr::EnumVariant { enum_name, .. }
-                if EnumPlan::for_name(self.ws, enum_name)
+                if EnumPlan::for_name(self.ws, self.variant_enum(e, enum_name))
                     .is_some_and(|plan| plan.flat().is_some()) =>
             {
                 let r = self.lower_expr_repr(e)?.into_value();
@@ -566,7 +566,7 @@ impl<'a> Builder<'a> {
                 variant,
                 args,
                 ..
-            } => self.lower_enum_variant(enum_name, variant, args),
+            } => self.lower_enum_variant(self.variant_enum(e, enum_name), variant, args),
 
             Expr::Assign { target, value } => {
                 self.lower_assign_effect(target, value)?;
