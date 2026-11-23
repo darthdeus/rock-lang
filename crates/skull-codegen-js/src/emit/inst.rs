@@ -64,7 +64,11 @@ impl Emitter<'_> {
             Inst::Load(c) => cell_name(self.mf, *c),
             Inst::IntAdd(a, b) | Inst::FloatAdd(a, b) => bin(a, "+", b, self)?,
             Inst::IntSub(a, b) | Inst::FloatSub(a, b) => bin(a, "-", b, self)?,
-            Inst::IntMul(a, b) | Inst::FloatMul(a, b) => bin(a, "*", b, self)?,
+            Inst::FloatMul(a, b) => bin(a, "*", b, self)?,
+            // `0 * -3` is -0 in JS and prints as `-0`; `+ 0` makes it 0, as luajit prints it.
+            Inst::IntMul(a, b) => {
+                format!("({} * {} + 0)", self.render_val(*a)?, self.render_val(*b)?)
+            }
             Inst::UintAdd(a, b) => format!(
                 "(({} + {}) >>> 0)",
                 self.render_val(*a)?,

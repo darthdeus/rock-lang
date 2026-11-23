@@ -46,10 +46,10 @@ pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
     template("join", 2, "$1._data.slice(0, $1.len).join($2)"),
     // Indices are native units (Lua bytes, JS UTF-16); `find` returns -1 when absent.
     template("find", 3, "$1.indexOf($2, $3)"),
-    template("substring", 3, "$1.slice($2, $3)"),
+    template("substring", 3, "__rock_substring($1, $2, $3)"),
     template("unit_at", 2, "($1.charCodeAt($2) || 0)"),
-    template("upper", 1, "$1.toUpperCase()"),
-    template("lower", 1, "$1.toLowerCase()"),
+    template("upper", 1, "$1.replace(/[a-z]+/g, __rock_upper_ascii)"),
+    template("lower", 1, "$1.replace(/[A-Z]+/g, __rock_lower_ascii)"),
     template("string_char", 1, "String.fromCharCode($1)"),
     template("same_ref", 2, "($1 === $2)"),
     template("__nb_alloc_u8", 1, "new Uint8Array($1)"),
@@ -1388,8 +1388,18 @@ function __rock_table_address(t) {
   }
   return a;
 }
+// Lua `string.sub(s, start + 1, end)`: a negative bound counts from the end.
+function __rock_substring(s, start, end) {
+  var n = s.length, i = start + 1, j = end;
+  if (i < 0) i = Math.max(n + i + 1, 1); else if (i === 0) i = 1;
+  if (j < 0) j = n + j + 1; else if (j > n) j = n;
+  return i > j ? "" : s.slice(i - 1, j);
+}
+// C-locale case mapping: ASCII letters only, as Lua `string.upper` / `lower`.
+function __rock_upper_ascii(m) { return m.toUpperCase(); }
+function __rock_lower_ascii(m) { return m.toLowerCase(); }
 function __rock_format_float(v) {
-  // Non-finite first: C `%.2g` renders these as inf/-inf/nan, and __c_g below
+  // Non-finite first: C `%.14g` renders these as inf/-inf/nan, and __c_g below
   // reconstructs a value from its mantissa bits, so it would reach BigInt() with
   // Infinity and throw rather than format. Same spellings lua_tostring uses.
   if (v !== v) return "nan";
@@ -1397,7 +1407,7 @@ function __rock_format_float(v) {
   if (v === -Infinity) return "-inf";
   var av = Math.abs(v);
   if (av !== 0 && (av < 0.0001 || av >= 1000000)) {
-    return __c_g(v, 2);
+    return __c_g(v, 14);
   }
   var s = __c_f(v, 4);
   s = s.replace(/0+$/, "").replace(/\.$/, "");

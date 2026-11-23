@@ -2412,7 +2412,7 @@ const EPSILON: float = 0.0000001
 @intrinsic @nomangle inline(lua) fn __rock_format_float(v: float) -> string = """
     local av = math.abs(v)
     if av ~= 0 and (av < 0.0001 or av >= 1000000) then
-        local r = string.format("%.2g", v)
+        local r = string.format("%.14g", v)
         return r
     end
     if v == math.floor(v) then return tostring(v) end
