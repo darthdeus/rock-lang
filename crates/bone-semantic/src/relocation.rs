@@ -183,29 +183,32 @@ enum Operation {
 
 type EffectsAt = FxHashMap<SuspensionPoint, Effect>;
 
-struct FnFacts {
-    direct: Effect,
-    operations: Vec<(SuspensionPoint, Operation)>,
+type Operations = Vec<(SuspensionPoint, Operation)>;
+
+impl Operation {
+    fn edge(&self) -> Option<&Edge> {
+        match self {
+            Self::Call(edge) | Self::Implicit(edge) => edge.as_ref(),
+            _ => None,
+        }
+    }
 }
 
-impl FnFacts {
-    fn operations_in<'a>(
-        &'a self,
-        members: Option<&'a FxHashSet<Idx<Expr>>>,
-    ) -> impl Iterator<Item = &'a (SuspensionPoint, Operation)> {
-        self.operations.iter().filter(move |(point, _)| {
-            let (Expression(expr) | IteratorNext(expr)) = point;
-            members.is_none_or(|members| members.contains(expr))
-        })
-    }
+struct RegionEffects {
+    members: Option<FxHashSet<Idx<Expr>>>,
+    summary: Effect,
+}
 
-    fn callees<'a>(
+impl RegionEffects {
+    fn operations<'a>(
         &'a self,
-        members: Option<&'a FxHashSet<Idx<Expr>>>,
-    ) -> impl Iterator<Item = Region> + 'a {
-        self.operations_in(members).filter_map(|(_, op)| match op {
-            Operation::Call(Some(edge)) | Operation::Implicit(Some(edge)) => Some(edge.callee),
-            _ => None,
+        ops: &'a [(SuspensionPoint, Operation)],
+    ) -> impl Iterator<Item = &'a (SuspensionPoint, Operation)> {
+        ops.iter().filter(move |(point, _)| {
+            let (Expression(expr) | IteratorNext(expr)) = point;
+            self.members
+                .as_ref()
+                .is_none_or(|members| members.contains(expr))
         })
     }
 }
@@ -432,7 +435,6 @@ struct BodyCtx<'a> {
     params: FxHashMap<Idx<BindingInfo>, u16>,
     fresh_locals: FxHashSet<Idx<BindingInfo>>,
     values: FxHashMap<Idx<BindingInfo>, Vec<Idx<Expr>>>,
-    arena_remove: Option<Span>,
     arena_storage: bool,
     collection_sources: Option<CollectionSources>,
     host_records: Option<&'a HostRecords>,
@@ -478,15 +480,6 @@ impl<'a> BodyCtx<'a> {
                 bone_core::modules::stdlib_file_name(f.span.file.as_str()) == Some("arena.rock")
             }),
             return_origins,
-            arena_remove: function
-                .filter(|f| {
-                    f.name.as_str() == "remove"
-                        && is_stdlib_module_file(f.span.file.as_str())
-                        && f.param_decls
-                            .first()
-                            .is_some_and(|p| arena_element(ws, None, p.ty).is_some())
-                })
-                .map(|f| f.span),
         };
         ctx.fresh_locals = ctx.collect_fresh_locals();
         if let Some(host_records) = host_records {
@@ -895,40 +888,29 @@ impl<'a> BodyCtx<'a> {
             .chain(tail.map(HirChild::Expr))
             .enumerate()
         {
-            let mut visit = |node| {
+            walk_region(self.body, child, |node| {
                 match node {
-                    HirChild::Expr(e) => {
-                        if matches!(self.body.expr_arena[e], Expr::Lambda { .. }) {
-                            return false;
-                        }
+                    HirChild::Expr(e)
+                        if !matches!(self.body.expr_arena[e], Expr::Lambda { .. }) =>
+                    {
                         if points.get(e).is_none() {
                             points.insert(e, point + 1);
                         }
                     }
                     HirChild::Statement(s)
-                        if matches!(
-                            self.body.statement_arena[s],
-                            Statement::Fn { .. } | Statement::Defer(_)
-                        ) =>
+                        if matches!(self.body.statement_arena[s], Statement::Defer(_)) =>
                     {
                         return false;
                     }
                     _ => {}
                 }
                 true
-            };
-            if visit(child) {
-                self.body.walk_descendants(child, &mut visit);
-            }
+            });
         }
         points
     }
 
-    fn facts(self, host_records: &HostRecords) -> FnFacts {
-        let mut direct = Effect::default();
-        if let Some(at) = self.arena_remove {
-            direct.add(Param(0), at);
-        }
+    fn facts(self, host_records: &HostRecords) -> Operations {
         let mut operations = Vec::new();
         let host_access = |base| {
             self.ty(base)
@@ -944,16 +926,9 @@ impl<'a> BodyCtx<'a> {
             };
             let origin = |base| self.origin(base, id);
             let host = match *expr {
-                Expr::Call { .. } | Expr::SafeNavCall { .. } => {
-                    self.raw_table_receiver(id)
-                        .map_or(CollectionOrigin::Rock, |base| {
-                            if host_access(base) {
-                                origin(base)
-                            } else {
-                                origin(base)
-                            }
-                        })
-                }
+                Expr::Call { .. } | Expr::SafeNavCall { .. } => self
+                    .raw_table_receiver(id)
+                    .map_or(CollectionOrigin::Rock, origin),
                 Expr::Index { base, .. }
                     if matches!(
                         self.collection_ctor(base),
@@ -1071,7 +1046,7 @@ impl<'a> BodyCtx<'a> {
             };
             operations.push((IteratorNext(iter), Operation::Implicit(next)));
         }
-        FnFacts { direct, operations }
+        operations
     }
 
     fn default_fields(
@@ -1546,8 +1521,7 @@ fn shown(key: &str) -> String {
     key.replace(ANY_KEY, "_").replace(GENERIC, "$")
 }
 
-fn map_edge(edge: &Edge, callee: &Effect, at: Span) -> Effect {
-    let mut mapped = Effect::default();
+fn map_edge(mapped: &mut Effect, edge: &Edge, callee: &Effect, at: Span) {
     let arg = |p: u16| edge.args.get(p as usize);
     for (effect, &witness) in &callee.0 {
         match *effect {
@@ -1588,50 +1562,69 @@ fn map_edge(edge: &Edge, callee: &Effect, at: Span) -> Effect {
             Local(_) => {}
         }
     }
-    mapped
 }
 
-fn bodiless_summary(ws: &Workspace, key: FnKey) -> Effect {
-    let module = ws.module(key.0);
-    let function = &module.functions[key.1];
+fn declared_effect(ws: &Workspace, (module, owner): BodyKey, has_body: bool) -> Effect {
     let mut effect = Effect::default();
-    if function
-        .annotations
-        .iter()
-        .any(|a| a.is_builtin(RELOCATES_ANNOTATION))
-    {
-        effect.add(Param(0), function.span);
-    } else if !is_stdlib_module_file(module.file.as_str())
-        || matches!(
-            function.name.as_str(),
-            "resume" | "kill" | "fire_hot_reload" | "__rock_coroutine_kill"
-        )
-        || function.param_decls.iter().any(|p| {
-            matches!(
-                ws.resolve_ty(None, p.ty),
-                Some((_, TypeExpr::Function { .. }))
+    let BodyOwner::Function(id) = owner else {
+        return effect;
+    };
+    let module = ws.module(module);
+    let f = &module.functions[id];
+    let trusted = is_stdlib_module_file(module.file.as_str());
+    if has_body {
+        if trusted
+            && f.name.as_str() == "remove"
+            && f.param_decls
+                .first()
+                .is_some_and(|p| arena_element(ws, None, p.ty).is_some())
+        {
+            effect.add(Param(0), f.span);
+        }
+    } else {
+        if f.annotations
+            .iter()
+            .any(|a| a.is_builtin(RELOCATES_ANNOTATION))
+        {
+            effect.add(Param(0), f.span);
+        } else if !trusted
+            || matches!(
+                f.name.as_str(),
+                "resume" | "kill" | "fire_hot_reload" | "__rock_coroutine_kill"
             )
-        })
-    {
-        // Foreign code, or a stdlib primitive that calls back into a closure.
-        effect.add(Unknown, function.span);
+            || f.param_decls.iter().any(|p| {
+                matches!(
+                    ws.resolve_ty(None, p.ty),
+                    Some((_, TypeExpr::Function { .. }))
+                )
+            })
+        {
+            effect.add(Unknown, f.span);
+        }
+        if trusted
+            && f.inline_body.is_some()
+            && f.param_decls.first().is_some_and(|param| {
+                matches!(
+                    strip_ref(ws, None, param.ty),
+                    Some((
+                        _,
+                        TypeExpr::App {
+                            ctor: TypeCtor::Map | TypeCtor::Array,
+                            ..
+                        }
+                    ))
+                )
+            })
+        {
+            effect.add(HostParam(0), f.span);
+        }
     }
-    if is_stdlib_module_file(module.file.as_str())
-        && function.inline_body.is_some()
-        && function.param_decls.first().is_some_and(|param| {
-            matches!(
-                strip_ref(ws, None, param.ty),
-                Some((
-                    _,
-                    TypeExpr::App {
-                        ctor: TypeCtor::Map | TypeCtor::Array,
-                        ..
-                    }
-                ))
-            )
-        })
-    {
-        effect.add(HostParam(0), function.span);
+    if f.is_coroutine {
+        for (i, param) in f.param_decls.iter().enumerate() {
+            if ws.type_contains_ref(None, param.ty) {
+                effect.add(Retained(i as u16), f.span);
+            }
+        }
     }
     effect
 }
@@ -1671,18 +1664,25 @@ impl Relevance {
     }
 }
 
-fn evaluated(body: &Body, root: Idx<Expr>, mut visit: impl FnMut(HirChild)) {
+fn walk_region(body: &Body, root: HirChild, mut visit: impl FnMut(HirChild) -> bool) {
     let mut visit = |node| {
-        visit(node);
-        match node {
-            HirChild::Expr(e) => !matches!(body.expr_arena[e], Expr::Lambda { .. }),
-            HirChild::Statement(s) => !matches!(body.statement_arena[s], Statement::Fn { .. }),
-            HirChild::Pattern(_) => true,
-        }
+        visit(node)
+            && match node {
+                HirChild::Expr(e) => !matches!(body.expr_arena[e], Expr::Lambda { .. }),
+                HirChild::Statement(s) => !matches!(body.statement_arena[s], Statement::Fn { .. }),
+                HirChild::Pattern(_) => true,
+            }
     };
-    if visit(HirChild::Expr(root)) {
-        body.walk_descendants(HirChild::Expr(root), &mut visit);
+    if visit(root) {
+        body.walk_descendants(root, &mut visit);
     }
+}
+
+fn evaluated(body: &Body, root: Idx<Expr>, mut visit: impl FnMut(HirChild)) {
+    walk_region(body, HirChild::Expr(root), |child| {
+        visit(child);
+        true
+    });
 }
 
 /// Completed return-origin queries share the existing root walker and type keys.
@@ -1754,9 +1754,8 @@ struct Program<'a> {
     ws: &'a Workspace,
     relevance: Relevance,
     sites: Vec<BodyKey>,
-    facts: FxHashMap<BodyKey, FnFacts>,
-    regions: FxHashMap<Region, Option<FxHashSet<Idx<Expr>>>>,
-    summaries: FxHashMap<Region, Effect>,
+    facts: FxHashMap<BodyKey, Operations>,
+    regions: FxHashMap<Region, RegionEffects>,
     return_origins: ReturnOrigins,
     host_records: HostRecords,
 }
@@ -1797,7 +1796,6 @@ impl<'a> Program<'a> {
             sites: Vec::new(),
             facts: FxHashMap::default(),
             regions: FxHashMap::default(),
-            summaries: FxHashMap::default(),
             return_origins: ReturnOrigins::default(),
             host_records: HostRecords::default(),
         };
@@ -1878,132 +1876,94 @@ impl<'a> Program<'a> {
         {
             program.host_records = HostRecords::collect(ws);
         }
-        while let Some((key, root)) = pending.pop() {
-            if program.regions.contains_key(&(key, root)) {
+        let mut callers = FxHashMap::<Region, Vec<Region>>::default();
+        while let Some(region @ (key, root)) = pending.pop() {
+            if program.regions.contains_key(&region) {
                 continue;
             }
-            let Some((function, body, bi)) = inferred_site(ws, key) else {
-                continue;
+            let inferred = inferred_site(ws, key);
+            let mut effects = RegionEffects {
+                members: None,
+                summary: declared_effect(ws, key, inferred.is_some()),
             };
-            let facts = program.facts.entry(key).or_insert_with(|| {
-                BodyCtx::new(
-                    ws,
-                    function,
-                    body,
-                    bi,
-                    &program.return_origins,
-                    program
-                        .host_records
-                        .host_boundary
-                        .then_some(&program.host_records),
-                )
-                .facts(&program.host_records)
-            });
-            let members = root.map(|root| {
-                let mut members = FxHashSet::default();
-                evaluated(body, root, |child| {
-                    if let HirChild::Expr(expr) = child {
-                        members.insert(expr);
-                    }
+            if let Some((function, body, bi)) = inferred {
+                let ops = program.facts.entry(key).or_insert_with(|| {
+                    BodyCtx::new(
+                        ws,
+                        function,
+                        body,
+                        bi,
+                        &program.return_origins,
+                        program
+                            .host_records
+                            .host_boundary
+                            .then_some(&program.host_records),
+                    )
+                    .facts(&program.host_records)
                 });
-                members
-            });
-            pending.extend(facts.callees(members.as_ref()));
-            program.regions.insert((key, root), members);
+                effects.members = root.map(|root| {
+                    let mut members = FxHashSet::default();
+                    evaluated(body, root, |child| {
+                        if let HirChild::Expr(expr) = child {
+                            members.insert(expr);
+                        }
+                    });
+                    members
+                });
+                for (_, op) in effects.operations(ops) {
+                    if let Some(edge) = op.edge() {
+                        callers.entry(edge.callee).or_default().push(region);
+                        pending.push(edge.callee);
+                    }
+                }
+            }
+            program.regions.insert(region, effects);
         }
-        program.solve();
+        program.solve(&callers);
         program
     }
 
-    fn summary(&self, region: Region) -> Effect {
-        let (key, _) = region;
-        let mut effect = match self.summaries.get(&region) {
-            Some(summary) => summary.clone(),
-            None => match key.1 {
-                BodyOwner::Function(id) if !self.facts.contains_key(&key) => {
-                    bodiless_summary(self.ws, (key.0, id))
-                }
-                _ => Effect::default(),
-            },
-        };
-        let BodyOwner::Function(id) = key.1 else {
-            return effect;
-        };
-        let function = &self.ws.module(key.0).functions[id];
-        if function.is_coroutine {
-            for (index, param) in function.param_decls.iter().enumerate() {
-                if self.ws.type_contains_ref(None, param.ty) {
-                    effect.add(Retained(index as u16), function.span);
-                }
-            }
-        }
-        effect
-    }
-
-    fn operation_effect(
-        &self,
-        body: &Body,
-        point: SuspensionPoint,
-        operation: &Operation,
-    ) -> Effect {
+    fn apply(&self, effect: &mut Effect, body: &Body, point: SuspensionPoint, op: &Operation) {
         let (Expression(expr) | IteratorNext(expr)) = point;
         let at = body.expr_spans[expr];
-        let mut effect = match operation {
+        match op {
             Operation::Call(Some(edge)) | Operation::Implicit(Some(edge)) => {
-                map_edge(edge, &self.summary(edge.callee), at)
+                map_edge(effect, edge, &self.regions[&edge.callee].summary, at);
             }
-            Operation::Call(None) | Operation::Implicit(None) => {
-                let mut effect = Effect::default();
-                effect.add(Unknown, at);
-                effect
-            }
-            Operation::Direct(target) => {
-                let mut effect = Effect::default();
-                effect.add(target.clone(), at);
-                effect
-            }
-            Operation::HostAccess(origin) => {
-                let mut effect = Effect::default();
-                effect.add_host_access(*origin, at);
-                effect
-            }
-        };
-        self.relevance.trim(&mut effect);
-        effect
+            Operation::Call(None) | Operation::Implicit(None) => effect.add(Unknown, at),
+            Operation::Direct(target) => effect.add(target.clone(), at),
+            Operation::HostAccess(origin) => effect.add_host_access(*origin, at),
+        }
     }
 
     /// Summaries only grow, and keys are bounded, so the worklist drains.
-    fn solve(&mut self) {
-        let mut callers: FxHashMap<Region, Vec<Region>> = FxHashMap::default();
-        for (&caller, members) in &self.regions {
-            for callee in self.facts[&caller.0].callees(members.as_ref()) {
-                callers.entry(callee).or_default().push(caller);
-            }
-        }
-        let mut pending: Vec<_> = self.regions.keys().copied().collect();
+    fn solve(&mut self, callers: &FxHashMap<Region, Vec<Region>>) {
+        let mut pending: Vec<_> = self
+            .regions
+            .keys()
+            .copied()
+            .filter(|key| self.facts.contains_key(&key.0))
+            .collect();
         let mut queued: FxHashSet<_> = pending.iter().copied().collect();
-        while let Some(key) = pending.pop() {
-            queued.remove(&key);
-            let ((module, owner), _) = key;
+        while let Some(region @ (key @ (module, owner), _)) = pending.pop() {
+            queued.remove(&region);
             let body = &self.ws.module(module).bodies[&owner];
-            let facts = &self.facts[&key.0];
-            let mut effect = facts.direct.clone();
-            for (point, op) in facts.operations_in(self.regions[&key].as_ref()) {
-                effect.union(&self.operation_effect(body, *point, op));
+            let info = &self.regions[&region];
+            let mut effect = declared_effect(self.ws, key, true);
+            for &(point, ref op) in info.operations(&self.facts[&key]) {
+                self.apply(&mut effect, body, point, op);
             }
             effect.0.retain(|target, _| !matches!(target, Local(_)));
             self.relevance.trim(&mut effect);
-            if self
-                .summaries
-                .get(&key)
-                .is_some_and(|old| old.0.keys().eq(effect.0.keys()))
-            {
-                continue;
-            }
-            self.summaries.insert(key, effect);
-            for &caller in callers.get(&key).into_iter().flatten() {
-                if queued.insert(caller) {
-                    pending.push(caller);
+            if !info.summary.0.keys().eq(effect.0.keys()) {
+                self.regions
+                    .get_mut(&region)
+                    .expect("queued region")
+                    .summary = effect;
+                for &caller in callers.get(&region).into_iter().flatten() {
+                    if queued.insert(caller) {
+                        pending.push(caller);
+                    }
                 }
             }
         }
@@ -2014,13 +1974,13 @@ impl<'a> Program<'a> {
             return Vec::new();
         };
         let ctx = BodyCtx::new(self.ws, function, body, bi, &self.return_origins, None);
-        let facts = &self.facts[&(mid, owner)];
+        let ops = &self.facts[&(mid, owner)];
         let mut effects = EffectsAt::default();
-        for &(point, ref op) in &facts.operations {
-            effects
-                .entry(point)
-                .or_default()
-                .union(&self.operation_effect(body, point, op));
+        for &(point, ref op) in ops {
+            self.apply(effects.entry(point).or_default(), body, point, op);
+        }
+        for effect in effects.values_mut() {
+            self.relevance.trim(effect);
         }
         let mut errors = Vec::new();
         let mut borrowed = FxHashMap::default();
@@ -2097,7 +2057,7 @@ impl<'a> Program<'a> {
                 ));
             }
         }
-        for (point, operation) in &facts.operations {
+        for (point, operation) in ops {
             let (Expression(call), Operation::Call(edge)) = (point, operation) else {
                 continue;
             };
@@ -2113,7 +2073,8 @@ impl<'a> Program<'a> {
                 if roots.iter().any(|root| !root.key.starts_with("Arena<"))
                     && let Some(edge) = edge
                     && let Some(witness) =
-                        self.summary(edge.callee)
+                        self.regions[&edge.callee]
+                            .summary
                             .0
                             .iter()
                             .find_map(|(effect, &at)| {
