@@ -2,12 +2,37 @@ use crate::Result;
 use anyhow::Context as _;
 use std::path::PathBuf;
 
-// Keep this directory alive until the child exits. The requested output directory
-// may also be targeted by a compiler, watcher or another bounded invocation.
 pub(crate) fn compile_frame_invocation(
     path: &str,
     output: &str,
+    validate_assets: bool,
 ) -> Result<(tempfile::TempDir, PathBuf)> {
+    let compile = || prepare_frame_artifact(path, output);
+    let (invocation, lua_file) = if validate_assets {
+        beside(
+            || {
+                rock_host::timed("validate assets", || {
+                    crate::package::check_project_assets(std::path::Path::new(path))
+                })
+            },
+            compile,
+        )?
+    } else {
+        compile()?
+    };
+    // Publish the diagnostic copy only after both the compile and preflight succeed.
+    rock_host::timed("diagnostic copy", || {
+        diagnostic_copy(
+            &lua_file,
+            &PathBuf::from(output).join(rock_host::project::MAIN_LUA_FILENAME),
+        )
+    })?;
+    Ok((invocation, lua_file))
+}
+
+// The private artifact stays alive until the child exits. Other compilers and
+// watchers may also write to the requested output directory.
+fn prepare_frame_artifact(path: &str, output: &str) -> Result<(tempfile::TempDir, PathBuf)> {
     std::fs::create_dir_all(output)?;
     let invocation = tempfile::Builder::new()
         .prefix("frame-run-")
@@ -44,14 +69,6 @@ pub(crate) fn compile_frame_invocation(
             Ok(())
         },
     )?;
-    // Profiling tools inspect this diagnostic copy after the run. Execution uses
-    // only the private file, so another invocation can safely replace this copy.
-    rock_host::timed("diagnostic copy", || {
-        diagnostic_copy(
-            &lua_file,
-            &PathBuf::from(output).join(rock_host::project::MAIN_LUA_FILENAME),
-        )
-    })?;
     Ok((invocation, lua_file))
 }
 

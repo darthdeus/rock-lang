@@ -16,8 +16,7 @@ fn apply_perf_env(cmd: &mut Command) {
 pub(crate) fn handle_perf(args: &Args) -> Result<()> {
     let path = get_game_file(args)?;
     let output = args.output.as_deref().unwrap_or("tmp");
-    crate::package::check_project_assets(Path::new(&path))?;
-    let (_invocation, lua_file) = compile_frame_invocation(&path, output)?;
+    let (_invocation, lua_file) = compile_frame_invocation(&path, output, true)?;
     let measured_frames = args.frames.unwrap_or(1200);
     let seconds = args.seconds;
     let format = &args.perf_format;
@@ -183,7 +182,7 @@ fn frame_timeout_override() -> Option<Duration> {
 pub(crate) fn handle_frame(args: &Args) -> Result<()> {
     let path = get_game_file(args)?;
     let output = args.output.as_deref().unwrap_or("tmp");
-    let (_invocation, lua_file) = compile_frame_invocation(&path, output)?;
+    let (_invocation, lua_file) = compile_frame_invocation(&path, output, false)?;
     let frames = args.frames.unwrap_or(1);
 
     if frames == 1 {

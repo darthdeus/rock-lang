@@ -302,11 +302,15 @@ fn asset_check_verifies_pngs_and_digests_like_package() {
             )
             .unwrap();
         }
-        reject_both(
-            root.path(),
-            None,
-            if corrupt_png { "decoding" } else { "hashes to" },
-        );
+        let expected = if corrupt_png { "decoding" } else { "hashes to" };
+        reject_both(root.path(), None, expected);
+        if corrupt_png {
+            std::fs::write(root.path().join("main.rock"), "fn main() { missing() }").unwrap();
+        }
+        let output = run(root.path(), &["perf", ".", "--output", "perf-out"], None);
+        failure(output, expected);
+        assert!(!root.path().join("perf-out/main.lua").exists());
+        assert!(!root.path().join("perf-out/perf-summary.json").exists());
     }
 }
 
