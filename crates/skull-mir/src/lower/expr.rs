@@ -1131,6 +1131,14 @@ impl<'a> Builder<'a> {
                 }
             }
             if direct {
+                // The referenced struct owns its fields even if the value
+                // holding the reference has no addressable box.
+                if self.expr_is_shared_struct(e)
+                    && self.expr_is_value_struct(base)
+                    && (absent.is_none() || self.nobox_global_place(e)?.is_some())
+                {
+                    return self.lower_expr(e);
+                }
                 if absent.is_some()
                     && let Some(flat) = self.flat_field_projection(base, field, true, None)?
                     && matches!(flat.selection, Some((_, FieldShape::Prim)))

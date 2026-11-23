@@ -1,0 +1,34 @@
+struct Member { k: int, z: int }
+nobox value Outer { member: Member, t: float }
+
+global ROOT: Outer = Outer { member: Member { k: 1, z: 3 }, t: 4.0 }
+
+@test fn write_through_struct_leaf_of_nobox_global() {
+    let member = ROOT.member
+    ROOT.member.z = 8
+    assert_eq(ROOT.member.z, 8)
+    assert_eq(member.z, 8)
+    assert_eq(ROOT.member.k, 1)
+    assert_eq(ROOT.t, 4.0)
+}
+
+nobox value Wrapper { outer: Outer }
+
+global WRAPPED: Wrapper = Wrapper { outer: Outer { member: Member { k: 1, z: 3 }, t: 4.0 } }
+
+@test fn write_through_nested_nobox_global() {
+    let member = WRAPPED.outer.member
+    WRAPPED.outer.member.z = 7
+    WRAPPED.outer.member.z++
+    WRAPPED.outer.member.z += 2
+    assert_eq(member.z, 10)
+    assert_eq(WRAPPED.outer.member.z, 10)
+}
+
+fn wrap(member: Member) -> Outer { return Outer { member: member, t: 4.0 } }
+
+@test fn write_through_struct_in_value_call_result() {
+    let member = Member { k: 1, z: 3 }
+    wrap(member).member.z = 8
+    assert_eq(member.z, 8)
+}
