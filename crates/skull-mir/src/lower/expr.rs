@@ -1568,6 +1568,20 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    fn heap_field_owner(&self, mut owner: Idx<Expr>) -> bool {
+        loop {
+            match self.body.expr_arena[owner] {
+                Expr::FieldAccess { base, .. } | Expr::SafeNav { base, .. } => owner = base,
+                Expr::Var(binding) => {
+                    return self.binding_is_ref(binding)
+                        || self.static_cells.contains_key(&raw(binding));
+                }
+                Expr::Global(_) | Expr::Index { .. } => return true,
+                _ => return false,
+            }
+        }
+    }
+
     fn store_physical_field(
         &mut self,
         target: Idx<Expr>,
@@ -1672,7 +1686,9 @@ impl<'a> Builder<'a> {
                             });
                         }
                     } else {
-                        let paths = self.boxed_leaf_paths(&shape, true)?;
+                        // A value place may still consist of MIR constructors and cells.
+                        // Keep their logical paths so SROA can see the same leaves as the reads.
+                        let paths = self.boxed_leaf_paths(&shape, self.heap_field_owner(base))?;
                         if paths.len() != leaves.len() {
                             return Err(self.gap_here(format!(
                                 "`{child}` has {} leaf paths but the value produced {} leaves",
@@ -2152,37 +2168,73 @@ impl<'a> Builder<'a> {
             });
         }
         let plan = self.safe_nav_field_plan(base, field)?;
+        let direct = self.safe_nav_nested_native_child(plan.as_ref())?;
+        let direct_receiver = if let Expr::SafeNav { base, field } = self.body.expr_arena[base] {
+            let plan = self.safe_nav_field_plan(base, field)?;
+            self.safe_nav_nested_native_child(plan.as_ref())?.is_some()
+        } else {
+            false
+        };
+        let project_unboxed =
+            direct_receiver || (direct.is_some() && self.nobox_value_name(base).is_none());
         let embed = plan.and_then(|p| p.inline_child());
         let group_shape = match embed {
-            Some(cname) => self.nobox_embed_group_shape(cname)?,
+            Some(name) => self.nobox_embed_group_shape(name)?,
             None => None,
         };
         let nullable_child = embed.is_some() && self.embed_read_is_nullable(base, field)?;
         let recv = self.lower_safe_nav_receiver(base)?;
         self.safe_nav_repr(recv, shape, move |s, recv| {
-            let bv = s.safe_nav_present_value(recv)?;
-            let Some(vs) = group_shape else {
-                let value = ValueRepr::Scalar(s.safe_nav_field_value(e, base, bv, field)?);
-                return s.value_bundle_for_expr(e, value).map(SafeNavValue::Repr);
-            };
-            // An embed-read base is a re-materialized box with undotted keys.
-            let (pbase, key) = s.physical_field(base, field)?;
-            let parent = if pbase == base {
-                bv
-            } else {
-                s.lower_expr(pbase)?
-            };
-            let mut g = s.embed_group(parent, key, &vs);
-            if nullable_child {
-                // A nullable child's presence is in the field's undotted key. The Group
-                // takes it instead of gating the read, so absent leaves are nil.
-                let present = s.read_field(parent, key);
-                if let ValueRepr::Group { present: p, .. } = &mut g {
-                    *p = Some(present);
-                }
+            if let SafeNavRecv::Unboxed {
+                repr: ValueRepr::Group { name, parts, .. },
+                ..
+            } = &recv
+                && project_unboxed
+                && let Some(index) = s.field_index(*name, field)
+            {
+                return s
+                    .value_bundle_for_expr(e, parts[index].clone())
+                    .map(SafeNavValue::Repr);
             }
-            s.value_bundle_for_expr(e, g).map(SafeNavValue::Repr)
+            let boxed_receiver = matches!(recv, SafeNavRecv::Boxed(_));
+            let bv = s.safe_nav_present_value(recv)?;
+            let value = if let Some(shape) = direct.filter(|_| boxed_receiver) {
+                // A direct projection can still be backed by a MIR constructor.
+                let child = s.read_field(bv, field);
+                let leaves = s.boxed_plain_leaves(child, &shape, false, None)?;
+                Self::rebuild_from_leaves(&shape, &leaves)
+            } else if let (Some(name), Some(_)) = (embed, group_shape) {
+                let (pbase, key) = s.physical_field(base, field)?;
+                let parent = if pbase == base {
+                    bv
+                } else {
+                    s.lower_expr(pbase)?
+                };
+                s.load_embed_repr(parent, key, name, nullable_child)?
+            } else {
+                ValueRepr::Scalar(s.safe_nav_field_value(e, base, bv, field)?)
+            };
+            s.value_bundle_for_expr(e, value).map(SafeNavValue::Repr)
         })
+    }
+
+    fn safe_nav_nested_native_child(
+        &self,
+        plan: Option<&StructFieldPlan>,
+    ) -> Result<Option<ValueShape>, CompilerError> {
+        let Some(name) = plan.and_then(StructFieldPlan::direct_child) else {
+            return Ok(None);
+        };
+        if self.scx.target != bone_core::hir::FnBackend::Lua || !self.is_nobox_struct(name) {
+            return Ok(None);
+        }
+        let shape = self.nominal_rep_shape_required(name, false)?;
+        Ok((self.shape_is_plain_keys(&shape)
+            && shape
+                .fields
+                .iter()
+                .any(|(_, field)| matches!(field, FieldShape::Nested(_))))
+        .then_some(shape))
     }
 
     pub(crate) fn lower_array_literal(

@@ -446,15 +446,23 @@ impl Families {
                                     .push(project(field, None));
                                 known(&field)
                             }
-                            Inst::StoreField { .. }
+                            Inst::StoreField { base, .. }
                             | Inst::StoreIndex {
+                                base,
                                 kind: ContainerKind::Record(_),
                                 ..
-                            } => field_store(func, i, op).is_some_and(|(_, field, value)| {
-                                uses.projections[ProjectionKind::Store as usize]
-                                    .push(project(field, Some(value)));
-                                known(&field)
-                            }),
+                            } if *base == op => {
+                                if let Some((_, field, value)) = field_store(func, i, op)
+                                    && known(&field)
+                                {
+                                    uses.projections[ProjectionKind::Store as usize]
+                                        .push(project(field, Some(value)));
+                                } else {
+                                    // Rebuilding the box at a write would lose its mutation.
+                                    disq[raw(c)] = true;
+                                }
+                                true
+                            }
                             Inst::Eq(a, b) | Inst::NotEq(a, b) => {
                                 let kind = match cand[rep[raw(c)]] {
                                     Some(StructId::Value(_)) => Some(NilTest::Value),
@@ -918,5 +926,58 @@ fn rematerialize_escapes(
         };
         news.push(l);
         replacement.insert(l, news);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::lower_fixture;
+    use skull_mir::names::ustr;
+
+    #[test]
+    fn value_family_with_an_unprovided_store_stays_boxed() {
+        let (ws, _, mut f) = lower_fixture("value V { x: int } fn f() {}", "<sroa>", "f");
+        let entry = f.entry();
+        let name = ws
+            .module(ws.module_ids[&ustr("<sroa>")])
+            .structs
+            .values()
+            .next()
+            .unwrap()
+            .name;
+        let representation = f
+            .rep_arena
+            .as_ref()
+            .unwrap()
+            .plan_nominal_value(&ws, bone_core::hir::FnBackend::Lua, name)
+            .unwrap();
+        let x = f.emit(entry, Inst::Const(Lit::Int(1)));
+        let ctor = f.emit(
+            entry,
+            Inst::MakeValueStruct {
+                name,
+                representation,
+                form: ValueCtorForm::Declared,
+                fields: vec![(ustr("x"), x)],
+            },
+        );
+        let cell = f.new_cell(None);
+        f.mark_nonnull_value_struct(cell);
+        f.emit(entry, Inst::Store { cell, value: ctor });
+        let base = f.emit(entry, Inst::Load(cell));
+        let value = f.emit(entry, Inst::Const(Lit::Int(42)));
+        f.emit(
+            entry,
+            Inst::StoreField {
+                base,
+                field: ustr("unprovided"),
+                value,
+                native_leaf: None,
+            },
+        );
+        f.set_term(entry, Term::Return(vec![]));
+
+        assert!(!scalarize_struct_cells_once(&mut f).unwrap());
     }
 }

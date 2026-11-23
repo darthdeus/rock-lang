@@ -2755,29 +2755,7 @@ impl<'a> Builder<'a> {
                 self.f.insts[root],
                 Inst::MakeValueStruct { .. } | Inst::MakeStruct { .. }
             );
-            let paths = self.boxed_leaf_paths(shape, native_aliases)?;
-            let mut loaded: Vec<(Vec<Ustr>, Idx<Inst>)> = Vec::new();
-            let mut out = Vec::new();
-            for path in paths
-                .into_iter()
-                .zip(demand)
-                .filter_map(|(path, &used)| used.then_some(path))
-            {
-                let mut cur = v;
-                for depth in 1..=path.len() {
-                    let prefix = &path[..depth];
-                    if let Some((_, inst)) = loaded.iter().find(|(p, _)| p.as_slice() == prefix) {
-                        cur = *inst;
-                        continue;
-                    }
-                    cur = self.read_value_field(cur, path[depth - 1]);
-                    if depth < path.len() {
-                        loaded.push((prefix.to_vec(), cur));
-                    }
-                }
-                out.push(cur);
-            }
-            return Ok(out);
+            return self.boxed_plain_leaves(v, shape, native_aliases, Some(demand));
         }
         // A leaf-table box stores one key per leaf, the inverse of the `<Name>_lct`
         // ctor, with a nullable child's presence key at the child's own name.
@@ -3012,6 +2990,37 @@ impl<'a> Builder<'a> {
             prefix.pop();
         }
         Ok(())
+    }
+
+    pub(crate) fn boxed_plain_leaves(
+        &mut self,
+        value: Idx<Inst>,
+        shape: &ValueShape,
+        native_aliases: bool,
+        demand: Option<&[bool]>,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let paths = self.boxed_leaf_paths(shape, native_aliases)?;
+        let mut loaded: Vec<(Vec<Ustr>, Idx<Inst>)> = Vec::new();
+        let mut out = Vec::new();
+        for (index, path) in paths.into_iter().enumerate() {
+            if demand.is_some_and(|demand| !demand[index]) {
+                continue;
+            }
+            let mut cur = value;
+            for depth in 1..=path.len() {
+                let prefix = &path[..depth];
+                if let Some((_, inst)) = loaded.iter().find(|(p, _)| p.as_slice() == prefix) {
+                    cur = *inst;
+                    continue;
+                }
+                cur = self.read_value_field(cur, path[depth - 1]);
+                if depth < path.len() {
+                    loaded.push((prefix.to_vec(), cur));
+                }
+            }
+            out.push(cur);
+        }
+        Ok(out)
     }
 
     /// Recurses into nested values so later place writes cannot mutate the

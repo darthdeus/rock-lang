@@ -1,0 +1,69 @@
+value Leaf { a: int, b: int }
+nobox value Middle { k: int, l: Leaf }
+value Outer { m: Middle, t: float }
+
+fn middle(x: int) -> Middle {
+    return Middle { k: x, l: Leaf { a: x + 1, b: x + 2 } }
+}
+
+@test(output = "10 11 12")
+fn replace_child_in_local() {
+    let o = Outer { m: Middle { k: 1, l: Leaf { a: 2, b: 3 } }, t: 4.0 }
+    o.m = middle(10)
+    print("{o.m.k} {o.m.l.a} {o.m.l.b}")
+}
+
+fn reset(o: Outer, x: int) -> Outer {
+    o.m = Middle { k: x, l: Leaf { a: x + 1, b: x + 2 } }
+    return o
+}
+
+@test(output = "10 11 12")
+fn replace_child_in_parameter() {
+    let o = reset(Outer { m: middle(1), t: 4.0 }, 10)
+    print("{o.m.k} {o.m.l.a} {o.m.l.b}")
+}
+
+co fn update(o: Outer, x: int) -> Coroutine<int> {
+    yield o.m.l.a
+    o.m = middle(x)
+    yield o.m.k
+    yield o.m.l.a
+    yield o.m.l.b
+}
+
+@test(output = "2 10 11 12")
+fn replace_child_in_coroutine_parameter() {
+    let c = update(Outer { m: middle(1), t: 4.0 }, 10)
+    let old = c.resume() ?? -1
+    let k = c.resume() ?? -1
+    let a = c.resume() ?? -1
+    let b = c.resume() ?? -1
+    print("{old} {k} {a} {b}")
+}
+
+fn guarded(o: Outer?) -> int {
+    o?.m?.l?.a = 9
+    return o?.m?.l?.a ?? -1
+}
+
+@test(output = "9 -1")
+fn write_leaf_through_safe_navigation() {
+    let a = guarded(Outer { m: middle(1), t: 4.0 })
+    let b = guarded(null)
+    print("{a} {b}")
+}
+
+value Wrapper { outer: Outer, tag: int }
+
+fn guarded_through_value(w: Wrapper?) -> int {
+    w?.outer?.m?.l?.a = 9
+    return w?.outer?.m?.l?.a ?? -1
+}
+
+@test(output = "9 -1")
+fn write_leaf_guarded_by_an_extra_value() {
+    let a = guarded_through_value(Wrapper { outer: Outer { m: middle(1), t: 4.0 }, tag: 1 })
+    let b = guarded_through_value(null)
+    print("{a} {b}")
+}
