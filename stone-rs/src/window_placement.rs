@@ -464,11 +464,17 @@ fn save_geometry_to(
         ::log::error!(target: "STONE", "creating {} failed: {}", dir.display(), e);
         return false;
     }
-    let mut root: serde_json::Value = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .filter(|v: &serde_json::Value| v.is_object())
-        .unwrap_or_else(|| serde_json::json!({}));
+    let mut root: serde_json::Map<String, serde_json::Value> = match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|error| {
+            ::log::warn!(target: "STONE", "saved geometry {} is corrupt: {error}; replacing it", path.display());
+            serde_json::Map::new()
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+        Err(error) => {
+            ::log::error!(target: "STONE", "reading {} failed: {error}", path.display());
+            return false;
+        }
+    };
     let ResolvedGeometry {
         size: (w, h),
         pos: (x, y),
@@ -481,7 +487,7 @@ fn save_geometry_to(
     if let Some(d) = display {
         entry["display"] = serde_json::json!(d);
     }
-    root[key] = entry;
+    root.insert(key.to_owned(), entry);
     let serialized = match serde_json::to_string_pretty(&root) {
         Ok(s) => s,
         Err(e) => {
@@ -541,6 +547,11 @@ mod tests {
             (1, 1)
         ));
         assert!(!save_geometry_to(dir.path(), "first", unit, (1, 1)));
+
+        let invalid_utf8 = [0xff];
+        std::fs::write(&path, invalid_utf8).unwrap();
+        assert!(!save_geometry_to(&path, "first", unit, (1, 1)));
+        assert_eq!(std::fs::read(&path).unwrap(), invalid_utf8);
     }
 
     #[cfg(target_os = "windows")]
