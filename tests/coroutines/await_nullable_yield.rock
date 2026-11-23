@@ -1,0 +1,41 @@
+// A nullable yield type makes `null` an ordinary yielded value: `await` passes
+// it through and stops only when the inner coroutine completes.
+co fn inner() -> Coroutine<int?, int, ()> {
+    yield 1
+    yield null
+    return 5
+}
+
+co fn outer() -> Coroutine<int?, int, ()> {
+    let a = await inner()
+    print("a={a}")
+    return a
+}
+
+@test(output = "0: v=1 st=suspended done=false\n1: v=-1 st=suspended done=false\na=5\n2: v=-1 st=dead done=true\n5")
+fn test_await_passes_null_yield() {
+    let c = outer()
+    for i in 0..3 {
+        let v = c.resume()
+        print("{i}: v={v ?? -1} st={c.status()} done={c.completed()}")
+    }
+    print(c.result() ?? -1)
+}
+
+co fn counted() -> Coroutine<int?> {
+    yield null
+    yield 2
+    yield null
+}
+
+@test
+fn test_for_in_keeps_null_yields() {
+    let n = 0
+    let nulls = 0
+    for v in counted() {
+        n = n + 1
+        if v == null { nulls = nulls + 1 }
+    }
+    assert_eq(n, 3)
+    assert_eq(nulls, 2)
+}

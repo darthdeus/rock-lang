@@ -797,6 +797,20 @@ impl<'a> Builder<'a> {
         self.dispatch().resolve_tyid(ty)
     }
 
+    /// False only when the yield type is known to have no nil value, so a nil
+    /// resume result can stand for completion.
+    pub(crate) fn coroutine_yield_may_be_nil(&self, e: Idx<Expr>) -> bool {
+        let Some(MonoTy::App { params, .. }) =
+            self.concrete_expr_ty(e).map(|t| t.peel_nullable().0)
+        else {
+            return true;
+        };
+        matches!(
+            params.first(),
+            None | Some(MonoTy::Nullable(_) | MonoTy::Unit | MonoTy::Any | MonoTy::Never)
+        )
+    }
+
     /// A flat-enum yield threads through an `await` delegation as leaves, not a box.
     pub(crate) fn coroutine_yield_flat_shape(&self, e: Idx<Expr>) -> Option<EnumFlatShape> {
         let concrete = self.concrete_expr_ty(e)?;

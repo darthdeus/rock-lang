@@ -1180,8 +1180,16 @@ impl<'a> Builder<'a> {
         self.f.set_term(self.cur, Term::Goto(header));
 
         self.cur = header;
-        let v = self.emit_cur(Inst::Load(slot));
-        self.branch_on_nil(v, exit, body);
+        if self.coroutine_yield_may_be_nil(sub_expr) {
+            // `null` is a real yield here; only the frame state says it finished.
+            let state = self.read_field(sub, crate::names::ustr("__state"));
+            let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
+            let done = self.emit_cur(Inst::IntLt(state, zero));
+            self.branch_to(done, exit, body);
+        } else {
+            let v = self.emit_cur(Inst::Load(slot));
+            self.branch_on_nil(v, exit, body);
+        }
 
         self.cur = body;
         let vv = self.emit_cur(Inst::Load(slot));
