@@ -704,6 +704,11 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
         if (reading) return fail(shape, value);
         throw new Error("json record nesting exceeds 128");
     }
+    if (reading && tagged(value, "Raw")) {
+        var parsed = codec.parse_raw ? __rock_call(codec.parse_raw, value[0]) : null;
+        if (parsed === null || parsed === undefined) return fail(shape, value);
+        return __json_record_js_visit(codec, shape, parsed, true, seen, depth, defaults);
+    }
     var kind = shape.k;
     if (kind === "field") {
         if (reading) {
@@ -999,11 +1004,15 @@ inline(js) fn __json_record_encode<T>(name: string, codec: JsonRecordCodec, valu
     return result;
 """
 
-inline(js) fn __json_record_decode<T>(name: string, codec: JsonRecordCodec, value: JsonValue) -> T? = """
-    return __json_record_js_decode(codec, __json_record_js_context(codec, __rock_json_types), name, value, null);
+inline(js) fn __json_record_decode<T>(name: string, codec: JsonRecordCodec, value: JsonValue,
+    parse_raw: fn(string) -> JsonValue?) -> T? = """
+    var context = __json_record_js_context(codec, __rock_json_types);
+    context.parse_raw = parse_raw;
+    return __json_record_js_decode(codec, context, name, value, null);
 """
 
-inline(js) fn __json_record_reads_source() -> bool = "return false;"
+inline(js) fn __json_record_lua_backend() -> bool = "return false;"
+inline(js) fn __json_record_write<T>(name: string, codec: JsonRecordCodec, value: T, sink: __JsonRecordSink) -> string = 'throw new Error("json record text writing is Lua-only");'
 inline(js) fn __json_record_read<T>(name: string, codec: JsonRecordCodec, src: string, at: int, source: __JsonRecordSource) -> T? = 'throw new Error("json record source decoding is Lua-only");'
 
 inline(js) fn luajit_available() -> bool = "return false;"

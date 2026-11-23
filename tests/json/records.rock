@@ -588,6 +588,7 @@ fn json_record_read_agrees<T>(codec: JsonRecordCodec, text: string) {
     assert_eq(direct == null, nested == null, text)
     if let value = direct {
         let expected = json_encode(json_record_encode(codec, value))
+        assert_eq(json_record_write(codec, value), expected, text)
         assert_eq(json_encode(json_record_encode(codec, read.unwrap())), expected, text)
         assert_eq(json_encode(json_record_encode(codec, nested.unwrap())), expected, text)
         assert_eq(errors.len(), 0, text)
@@ -673,3 +674,92 @@ fn json_record_read_matches_value_decoding() {
     json_as_object(log).unwrap()["title"] = json_int(4)
     json_record_read_agrees<ChangeLog>(plain, json_encode(log))
 }
+
+fn json_record_write_agrees<T>(codec: JsonRecordCodec, value: T) {
+    assert_eq(json_record_write(codec, value), json_encode(json_record_encode(codec, value)))
+}
+
+struct JsonWriteShapes {
+    @json_name("z\"last") last: int,
+    first: float,
+    big: int,
+    flag: bool,
+    note: string?,
+    @json_omit_if(json_write_zero) skipped: int = 0,
+    edit: JsonField<string?>,
+    names: Map<string, [int]>,
+    values: [JsonValue],
+    record: Record,
+}
+
+fn json_write_zero(value: int) -> bool { return value == 0 }
+
+@test
+fn json_record_write_matches_encoding_the_tree() {
+    let plain = JsonRecordCodec {}
+    let names: Map<string, [int]> = map_new()
+    names["b\n"] = [2, 3]
+    names["a"] = []
+    names["\u{00e9}"] = [-1]
+    let event = Event::Colored("red", Tint { red: 0.5, visible: true })
+    let shapes = JsonWriteShapes { last: -4, first: 0.1, big: 123456789012345678, flag: false, note: null,
+        edit: JsonField { present: true, value: "x\ty" }, names,
+        values: [json_int(1), json_str("s"), json_null(), json_bool(true), json_float(2.5),
+            json_array([json_object(map_new())])],
+        record: Record { event, envelope: Wrapper::Wrapped(event), optional: null } }
+    json_record_write_agrees(plain, shapes)
+    shapes.skipped = 3
+    shapes.edit = JsonField { present: false }
+    shapes.note = "n"
+    json_record_write_agrees(plain, shapes)
+    let fixed = JsonRecordCodec { encode_float: f => json_str("{f:.2}") }
+    json_record_write_agrees(fixed, shapes)
+    json_record_write_agrees(plain, JsonNativeRows { points: [v(1.0, 2.0), v(3.5, -4.0)] })
+    json_record_write_agrees(plain, JsonNestedNativeRows { bounds: [JsonNativeBounds { min: v(1.0, 2.0), max: v(3.0, 4.0) }] })
+    json_record_write_agrees(plain, JsonNativeBounds { min: v(1.0, 2.0), max: v(3.0, 4.0) })
+    let key = Key { namespace: "sample", name: "record" }
+    let marker = Marker { point: Point { x: 7, y: -3 }, tint: Tint { red: 0.25, visible: false } }
+    let adapted = JsonRecordCodec { adapters: [json_record_adapter(Kind::First, kind_encode, kind_decode),
+        json_record_adapter(marker, marker_encode, marker_decode)] }
+    let packet = Packet { kind: Kind::Second, tint: Tint { red: 0.5, visible: false }, spare: null, marker, backup: marker,
+        rows: [Label { name: "first", marker, key }, Label { name: "empty", marker: null, key }] }
+    json_record_write_agrees(adapted, packet)
+    json_record_write_agrees(plain, packet)
+    let weights: Map<string, float> = map_new()
+    weights["alpha"] = 1.25
+    json_record_write_agrees(plain, ChangeLog { rows: [Change { event: ChangeEvent::Empty, count: 1 },
+        Change { event: ChangeEvent::Pair(5, 2.5), count: 2 }, Change { event: ChangeEvent::Names(["a", "b"]), count: 3 }],
+        title: null, weights, tint: ValueTint { red: 0.75, visible: false } })
+}
+
+@test
+fn json_raw_places_written_records_into_a_document() {
+    let codec = JsonRecordCodec {}
+    let record = Record { event: Event::Pair("count", 7), envelope: Wrapper::Other("o"), optional: null }
+    let tree: Map<string, JsonValue> = map_new()
+    let raw: Map<string, JsonValue> = map_new()
+    tree["record"] = json_record_encode(codec, record)
+    raw["record"] = json_raw(json_record_write(codec, record))
+    for document in [tree, raw] { document["after"] = json_int(1) }
+    assert_eq(json_encode(json_object(raw)), json_encode(json_object(tree)))
+    assert_eq(json_encode(json_array([json_raw("[1,2]"), json_null()])), "[[1,2],null]")
+    assert_eq(json_encode_pretty(json_object(raw)), "{{\"after\":1,\"record\":" + json_record_write(codec, record) + "}}")
+    assert(json_raw("1") == json_raw("1") && json_raw("1") != json_int(1))
+    assert(json_as_object(json_raw("{{}}")) == null)
+    let holder = json_record_decode<JsonRawHolder>(codec, json_object(raw)).unwrap()
+    assert(holder.record == record && holder.after == 1)
+    assert(json_record_decode<Record>(codec, json_raw(json_record_write(codec, record))).unwrap() == record)
+    let rows = json_record_decode<JsonRawRows>(codec, json_decode("{{\"rows\":[]}}").unwrap()).unwrap()
+    assert(rows.rows.len() == 0)
+    let listed = json_record_decode<JsonRawRows>(codec, json_object({
+        let fields: Map<string, JsonValue> = map_new()
+        fields["rows"] = json_array([json_raw(json_record_write(codec, record))])
+        fields
+    })).unwrap()
+    assert(listed.rows[0] == record)
+    raw["record"] = json_raw("[\"Pair\"")
+    assert(json_record_decode<JsonRawHolder>(codec, json_object(raw)) == null)
+}
+
+struct JsonRawHolder { record: Record, after: int }
+struct JsonRawRows { rows: [Record] }

@@ -7,6 +7,9 @@ enum JsonValue {
     Str(string),
     Array([JsonValue]),
     Object(Map<string, JsonValue>),
+    // JSON text written verbatim by the encoders, such as json_record_write
+    // output placed into a larger document. It is never parsed back into a tree.
+    Raw(string),
 }
 
 fn json_null() -> JsonValue { return JsonValue::Null }
@@ -16,6 +19,7 @@ fn json_float(f: float) -> JsonValue { return JsonValue::Float(f) }
 fn json_str(s: string) -> JsonValue { return JsonValue::Str(s) }
 fn json_array(items: [JsonValue]) -> JsonValue { return JsonValue::Array(items) }
 fn json_object(m: Map<string, JsonValue>) -> JsonValue { return JsonValue::Object(m) }
+fn json_raw(text: string) -> JsonValue { return JsonValue::Raw(text) }
 
 fn json_is_null(v: JsonValue) -> bool {
     match v {
@@ -89,11 +93,16 @@ fn encode_scalar(v: JsonValue) -> string? {
         Null => "null",
         True => "true",
         False => "false",
-        Int(i) => if i > -100000000000000 && i < 100000000000000 { "{i}" } else { "{i:d}" },
+        Int(i) => json_int_text(i),
         Float(f) => format_float(f),
         Str(s) => encode_string(s),
+        Raw(text) => text,
         _ => null,
     }
+}
+
+@nomangle fn json_int_text(i: int) -> string {
+    return if i > -100000000000000 && i < 100000000000000 { "{i}" } else { "{i:d}" }
 }
 
 fn encode_into(v: JsonValue, parts: StringBuilder) {
@@ -1629,6 +1638,36 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
 
 @nomangle fn __json_record_copy_default(value: any) -> any { return deepcopy(value) }
 
+// Pieces are joined every 512 so the piece table stays small; the joined
+// chunks add up to the output size.
+@nomangle inline(lua) fn __json_record_put(codec: any, text: string) = """
+    local n, out = codec.n + 1, codec.out
+    out[n] = text
+    if n == 512 then
+        local chunks = codec.chunks
+        chunks[#chunks + 1] = table.concat(out, '', 1, 512)
+        n = 0
+    end
+    codec.n = n
+"""
+
+// Fields in the order json_encode writes object keys.
+@nomangle inline(lua) fn __json_record_write_fields(codec: any, decl: any) -> any = """
+    local fields = decl.json_write_fields
+    if fields then return fields end
+    fields = {}
+    for _, field in ipairs(decl.fields) do
+        if not field.json_skip then
+            field.json_write_key = codec.sink.string_text(field.json_name or field.name) .. ':'
+            field.json_write_next_key = ',' .. field.json_write_key
+            fields[#fields + 1] = field
+        end
+    end
+    table.sort(fields, function(a, b) return (a.json_name or a.name) < (b.json_name or b.name) end)
+    decl.json_write_fields = fields
+    return fields
+"""
+
 @nomangle inline(lua) fn __json_record_visit(codec: any, shape: any,
     value: any, reading: bool, seen: any, depth: int, defaults: any,
     row: bool = false, index: int? = null) -> any = """
@@ -1638,6 +1677,8 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     end
     -- Array input keeps its row until a codec callback or diagnostic needs a box.
     local kind = shape.k
+    -- Writing appends JSON text to codec.out instead of building nodes.
+    local out = not reading and codec.out
     local input_tag, input_payload
     if reading and codec.src then
         if index then value, index = value[index], nil end
@@ -1650,6 +1691,11 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     elseif reading then
         if index then input_tag, input_payload = __rock_json_vec_parts(value, index)
         elseif type(value) == 'table' then input_tag, input_payload = value.__variant, value[1] end
+        if input_tag == 'Raw' then
+            local parsed = codec.parse_raw and codec.parse_raw(input_payload)
+            if parsed == nil then return false, __json_record_failure(shape, value, index, codec) end
+            return __json_record_visit(codec, shape, parsed, true, seen, depth, defaults)
+        end
     end
     if kind == 'field' then
         if reading then
@@ -1663,7 +1709,10 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     end
     if kind == 'opt' then
         if reading and input_tag == 'Null' then return true, nil end
-        if not reading and value == nil then return true, __json_record_node('Null', nil, row) end
+        if not reading and value == nil then
+            if out then __json_record_put(codec, 'null'); return true end
+            return true, __json_record_node('Null', nil, row)
+        end
         return __json_record_visit(codec, shape.inner, value, reading, seen, depth + 1, defaults, row, index)
     end
     if kind == 'int' or kind == 'uint' then
@@ -1672,6 +1721,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
         if type(n) ~= 'number' or not __json_record_finite(n) or n ~= math.floor(n)
             or (kind == 'uint' and n < 0) then return false, __json_record_failure(shape, value, index, codec) end
         if reading then return true, n end
+        if out then __json_record_put(codec, codec.sink.int_text(n)); return true end
         return true, __json_record_node('Int', n, row)
     end
     if kind == 'float' then
@@ -1684,14 +1734,22 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
             return true, n
         end
         if not __json_record_finite(value) then error('json record cannot encode a nonfinite float', 0) end
+        if out then
+            local sink = codec.sink
+            __json_record_put(codec, codec.encode_float == sink.default_float and sink.float_text(value)
+                or sink.value_text(codec.encode_float(value)))
+            return true
+        end
         return true, (codec.encode_float(value))
     end
     if kind == 'string' then
+        if out then __json_record_put(codec, codec.sink.string_text(value)); return true end
         if not reading then return true, __json_record_node('Str', value, row) end
         if input_tag == 'Str' then return true, input_payload end
         return false, __json_record_failure(shape, value, index, codec)
     end
     if kind == 'bool' then
+        if out then __json_record_put(codec, value and 'true' or 'false'); return true end
         if not reading then return true, json_bool(value) end
         if input_tag == 'True' then return true, true end
         if input_tag == 'False' then return true, false end
@@ -1719,7 +1777,9 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
             for _, path in ipairs(columns) do result[path] = {} end
         end
         local len = items[0] or items.len
+        if out then __json_record_put(codec, '[') end
         for i = 1, len do
+            if out and i > 1 then __json_record_put(codec, ',') end
             local item
             if reading then
                 item = items
@@ -1735,7 +1795,8 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
             else item = items[i] end
             local ok, decoded, tag = __json_record_visit(codec, shape.elem, item, reading, seen, depth + 1, nil, not reading, reading and i or nil)
             if not ok then return false, __json_record_error_at(decoded, i - 1) end
-            if not reading or json_items then
+            if out then
+            elseif not reading or json_items then
                 result[i * 2 - 1], result[i * 2] = tag or decoded, tag and decoded or false
             elseif columns then
                 for _, path in ipairs(columns) do result[path][i] = __json_record_row_leaf(decoded, path) end
@@ -1743,6 +1804,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
                 for path, offset in pairs(offsets) do result[(i - 1) * stride + offset] = __json_record_row_leaf(decoded, path) end
             else result[i] = decoded end
         end
+        if out then __json_record_put(codec, ']'); return true end
         if not reading then return true, __json_record_node('Array', __json_record_json_vec(result, len), row) end
         if json_items then return true, __json_record_json_vec(result, len) end
         if columns then
@@ -1764,6 +1826,19 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
         end
         if reading and input_tag ~= 'Object' then return false, __json_record_failure(shape, value, index, codec) end
         local items = reading and input_payload or value
+        if out then
+            local keys = {}
+            for key in pairs(items) do keys[#keys + 1] = key end
+            table.sort(keys)
+            __json_record_put(codec, '{')
+            for i, key in ipairs(keys) do
+                __json_record_put(codec, (i > 1 and ',' or '') .. codec.sink.string_text(key) .. ':')
+                local ok, failure = __json_record_visit(codec, shape.val, items[key], false, seen, depth + 1)
+                if not ok then return false, __json_record_error_at(failure, key) end
+            end
+            __json_record_put(codec, '}')
+            return true
+        end
         local result = {}
         for key, item in pairs(items) do
             local ok, decoded = __json_record_visit(codec, shape.val, item, reading, seen, depth + 1)
@@ -1777,6 +1852,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     local name = shape.name
     local adapter = codec.adapters and codec.adapters[name]
     if adapter then
+        if out then __json_record_put(codec, codec.sink.value_text(adapter.encode(value))); return true end
         if not reading then return true, (adapter.encode(value)) end
         local result = adapter.decode(__json_record_input_value(codec, value, index))
         if result == nil then return false, __json_record_failure(shape, value, index, codec) end
@@ -1793,6 +1869,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
         end
         local label = decl.variants[value]
         if not label then return false, __json_record_failure(shape, value, index, codec) end
+        if out then __json_record_put(codec, '[' .. codec.sink.string_text(label) .. ']'); return true end
         return true, __json_record_node('Array', __json_record_json_vec({'Str', label}, 1), row)
     end
     if not reading then
@@ -1851,8 +1928,10 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
             elseif not json_bool_wire then
                 result = (count == 0 and __rock_enum_unit(name, tag)) or setmetatable({ __variant = tag }, __rock_box_mts[name])
             end
+        elseif out then __json_record_put(codec, '[' .. codec.sink.string_text(fields and selected.name or tag))
         else data = {'Str', fields and selected.name or tag} end
         for i = 1, count do
+            if out then __json_record_put(codec, ',') end
             local item
             if reading then item = input_payload
             elseif fields then item = value[fields[i].slot]
@@ -1863,12 +1942,14 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
                 if not reading then error('json record invalid payload ' .. name .. '.' .. tostring(tag) .. '[' .. i .. ']', 0) end
                 return false, __json_record_error_at(decoded, i)
             end
-            if not reading then data[i * 2 + 1], data[i * 2 + 2] = child_tag or decoded, child_tag and decoded or false
+            if out then
+            elseif not reading then data[i * 2 + 1], data[i * 2 + 2] = child_tag or decoded, child_tag and decoded or false
             elseif fields then result[fields[i].slot] = decoded
             elseif json_bool_wire then result = json_bool(decoded)
             else __json_record_payload_put(result, payload[i], i, decoded) end
         end
-        if not reading then
+        if out then __json_record_put(codec, ']')
+        elseif not reading then
             result, wire_tag = __json_record_json_vec(data, count + 1), 'Array'
         end
     elseif decl.kind == 'struct' or decl.kind == 'value_table' or decl.kind == 'c_struct' then
@@ -1889,9 +1970,11 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
                 end
             end
         end
-        local data = reading and decl.kind == 'c_struct' and _G[name .. '_ct']() or {}
+        local data = reading and decl.kind == 'c_struct' and _G[name .. '_ct']() or not out and {}
         local slots = __rock_box_mts[name].__rock_slots
-        for _, field in ipairs(decl.fields) do
+        local first = true
+        if out then __json_record_put(codec, '{') end
+        for _, field in ipairs(out and __json_record_write_fields(codec, decl) or decl.fields) do
             if field.json_skip then
                 if reading then __json_record_field_put(data, field, _G[field.json_default](), slots) end
             else
@@ -1920,6 +2003,10 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
                             ok, decoded = __json_record_visit(codec, child, nil, true, seen, depth + 1)
                         else return false, __json_record_error_at(__json_record_failure(child, nil), wire_name) end
                     else
+                        if out then
+                            __json_record_put(codec, first and field.json_write_key or field.json_write_next_key)
+                            first = false
+                        end
                         ok, decoded = __json_record_visit(codec, child, item, reading, seen, depth + 1, fallback)
                     end
                     if not ok then
@@ -1927,17 +2014,19 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
                         return false, __json_record_error_at(decoded, wire_name)
                     end
                     if reading then __json_record_field_put(data, field, decoded, slots)
-                    else data[wire_name] = decoded end
+                    elseif not out then data[wire_name] = decoded end
                 end
             end
         end
         if reading then
             if decl.kind ~= 'c_struct' then setmetatable(data, __rock_box_mts[name]) end
             result = data
+        elseif out then __json_record_put(codec, '}')
         else result, wire_tag = data, 'Object' end
     else error('json record unsupported declaration: ' .. name, 0) end
     if not reading then
         seen[value] = nil
+        if out then return true end
         return true, __json_record_node(wire_tag, result, row)
     end
     return true, result
@@ -1950,6 +2039,21 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     decode_float: fn(JsonValue) -> float?,
     src: string? = null,
     source: __JsonRecordSource? = null,
+    parse_raw: (fn(string) -> JsonValue?)? = null,
+    out: [string]? = null,
+    chunks: [string]? = null,
+    n: int = 0,
+    sink: __JsonRecordSink? = null,
+}
+
+// Writing text reaches the encoders only through these, so programs that
+// never call json_record_write do not carry the writer's callbacks.
+@lua_named struct __JsonRecordSink {
+    default_float: fn(float) -> JsonValue,
+    float_text: fn(float) -> string,
+    int_text: fn(int) -> string,
+    string_text: fn(string) -> string,
+    value_text: fn(JsonValue) -> string,
 }
 
 // Reading from source text reaches the parser only through these, so programs
@@ -1990,8 +2094,13 @@ inline(lua) fn __json_record_encode<T>(name: string, codec: JsonRecordCodec, val
     return result
 """
 
-inline(lua) fn __json_record_decode<T>(name: string, codec: JsonRecordCodec, value: JsonValue) -> T? = """
-    local ok, result = __json_record_visit(__json_record_context(codec, true), { k = 'nom', name = name }, value, true, nil, 0)
+// Raw input is parsed with parse_raw, so a document holding json_raw text
+// decodes like the same document parsed from its encoding.
+inline(lua) fn __json_record_decode<T>(name: string, codec: JsonRecordCodec, value: JsonValue,
+    parse_raw: fn(string) -> JsonValue?) -> T? = """
+    local context = __json_record_context(codec, true)
+    context.parse_raw = parse_raw
+    local ok, result = __json_record_visit(context, { k = 'nom', name = name }, value, true, nil, 0)
     if ok then return result end
     if codec.on_error then codec.on_error(result) end
     return nil
@@ -2007,24 +2116,34 @@ inline(lua) fn __json_record_read<T>(name: string, codec: JsonRecordCodec, src: 
     return nil
 """
 
-inline(lua) fn __json_record_reads_source() -> bool = "return true"
+inline(lua) fn __json_record_lua_backend() -> bool = "return true"
+
+inline(lua) fn __json_record_write<T>(name: string, codec: JsonRecordCodec, value: T, sink: __JsonRecordSink) -> string = """
+    local context = __json_record_context(codec, false)
+    context.out, context.chunks, context.sink = {}, {}, sink
+    local ok = __json_record_visit(context, { k = 'nom', name = name }, value, false, {}, 0)
+    if not ok then error('invalid value for json record encoding', 0) end
+    local chunks = context.chunks
+    chunks[#chunks + 1] = table.concat(context.out, '', 1, context.n)
+    return table.concat(chunks)
+"""
 
 fn json_record_encode<T>(codec: JsonRecordCodec, value: T) -> JsonValue {
     return __json_record_encode(__json_record_type(value), codec, materialize(value))
 }
 
 fn json_record_decode<T>(codec: JsonRecordCodec, value: JsonValue, prototype: T) -> T? {
-    return __json_record_decode<T>(__json_record_type(prototype), codec, value)
+    return __json_record_decode<T>(__json_record_type(prototype), codec, value, json_decode)
 }
 
 fn json_record_decode<T>(codec: JsonRecordCodec, value: JsonValue) -> T? {
-    return __json_record_decode<T>(__json_record_type(phantom<T>()), codec, value)
+    return __json_record_decode<T>(__json_record_type(phantom<T>()), codec, value, json_decode)
 }
 
 // Decodes straight from a reader's source text, without materializing a
 // JsonValue tree; the result and diagnostics match json_record_decode.
 fn json_record_read<T>(codec: JsonRecordCodec, reader: JsonReader) -> T? {
-    if reader.value == null && reader.at >= 0 && __json_record_reads_source() {
+    if reader.value == null && reader.at >= 0 && __json_record_lua_backend() {
         let source = __JsonRecordSource {
             finite_float: json_record_finite_float,
             float_at: (src, at, end) => src.parse_float_at(at, end),
@@ -2034,4 +2153,18 @@ fn json_record_read<T>(codec: JsonRecordCodec, reader: JsonReader) -> T? {
         return __json_record_read<T>(__json_record_type(phantom<T>()), codec, reader.src.unwrap(), reader.at, source)
     }
     return json_record_decode<T>(codec, json_reader_materialize(reader))
+}
+
+// The JSON text json_encode(json_record_encode(codec, value)) would produce,
+// written without building the JsonValue tree.
+fn json_record_write<T>(codec: JsonRecordCodec, value: T) -> string {
+    if !__json_record_lua_backend() { return json_encode(json_record_encode(codec, value)) }
+    let sink = __JsonRecordSink {
+        default_float: json_float,
+        float_text: f => format_float(f),
+        int_text: json_int_text,
+        string_text: encode_string,
+        value_text: json_encode,
+    }
+    return __json_record_write(__json_record_type(value), codec, materialize(value), sink)
 }
