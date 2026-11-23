@@ -1,5 +1,11 @@
 use super::*;
 
+#[derive(Default)]
+struct EqualityLane {
+    nil_equivalent: bool,
+    structural_when: Vec<Vec<(usize, Ustr)>>,
+}
+
 impl<'a> Builder<'a> {
     pub(crate) fn lower_native_arith(
         &mut self,
@@ -24,6 +30,273 @@ impl<'a> Builder<'a> {
         let representation = self.concrete_rep_id(&MonoTy::Any, RepUse::Value, false, false)?;
         let value = ValueRepr::Scalar(self.emit_cur(inst));
         Ok(ValueBundle::new(representation, value))
+    }
+
+    fn value_equality_lanes(
+        &self,
+        shape: &ValueShape,
+        lhs: Idx<Expr>,
+    ) -> Result<Vec<EqualityLane>, CompilerError> {
+        if super::shape::planned_value(self.ws, shape.name)
+            .is_some_and(|plan| plan.storage == ValueStorage::CData)
+        {
+            return Ok(Vec::new());
+        }
+        let ty = self
+            .concrete_expr_ty(lhs)
+            .ok_or_else(|| self.gap_here("value equality has no concrete type"))?;
+        let indices: Vec<_> = (0..shape.leaf_count()).collect();
+        let mut lanes: Vec<_> = indices.iter().map(|_| EqualityLane::default()).collect();
+        self.plan_equality_lanes(shape, ty, &indices, &mut Vec::new(), &mut lanes)?;
+        Ok(lanes)
+    }
+
+    fn plan_equality_lanes(
+        &self,
+        shape: &ValueShape,
+        ty: &MonoTy,
+        indices: &[usize],
+        guards: &mut Vec<(usize, Ustr)>,
+        lanes: &mut [EqualityLane],
+    ) -> Result<(), CompilerError> {
+        let indices = &indices[usize::from(shape.nullable)..];
+        if let Some(plan) = EnumPlan::for_name(self.ws, shape.name) {
+            if let Some(flat) = plan.flat() {
+                self.plan_enum_equality_lanes(flat, ty, indices, guards, lanes)?;
+            }
+            return Ok(());
+        }
+        let mut start = 0;
+        for (field, layout) in &shape.fields {
+            let ty = self.struct_field_ty_in(shape.name, *field, ty)?;
+            let end = start + layout.leaf_count();
+            match layout {
+                FieldShape::Nested(child) => {
+                    self.plan_equality_lanes(child, &ty, &indices[start..end], guards, lanes)?;
+                }
+                FieldShape::Prim if self.opaque_leaf_is_structural(&ty, false) => {
+                    // An opaque lane can hold a boxed value.
+                    lanes[indices[start]].structural_when.push(guards.clone());
+                }
+                FieldShape::Prim => {}
+            }
+            start = end;
+        }
+        Ok(())
+    }
+
+    fn opaque_leaf_is_structural(&self, ty: &MonoTy, enum_payload: bool) -> bool {
+        let js = self.scx.target() == bone_core::hir::FnBackend::Js;
+        let ty = ty.peel_nullable().0;
+        if let Some(name) = ty.nominal() {
+            if super::shape::is_value_struct(self.ws, name) {
+                return js;
+            }
+            if let Some(plan) = EnumPlan::for_name(self.ws, name) {
+                return plan.flat().is_some() || (js && plan.cdata().is_some());
+            }
+        }
+        enum_payload
+            && !matches!(
+                ty,
+                MonoTy::Unit
+                    | MonoTy::Int
+                    | MonoTy::Uint
+                    | MonoTy::Float
+                    | MonoTy::Bool
+                    | MonoTy::String
+                    | MonoTy::Never
+                    | MonoTy::Function { .. }
+            )
+    }
+
+    fn plan_enum_equality_lanes(
+        &self,
+        flat: &EnumFlatShape,
+        ty: &MonoTy,
+        indices: &[usize],
+        guards: &mut Vec<(usize, Ustr)>,
+        lanes: &mut [EqualityLane],
+    ) -> Result<(), CompilerError> {
+        let (tag, indices) = indices.split_first().expect("flat enum has a tag");
+        let Some(eid) = self.ws.nominals.enum_id(flat.name()) else {
+            return Err(self.gap_here("flat enum has no declaration"));
+        };
+        let def = &self.ws.module(eid.module).enums[eid.def];
+        let mut subst = crate::monoty::MonoSubst::default();
+        if let MonoTy::App { params, .. } = ty.peel_nullable().0 {
+            for (generic, param) in def.generics.iter().zip(params) {
+                if let Some(TypeExpr::Generic(var, _)) = super::shape::static_ty(self.ws, *generic)
+                {
+                    subst.insert(var, param.clone());
+                }
+            }
+        }
+        if self.scx.target() == bone_core::hir::FnBackend::Js {
+            // A box omits nil payload fields; the scalar ABI passes null.
+            for &index in indices {
+                lanes[index].nil_equivalent = true;
+            }
+        }
+        let mut visit = |ty, shape: Option<&ValueShape>, indices: &[usize], guards: &mut Vec<_>| {
+            let ty = crate::monoty::convert_decl(self.ws, ty, &subst).map_err(|reason| {
+                self.gap_here(format!("enum equality payload type: {reason:?}"))
+            })?;
+            if let Some(shape) = shape {
+                self.plan_equality_lanes(shape, &ty, indices, guards, lanes)?;
+            } else if self.opaque_leaf_is_structural(&ty, true) {
+                lanes[indices[0]].structural_when.push(guards.clone());
+            }
+            Ok::<_, CompilerError>(())
+        };
+        for variant in &def.variants {
+            guards.push((*tag, variant.name));
+            match &variant.payload {
+                VariantPayload::Unit => {}
+                VariantPayload::Tuple(types) => {
+                    for (pos, ty) in types.iter().enumerate() {
+                        let shape = flat.payload_shape(self.ws, variant.name, pos);
+                        let start = flat.slot_offset(pos);
+                        let width = shape.map_or(1, ValueShape::leaf_count);
+                        visit(*ty, shape, &indices[start..start + width], guards)?;
+                    }
+                }
+                VariantPayload::Record(fields) => {
+                    let column = |key| {
+                        let offset = flat
+                            .record_fields()
+                            .iter()
+                            .position(|&f| f == key)
+                            .expect("named payload has a physical slot");
+                        indices[flat.tuple_width() + offset]
+                    };
+                    for field in fields {
+                        if let Some(payload) = flat.named_payload(variant.name, field.name) {
+                            let slots: Vec<_> = payload.keys.iter().copied().map(column).collect();
+                            visit(field.ty, Some(&payload.shape), &slots, guards)?;
+                        } else {
+                            visit(field.ty, None, &[column(field.name)], guards)?;
+                        }
+                    }
+                }
+            }
+            guards.pop();
+        }
+        Ok(())
+    }
+
+    fn emit_value_leaves_equal(
+        &mut self,
+        lhs: &[Idx<Inst>],
+        rhs: &[Idx<Inst>],
+        lanes: &[EqualityLane],
+    ) -> Result<Idx<Inst>, CompilerError> {
+        if lanes.is_empty() {
+            return Ok(self.emit_all_equal(lhs, rhs, |b, _, a, c| b.emit_cur(Inst::Eq(a, c))));
+        }
+        let structural = if lanes.iter().any(|lane| !lane.structural_when.is_empty()) {
+            // The prelude supplies the intrinsic alongside ordinary operator overloads.
+            let func = self
+                .ws
+                .functions_by_name
+                .get(&crate::names::ustr("__op_eq"))
+                .into_iter()
+                .flatten()
+                .find_map(|&(module, func)| {
+                    let decl = &self.ws.module(module).functions[func];
+                    (decl.inline_body.is_some() && crate::intrinsics::is_intrinsic(decl))
+                        .then_some(FuncRef { module, func })
+                })
+                .ok_or_else(|| self.gap_here("structural equality intrinsic is missing"))?;
+            Some(func)
+        } else {
+            None
+        };
+        Ok(self.emit_all_equal(lhs, rhs, |b, i, a, c| {
+            let lane = &lanes[i];
+            let native = |b: &mut Self| {
+                let [a, c] = [a, c].map(|value| {
+                    if lane.nil_equivalent {
+                        let nil = b.is_nil(value);
+                        let present = b.emit_cur(Inst::Not(nil));
+                        b.emit_cur(Inst::MakeNullableValue { present, value })
+                    } else {
+                        value
+                    }
+                });
+                b.emit_cur(Inst::Eq(a, c))
+            };
+            if lane.structural_when.is_empty()
+                || matches!(b.f.insts[a], Inst::Const(Lit::Nil))
+                || matches!(b.f.insts[c], Inst::Const(Lit::Nil))
+            {
+                return native(b);
+            }
+            let compare = |b: &mut Self| {
+                b.emit_cur(Inst::Call {
+                    func: structural.expect("structural equality intrinsic"),
+                    args: vec![a, c],
+                })
+            };
+            if lane.structural_when.iter().any(Vec::is_empty) {
+                return compare(b);
+            }
+            // The same physical slot can hold a reference in another variant.
+            let structural = b.f.new_block();
+            for guards in &lane.structural_when {
+                let miss = b.f.new_block();
+                for (i, &(tag, variant)) in guards.iter().enumerate() {
+                    let variant = b.emit_cur(Inst::Const(Lit::Str(variant)));
+                    let matched = b.emit_cur(Inst::Eq(lhs[tag], variant));
+                    let hit = if i + 1 == guards.len() {
+                        structural
+                    } else {
+                        b.f.new_block()
+                    };
+                    b.branch_to(matched, hit, miss);
+                    b.cur = hit;
+                }
+                b.cur = miss;
+            }
+            let result = b.f.new_cell(None);
+            let join = b.f.new_block();
+            let equal = native(b);
+            b.store_and_join(result, equal, join);
+            b.cur = structural;
+            let equal = compare(b);
+            b.store_and_join(result, equal, join);
+            b.cur = join;
+            b.emit_cur(Inst::Load(result))
+        }))
+    }
+
+    fn emit_all_equal(
+        &mut self,
+        lhs: &[Idx<Inst>],
+        rhs: &[Idx<Inst>],
+        mut compare: impl FnMut(&mut Self, usize, Idx<Inst>, Idx<Inst>) -> Idx<Inst>,
+    ) -> Idx<Inst> {
+        debug_assert_eq!(lhs.len(), rhs.len());
+        let result = self.f.new_cell(None);
+        let fail = self.f.new_block();
+        let join = self.f.new_block();
+        for (i, (&a, &b)) in lhs.iter().zip(rhs).enumerate() {
+            let equal = compare(self, i, a, b);
+            let next = self.f.new_block();
+            self.branch_to(equal, next, fail);
+            self.cur = next;
+        }
+        let yes = self.emit_cur(Inst::Const(Lit::Bool(true)));
+        self.store_cell(result, yes);
+        self.f.set_term(self.cur, Term::Goto(join));
+
+        self.cur = fail;
+        let no = self.emit_cur(Inst::Const(Lit::Bool(false)));
+        self.store_cell(result, no);
+        self.f.set_term(self.cur, Term::Goto(join));
+
+        self.cur = join;
+        self.emit_cur(Inst::Load(result))
     }
 
     fn lower_leafwise_value_eq(
@@ -51,6 +324,7 @@ impl<'a> Builder<'a> {
                 rhs_leaves[top + i] = self.emit_cur(Inst::Not(rhs_leaves[top + i]));
             }
         }
+        let lanes = self.value_equality_lanes(shape, lhs)?;
         let equal = if shape.nullable && self.scx.target() == bone_core::hir::FnBackend::Lua {
             let left_absent = self.emit_cur(Inst::Not(lhs_leaves[0]));
             let right_absent = self.emit_cur(Inst::Not(rhs_leaves[0]));
@@ -67,12 +341,12 @@ impl<'a> Builder<'a> {
             left.extend_from_slice(&lhs_leaves[1..]);
             let mut right = vec![right_absent];
             right.extend_from_slice(&rhs_leaves[1..]);
-            let equal = self.emit_all_equal(&left, &right);
+            let equal = self.emit_value_leaves_equal(&left, &right, &lanes)?;
             self.store_and_join(result, equal, join);
             self.cur = join;
             self.emit_cur(Inst::Load(result))
         } else {
-            self.emit_all_equal(&lhs_leaves, &rhs_leaves)
+            self.emit_value_leaves_equal(&lhs_leaves, &rhs_leaves, &lanes)?
         };
         Ok(if matches!(op, BinOp::Eq) {
             equal
@@ -316,7 +590,9 @@ impl<'a> Builder<'a> {
                                 }
                             }
                         }
-                        let equal = self.emit_all_equal(&lhs_leaves, &rhs_leaves);
+                        let lanes = self.value_equality_lanes(&shape, lhs)?;
+                        let equal =
+                            self.emit_value_leaves_equal(&lhs_leaves, &rhs_leaves, &lanes)?;
                         return Ok(if matches!(op, BinOp::Eq) {
                             equal
                         } else {
@@ -339,41 +615,7 @@ impl<'a> Builder<'a> {
                         && lhs_shape.fields == rhs_shape.fields
                         && flat_enum_equality_is_leafwise(self.ws, lhs_shape.name)
                     {
-                        let lhs_repr = self.lower_expr_repr(lhs)?;
-                        let mut lhs_leaves = self.repr_to_storage_leaves(
-                            &lhs_repr,
-                            &lhs_shape,
-                            "flat enum equality",
-                        )?;
-                        let rhs_repr = self.lower_expr_repr(rhs)?;
-                        let mut rhs_leaves = self.repr_to_storage_leaves(
-                            &rhs_repr,
-                            &rhs_shape,
-                            "flat enum equality",
-                        )?;
-                        // A boxed enum omits absent fields. JS loads these as
-                        // undefined, while the scalar ABI passes null.
-                        if self.scx.target() == bone_core::hir::FnBackend::Js
-                            && EnumPlan::for_name(self.ws, lhs_shape.name).is_some_and(|plan| {
-                                plan.flat()
-                                    .is_some_and(|flat| flat.has_inline_record_payload(self.ws))
-                            })
-                        {
-                            for value in lhs_leaves.iter_mut().chain(&mut rhs_leaves) {
-                                let missing = self.is_nil(*value);
-                                let present = self.emit_cur(Inst::Not(missing));
-                                *value = self.emit_cur(Inst::MakeNullableValue {
-                                    present,
-                                    value: *value,
-                                });
-                            }
-                        }
-                        let equal = self.emit_all_equal(&lhs_leaves, &rhs_leaves);
-                        return Ok(if matches!(op, BinOp::Eq) {
-                            equal
-                        } else {
-                            self.emit_cur(Inst::Not(equal))
-                        });
+                        return self.lower_leafwise_value_eq(op, lhs, rhs, &lhs_shape);
                     }
                 }
                 let route = self.dispatch().eq_route(lhs, rhs);

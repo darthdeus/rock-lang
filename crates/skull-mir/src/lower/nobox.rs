@@ -667,28 +667,4 @@ impl<'a> Builder<'a> {
         }
         Ok(())
     }
-
-    pub(crate) fn emit_all_equal(&mut self, lhs: &[Idx<Inst>], rhs: &[Idx<Inst>]) -> Idx<Inst> {
-        debug_assert_eq!(lhs.len(), rhs.len());
-        let result = self.f.new_cell(None);
-        let fail = self.f.new_block();
-        let join = self.f.new_block();
-        for (&a, &b) in lhs.iter().zip(rhs) {
-            let equal = self.emit_cur(Inst::Eq(a, b));
-            let next = self.f.new_block();
-            self.branch_to(equal, next, fail);
-            self.cur = next;
-        }
-        let yes = self.emit_cur(Inst::Const(Lit::Bool(true)));
-        self.store_cell(result, yes);
-        self.f.set_term(self.cur, Term::Goto(join));
-
-        self.cur = fail;
-        let no = self.emit_cur(Inst::Const(Lit::Bool(false)));
-        self.store_cell(result, no);
-        self.f.set_term(self.cur, Term::Goto(join));
-
-        self.cur = join;
-        self.emit_cur(Inst::Load(result))
-    }
 }

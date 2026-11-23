@@ -1,0 +1,129 @@
+value Point { x: int, y: int }
+nobox value MaybePoint { k: int, point: Point? }
+
+fn make_point() -> MaybePoint {
+    return MaybePoint { k: 1, point: Point { x: 2, y: 5 } }
+}
+
+@test fn nobox_nullable_value_child_equality() {
+    let a = make_point()
+    let b = MaybePoint { k: 1, point: Point { x: 2, y: 5 } }
+    let c = MaybePoint { k: 1, point: Point { x: 2, y: 6 } }
+    let n = MaybePoint { k: 1, point: null }
+    assert(a == make_point())
+    assert(a == b)
+    assert(a != c)
+    assert(n == MaybePoint { k: 1, point: null })
+    assert(a != n)
+    assert(n != a)
+}
+
+fn equal<T>(a: T, b: T) -> bool { return a == b }
+
+enum PointEnvelope { Item(MaybePoint), Empty }
+
+@test fn nobox_nullable_value_child_equality_through_aggregates() {
+    let a = make_point()
+    let b = make_point()
+    let c = MaybePoint { k: 1, point: null }
+    assert(equal(a, b))
+    assert(!equal(a, c))
+    assert(PointEnvelope::Item(a) == PointEnvelope::Item(b))
+    assert(PointEnvelope::Item(a) != PointEnvelope::Item(c))
+    let av = [a]
+    let bv = [b]
+    let cv = [c]
+    assert(av == bv)
+    assert(av != cv)
+    assert(av[0] == bv[0])
+    let am: Map<int, MaybePoint> = map_new()
+    let bm: Map<int, MaybePoint> = map_new()
+    let cm: Map<int, MaybePoint> = map_new()
+    am[1] = a
+    bm[1] = b
+    cm[1] = c
+    assert(am == bm)
+    assert(am != cm)
+    assert(am[1] == bm[1])
+}
+
+enum Label { Named(string), Empty }
+nobox value MaybeLabel { label: Label? }
+enum WrappedLabel { Item(MaybeLabel), Empty }
+
+enum Count { Some(int), Empty }
+nobox value IntPayload { count: Count }
+
+@test fn nobox_nullable_enum_child_equality() {
+    let a = MaybeLabel { label: Label::Named("one") }
+    let b = MaybeLabel { label: Label::Named("one") }
+    let c = MaybeLabel { label: Label::Named("two") }
+    assert(a == b)
+    assert(a != c)
+    assert(a != MaybeLabel { label: null })
+    assert(WrappedLabel::Item(a) == WrappedLabel::Item(b))
+    assert(WrappedLabel::Item(a) != WrappedLabel::Item(c))
+    assert(IntPayload { count: Count::Some(1) } == IntPayload { count: Count::Some(1) })
+    assert(IntPayload { count: Count::Some(1) } != IntPayload { count: Count::Some(2) })
+}
+
+enum PointPayload { At(Point?), Empty }
+nobox value PointEvent { payload: PointPayload }
+
+@test fn flat_enum_opaque_value_payload_equality() {
+    let a = PointPayload::At(Point { x: 1, y: 2 })
+    let b = PointPayload::At(Point { x: 1, y: 2 })
+    let c = PointPayload::At(Point { x: 1, y: 3 })
+    assert(a == b)
+    assert(a != c)
+    assert(PointEvent { payload: a } == PointEvent { payload: b })
+    assert(PointEvent { payload: a } != PointEvent { payload: c })
+}
+
+nobox value Item<T> { content: T }
+struct Ref { x: int }
+
+@test fn nobox_generic_opaque_value_child_equality() {
+    let a: Item<Point> = Item { content: Point { x: 1, y: 2 } }
+    let b: Item<Point> = Item { content: Point { x: 1, y: 2 } }
+    let c: Item<Point> = Item { content: Point { x: 1, y: 3 } }
+    assert(a == b)
+    assert(a != c)
+    assert(equal(a, b))
+    let shared = Ref { x: 1 }
+    let r: Item<Ref> = Item { content: shared }
+    let same: Item<Ref> = Item { content: shared }
+    let other: Item<Ref> = Item { content: Ref { x: 1 } }
+    assert(r == same)
+    assert(r != other)
+}
+
+nobox value RefItem { content: Ref }
+nobox value MixedItem { label: Label?, owner: Ref }
+enum MixedEnvelope { Item(MixedItem), Owner(RefItem), Empty }
+
+@test fn enum_equality_uses_the_layout_of_its_active_variant() {
+    let shared = Ref { x: 1 }
+    let a = MixedEnvelope::Item(MixedItem { label: Label::Named("one"), owner: shared })
+    let b = MixedEnvelope::Item(MixedItem { label: Label::Named("one"), owner: shared })
+    let c = MixedEnvelope::Item(MixedItem { label: Label::Named("one"), owner: Ref { x: 1 } })
+    assert(a == b)
+    assert(a != c)
+    let r = MixedEnvelope::Owner(RefItem { content: shared })
+    assert(r == MixedEnvelope::Owner(RefItem { content: shared }))
+    assert(r != MixedEnvelope::Owner(RefItem { content: Ref { x: 1 } }))
+}
+
+value BoxableLabel { k: int, label: Label? }
+
+fn boxable_label() -> BoxableLabel {
+    return BoxableLabel { k: 1, label: Label::Named("one") }
+}
+
+@test fn scalarized_value_uses_structural_enum_leaf_equality() {
+    let a = boxable_label()
+    let b = boxable_label()
+    assert(a == b)
+    assert(equal(a, b))
+    assert(a != BoxableLabel { k: 1, label: Label::Named("two") })
+}
