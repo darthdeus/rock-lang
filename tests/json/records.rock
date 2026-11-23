@@ -790,3 +790,26 @@ fn json_record_reused_codec_follows_adapter_changes() {
 }
 
 struct JsonKindHolder { kind: Kind, marker: Vec2 }
+
+value JsonKept { a: int, b: string }
+value JsonKeptRow { kept: JsonKept, n: int }
+struct JsonKeptRows { rows: [JsonKeptRow], single: JsonKeptRow }
+
+@test
+fn json_record_adapters_keep_the_values_they_receive() {
+    let kept: [JsonKept] = []
+    let codec = JsonRecordCodec { adapters: [json_record_adapter(JsonKept { a: 0, b: "" }, value => {
+        kept.push(value)
+        return json_int(value.a)
+    }, value => JsonKept { a: json_as_int(value) ?? return null, b: "" })] }
+    let source = JsonKeptRows { rows: [JsonKeptRow { kept: JsonKept { a: 1, b: "2" }, n: 3 },
+        JsonKeptRow { kept: JsonKept { a: 4, b: "5" }, n: 6 }], single: JsonKeptRow { kept: JsonKept { a: 7, b: "8" }, n: 9 } }
+    let text = json_record_write(codec, source)
+    let _ = json_record_encode(codec, source)
+    assert(text == "{{\"rows\":[{{\"kept\":1,\"n\":3}},{{\"kept\":4,\"n\":6}}],\"single\":{{\"kept\":7,\"n\":9}}}}", text)
+    assert(kept.len() == 6)
+    for i in 0..3 {
+        assert(kept[i] == kept[i + 3])
+    }
+    assert(kept[0] == JsonKept { a: 1, b: "2" } && kept[1] == JsonKept { a: 4, b: "5" } && kept[2] == JsonKept { a: 7, b: "8" })
+}

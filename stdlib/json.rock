@@ -1436,13 +1436,22 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
 
 @nomangle inline(lua) fn __json_record_finite(n: float) -> bool = "return n == n and n ~= math.huge and n ~= -math.huge"
 
-@nomangle inline(lua) fn __json_record_native_get(source: any, name: string, prefix: string, slots: any? = null) -> any = """
-    local result = _G[name .. '_ct']()
+// Reads a native value stored as leaves: in `source` by path (through `slots`),
+// in strided data at `base` plus the path's offset, or in columns at row `base`.
+// `into` receives the leaves instead of a new value.
+@nomangle inline(lua) fn __json_record_native_get(source: any, name: string, prefix: string, slots: any? = null,
+    into: any? = null, base: int? = null) -> any = """
+    local result = into or _G[name .. '_ct']()
     for _, field in ipairs(_G.__ROCK_TYPE_TABLE[name].fields) do
         local path = prefix .. field.name
         local child = _G.__ROCK_TYPE_TABLE[field.type]
-        result[field.name] = child and child.kind == 'c_struct'
-            and __json_record_native_get(source, field.type, path .. '.', slots) or source[slots and slots[path] or path]
+        -- Columns also store native enum fields as leaves.
+        if child and (child.kind == 'c_struct' or (child.kind == 'c_enum' and base and not slots)) then
+            if into then __json_record_native_get(source, field.type, path .. '.', slots, result[field.name], base)
+            else result[field.name] = __json_record_native_get(source, field.type, path .. '.', slots, nil, base) end
+        elseif not base then result[field.name] = source[slots and slots[path] or path]
+        elseif slots then result[field.name] = source[base + slots[path]]
+        else result[field.name] = source[path][base] end
     end
     return result
 """
@@ -1457,13 +1466,46 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     end
 """
 
-@nomangle inline(lua) fn __json_record_field_get(source: any, field: any, slots: any) -> any = """
+// Encoding copies a stored value it must box into one value reused per type
+// and depth, unless an adapter, which may keep it, receives a boxed value.
+// Native values reach adapters and omit predicates only as leaves, so they
+// are always reused. A reused table comes back empty, with the pool its nested
+// values are reused from. Decoding contexts have no scratch and box afresh.
+@nomangle inline(lua) fn __json_record_scratch(codec: any?, name: string, depth: int) -> any = """
+    local scratch = codec and codec.scratch
+    if not scratch then return nil end
+    local native = _G.__ROCK_TYPE_TABLE[name].kind == 'c_struct'
+    if not native and codec.adapters and codec.adapters[name] then return nil end
+    local level = scratch[depth]
+    if not level then
+        level = {}
+        scratch[depth] = level
+    end
+    local entry = level[name]
+    if native then
+        if not entry then
+            entry = _G[name .. '_ct']()
+            level[name] = entry
+        end
+        return entry
+    end
+    if not entry then
+        entry = { setmetatable({}, __rock_box_mts[name]), {} }
+        level[name] = entry
+    end
+    local value = entry[1]
+    for key in pairs(value) do value[key] = nil end
+    return value, entry[2]
+"""
+
+@nomangle inline(lua) fn __json_record_field_get(source: any, field: any, slots: any, codec: any? = null, depth: int = 0) -> any = """
     local key = field.name
     if field.flat then
         local tag_key = field.flat[1]
         local tag = source[slots and slots[tag_key] or tag_key]
         if tag == nil then return nil end
-        local value = setmetatable({ __variant = tag }, __rock_box_mts[field.type])
+        local value = __json_record_scratch(codec, field.type, depth) or setmetatable({}, __rock_box_mts[field.type])
+        value.__variant = tag
         for i = 2, #field.flat do
             local path = field.flat[i]
             value[i - 1] = source[slots and slots[path] or path]
@@ -1473,11 +1515,11 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     if not field.embed then return source[slots and slots[key] or key] end
     if field.nullable and not source[slots and slots[key] or key] then return nil end
     if _G.__ROCK_TYPE_TABLE[field.type].kind == 'c_struct' then
-        return __json_record_native_get(source, field.type, key .. '.', slots)
+        return __json_record_native_get(source, field.type, key .. '.', slots, __json_record_scratch(codec, field.type, depth))
     end
     local mt = __rock_box_mts[field.type]
     local child_slots = mt.__rock_slots
-    local value, prefix = setmetatable({}, mt), key .. '.'
+    local value, prefix = field.json_omit == nil and __json_record_scratch(codec, field.type, depth) or setmetatable({}, mt), key .. '.'
     local source_names = slots and getmetatable(source).__rock_fields
     for name, item in pairs(source) do
         name = source_names and source_names[name] or name
@@ -1516,7 +1558,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     else target[slots and slots[key] or key] = value end
 """
 
-@nomangle inline(lua) fn __json_record_payload_get(value: any, shape: any, index: int) -> any = """
+@nomangle inline(lua) fn __json_record_payload_get(value: any, shape: any, index: int, codec: any? = null, depth: int = 0) -> any = """
     local slot = shape.slot or index
     local leaves = shape.leaves
     if not leaves then return value[slot] end
@@ -1526,12 +1568,14 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     end
     local flat = _G.__ROCK_ENUM_FLAT_LAYOUT[shape.name]
     if flat then
-        local result = setmetatable({ __variant = value[slot] }, __rock_box_mts[shape.name])
+        local result = __json_record_scratch(codec, shape.name, depth) or setmetatable({}, __rock_box_mts[shape.name])
+        result.__variant = value[slot]
         for i = 1, flat.tuple_width do result[i] = value[slot + i] end
         return result
     end
     local decl = _G.__ROCK_TYPE_TABLE[shape.name]
-    local result = decl.kind == 'c_struct' and _G[shape.name .. '_ct']() or setmetatable({}, __rock_box_mts[shape.name])
+    local result, pool = __json_record_scratch(codec, shape.name, depth)
+    result = result or decl.kind == 'c_struct' and _G[shape.name .. '_ct']() or setmetatable({}, __rock_box_mts[shape.name])
     local nested = false
     for i, path in ipairs(leaves) do
         local dot = path:find('.', 1, true)
@@ -1548,7 +1592,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
             nested = nested or dot ~= nil
         end
     end
-    return nested and __json_record_row_object(result, shape.name) or result
+    return nested and __json_record_row_object(result, shape.name, pool) or result
 """
 
 @nomangle inline(lua) fn __json_record_payload_put(target: any, shape: any, index: int, value: any) = """
@@ -1584,18 +1628,30 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     end
 """
 
-@nomangle inline(lua) fn __json_record_row_object(row: any, name: string) -> any = """
+// Builds a row's nested value tables from its flat leaves; with a pool, each
+// nested table is reused and emptied first.
+@nomangle inline(lua) fn __json_record_row_object(row: any, name: string, pool: any? = null) -> any = """
     for _, field in ipairs(_G.__ROCK_TYPE_TABLE[name].fields) do
         local child = _G.__ROCK_TYPE_TABLE[field.type]
         if field.embed and field.nullable and row[field.name] == false then row[field.name] = nil end
         if child and child.kind == 'value_table' and not field.embed
             and (not field.nullable or row[field.name] ~= nil)
             and type(row[field.name]) ~= 'table' then
-            local value, prefix = setmetatable({}, __rock_box_mts[field.type]), field.name .. '.'
+            local value, nested
+            if pool then
+                local entry = pool[field.name]
+                if not entry then
+                    entry = { setmetatable({}, __rock_box_mts[field.type]), {} }
+                    pool[field.name] = entry
+                end
+                value, nested = entry[1], entry[2]
+                for key in pairs(value) do value[key] = nil end
+            else value = setmetatable({}, __rock_box_mts[field.type]) end
+            local prefix = field.name .. '.'
             for path, item in pairs(row) do
                 if path:sub(1, #prefix) == prefix then value[path:sub(#prefix + 1)] = item end
             end
-            row[field.name] = __json_record_row_object(value, field.type)
+            row[field.name] = __json_record_row_object(value, field.type, nested)
         end
     end
     return row
@@ -1773,7 +1829,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
         end
         local stride = 0
         if offsets then for _, offset in pairs(offsets) do stride = math.max(stride, offset) end end
-        local result = {}
+        local result = not out and {}
         if reading and columns then
             for _, path in ipairs(columns) do result[path] = {} end
         end
@@ -1787,12 +1843,16 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
             elseif json_items then
                 item = __rock_json_vec_at(items, i)
             elseif column_stored then
-                item = __rock_materialize_column_element(items, i)
+                item = __json_record_native_get(items, shape.elem.name, '', nil, __json_record_scratch(codec, shape.elem.name, depth), i)
+            elseif strided and element.kind == 'c_struct' then
+                item = __json_record_native_get(items._data, shape.elem.name, '', offsets,
+                    __json_record_scratch(codec, shape.elem.name, depth), (i - 1) * stride)
             elseif strided then
-                item = setmetatable({}, __rock_box_mts[shape.elem.name])
+                local pool
+                item, pool = __json_record_scratch(codec, shape.elem.name, depth)
+                item = item or setmetatable({}, __rock_box_mts[shape.elem.name])
                 for path, offset in pairs(offsets) do item[path] = items._data[(i - 1) * stride + offset] end
-                item = element.kind == 'c_struct' and __json_record_native_get(item, shape.elem.name, '')
-                    or __json_record_row_object(item, shape.elem.name)
+                item = __json_record_row_object(item, shape.elem.name, pool)
             else item = items[i] end
             local ok, decoded, tag = __json_record_visit(codec, shape.elem, item, reading, seen, depth + 1, nil, not reading, reading and i or nil)
             if not ok then return false, __json_record_error_at(decoded, i - 1) end
@@ -1873,10 +1933,14 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
         if out then __json_record_put(codec, '[' .. codec.sink.string_text(label) .. ']'); return true end
         return true, __json_record_node('Array', __json_record_json_vec({'Str', label}, 1), row)
     end
+    -- Only references can form cycles; values are copies.
+    local tracked = not reading and decl.kind == 'struct'
     if not reading then
         if value == nil then error('json record missing value for ' .. name .. ' at depth ' .. depth, 0) end
-        if seen[value] then error('json record cannot encode cycles', 0) end
-        seen[value] = true
+        if tracked then
+            if seen[value] then error('json record cannot encode cycles', 0) end
+            seen[value] = true
+        end
     end
     local result, wire_tag
     if decl.kind == 'enum' or decl.kind == 'c_enum' then
@@ -1893,11 +1957,15 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
                 selected = decl.variants[tag]
             end
             if not selected then return false, __json_record_failure(shape, value, index, codec) end
-            fields, payload = selected.fields, {}
-            for i, field in ipairs(fields) do
-                if field.name ~= tostring(i) then error('json record does not support record enum payloads', 0) end
-                payload[i] = field.desc or (_G.__ROCK_TYPE_TABLE[field.type]
-                    and { k = 'nom', name = field.type } or { k = field.type })
+            fields, payload = selected.fields, selected.json_payload
+            if not payload then
+                payload = {}
+                for i, field in ipairs(fields) do
+                    if field.name ~= tostring(i) then error('json record does not support record enum payloads', 0) end
+                    payload[i] = field.desc or (_G.__ROCK_TYPE_TABLE[field.type]
+                        and { k = 'nom', name = field.type } or { k = field.type })
+                end
+                selected.json_payload = payload
             end
         else
             if reading then
@@ -1937,7 +2005,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
             if reading then item = input_payload
             elseif fields then item = value[fields[i].slot]
             elseif json_bool_wire then item = value.__variant == 'True'
-            else item = __json_record_payload_get(value, payload[i], i) end
+            else item = __json_record_payload_get(value, payload[i], i, codec, depth) end
             local ok, decoded, child_tag = __json_record_visit(codec, payload[i], item, reading, seen, depth + 1, nil, not reading, reading and i + 1 or nil)
             if not ok then
                 if not reading then error('json record invalid payload ' .. name .. '.' .. tostring(tag) .. '[' .. i .. ']', 0) end
@@ -1982,7 +2050,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
                 local wire_name = field.json_name or field.name
                 local item
                 if reading then item = input_payload[wire_name]
-                elseif type(value) == 'table' then item = __json_record_field_get(value, field, slots)
+                elseif type(value) == 'table' then item = __json_record_field_get(value, field, slots, codec, depth)
                 else item = value[field.name] end
                 local child = field.desc
                 if not child then
@@ -2026,7 +2094,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
         else result, wire_tag = data, 'Object' end
     else error('json record unsupported declaration: ' .. name, 0) end
     if not reading then
-        seen[value] = nil
+        if tracked then seen[value] = nil end
         if out then return true end
         return true, __json_record_node(wire_tag, result, row)
     end
@@ -2122,7 +2190,7 @@ fn __json_record_adapter_map(codec: JsonRecordCodec) -> Map<string, JsonRecordAd
     local context = rawget(codec, '__json_encoder')
     if context == nil or context.busy or context.encode_float ~= codec.encode_float then
         context = __json_record_context(codec, false)
-        context.seen, context.roots = {}, {}
+        context.seen, context.roots, context.scratch = {}, {}, {}
         rawset(codec, '__json_encoder', context)
     else
         context.adapters = __json_record_adapters(codec)
