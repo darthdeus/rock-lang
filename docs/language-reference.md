@@ -98,6 +98,10 @@ locals; use a lambda for those. Self-recursion is supported, but forward and
 mutual recursion, generic parameters and annotations on nested functions are
 not.
 
+A lambda bound with `let` is monomorphic: all its calls share one set of
+parameter types, so `let g = x => x; g(3); g("hi")` is rejected. Write a
+generic function for a polymorphic helper.
+
 A body-less `extern` declaration names its backend: `extern(lua) fn` refers to
 an existing Lua global, `extern(js) fn` to a JS global, and
 `extern(ffi, "lib") fn` to a C symbol reached through LuaJIT FFI.
