@@ -1642,7 +1642,11 @@ impl Session {
                             .relocate_def_names(|span| moved.get(&span).copied());
                     }
                 }
-                if position.is_none() && result.tier != UpdateTier::NoChange {
+                // FullUser already ran both checks in lower_and_infer.
+                if matches!(
+                    result.tier,
+                    UpdateTier::BodyOnly | UpdateTier::Interface | UpdateTier::Scope
+                ) {
                     bone_semantic::relocation::check_relocation(&mut self.ws);
                     bone_semantic::fn_identity::check_generic_fn_eq(&mut self.ws);
                 }

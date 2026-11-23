@@ -1,6 +1,6 @@
 // Incremental == fresh oracle: apply an edit script, batch the final texts, compare.
 
-use bone_incremental::session::Session;
+use bone_incremental::session::{Session, UpdateTier};
 use bone_semantic::prelude::*;
 
 use crate::common;
@@ -678,13 +678,19 @@ fn relocation_verdict_follows_an_edit_to_the_callee() {
     );
     assert_eq!(relocations(&session), 0, "{:?}", session.diagnostics());
 
-    session
-        .update_file("cell.rock", growing_callee)
-        .expect("update");
-    assert_eq!(relocations(&session), 1, "{:?}", session.diagnostics());
+    let growing_with_macro = format!("{growing_callee}\nmacro marker(x: expr) {{ x }}\n");
+    for (text, tier) in [
+        (growing_callee, UpdateTier::BodyOnly),
+        (growing_with_macro.as_str(), UpdateTier::FullUser),
+    ] {
+        let update = session.update_file("cell.rock", text).expect("update");
+        assert_eq!(update.tier, tier);
+        assert_eq!(relocations(&session), 1, "{:?}", session.diagnostics());
 
-    session
-        .update_file("cell.rock", clean_callee)
-        .expect("update");
-    assert_eq!(relocations(&session), 0, "{:?}", session.diagnostics());
+        let restore = session
+            .update_file("cell.rock", clean_callee)
+            .expect("update");
+        assert_eq!(restore.tier, tier);
+        assert_eq!(relocations(&session), 0, "{:?}", session.diagnostics());
+    }
 }
