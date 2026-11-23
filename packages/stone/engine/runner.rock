@@ -218,6 +218,9 @@ pub @lua_named struct GameConfig {
     world_text_snap: bool = true,
     world_text_quantize_em: bool = false,
     font_sampling: TextureFilter = TextureFilter::Linear,
+    // Optional programs can wait for an explicit drain or first use. Keep
+    // programs used by boot hooks or early frames out of this list.
+    deferred_shaders: [string] = [depth_visualize_shader, entity_id_debug_shader],
 }
 
 fn native_engine_configure(config: GameConfig) {
@@ -413,6 +416,9 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
 
     log_debug("RENDER", "Initializing...")
     native_engine_render_boot()
+    let shaders_phase = perf_phase_begin("startup.shaders")
+    load_pending_shader_sources(config.deferred_shaders)
+    perf_phase_end(shaders_phase)
 
     // After the sim queue is known and before the first frame can poll host input.
     input_resolve_authority()

@@ -28,9 +28,8 @@ value ShaderRegistrationKey {
 }
 global REGISTERED_SHADER_HASHES: Map<string, ShaderRegistrationKey> = map_new()
 // Cold-start deferral: a top-level registration runs BEFORE the window/GL exists
-// (before @init). Those get queued here and compiled by the @init drain
-// (load_pending_shader_sources). A reload runs with GL already up -> compiled in
-// place immediately, no queue.
+// (before @init). The runner drains required programs when GL comes up. An
+// optional program keeps its registration here until a query, bind or drain.
 value ShaderRegistration {
     hash: ShaderRegistrationKey,
     src: string,
@@ -296,8 +295,8 @@ fn publish_gl_shader_semantic(key: string, interface: SemanticShaderInterface) {
 }
 
 pub fn selected_shader_interface(shader_name: string) -> SemanticShaderInterface? {
+    if shader_entry(WATCHER.shaders, shader_name) == null { return null }
     let semantic = GL_SHADER_SEMANTICS.get(shader_name)
-    if !WATCHER.shaders.contains(shader_name) { return null }
     let artifact = GL_SHADER_ARTIFACTS.get(shader_name) ?? return null
     if semantic == null { return null }
     let entry = semantic
@@ -402,7 +401,7 @@ inline(lua) fn __shader_src_hash(s: string) -> int = """
 // sets `_G.stone = ffi.C` up front, so `s` is truthy at top level even though
 // the stone ffi.cdef declarations run later in the chunk -- a bare call then
 // raises "missing declaration for symbol". Either failure means not-ready, so
-// registration defers to PENDING_SHADER_SRCS and @init drains it post-GL.
+// registration defers to PENDING_SHADER_SRCS until GL is available.
 inline(lua) fn __stone_gl_ready() -> bool = """
     local s = rawget(_G, "stone")
     if not s then return false end
@@ -473,26 +472,45 @@ fn register_shader(key: string, src: string, native: ShaderId?, texture_slots: [
     let registration = ShaderRegistration { hash, src, texture_slots, blocks, semantic }
     if let sid = native {
         // The native loader already bound and validated the driver's blocks.
+        PENDING_SHADER_SRCS.remove(key)
         publish_shader_registration(key, sid, registration, native_uniform_blocks(blocks))
         return true
     }
-    if __stone_gl_ready() {
-        rock_shader_compile_now(key, registration)
-    } else {
+    if !__stone_gl_ready() || PENDING_SHADER_SRCS.contains(key) {
         PENDING_SHADER_SRCS.insert(key, registration)
+    } else {
+        rock_shader_compile_now(key, registration)
     }
     return true
 }
 
-// Drained at @init (post-GL).
-fn load_pending_shader_sources() {
+fn load_pending_shader_sources(deferred: [string] = []) {
     let keys = PENDING_SHADER_SRCS.keys()
     sort(keys, x => x)
     for key in keys {
-        let registration = PENDING_SHADER_SRCS.get(key) ?? continue
+        let skip = false
+        for optional in deferred {
+            if key == optional { skip = true; break }
+        }
+        if skip { continue }
+        let registration = PENDING_SHADER_SRCS.remove(key) ?? continue
         rock_shader_compile_now(key, registration)
     }
-    PENDING_SHADER_SRCS.clear()
+}
+
+fn compile_pending_shader(key: string) -> bool {
+    let registration = PENDING_SHADER_SRCS.get(key) ?? return false
+    if !__stone_gl_ready() { return false }
+    PENDING_SHADER_SRCS.remove(key)
+    rock_shader_compile_now(key, registration)
+    return true
+}
+
+@inline fn shader_entry<T>(registry: Map<string, T>, key: string) -> T? {
+    let live = registry.get(key)
+    if live != null { return live }
+    if compile_pending_shader(key) { return registry.get(key) }
+    return null
 }
 
 fn rock_shader_compile_now(key: string, registration: ShaderRegistration) {
@@ -539,7 +557,7 @@ fn publish_shader_registration(key: string, sid: ShaderId, registration: ShaderR
 }
 
 pub fn shader_uses_compiler_fullscreen_vertex(shader_name: string) -> bool {
-    return SHADER_COMPILER_FULLSCREEN_VERTEX.get(shader_name) ?? false
+    return shader_entry(SHADER_COMPILER_FULLSCREEN_VERTEX, shader_name) ?? false
 }
 
 // Point each `@textures` sampler at its unit, once. GLES 3.0 has no
@@ -735,7 +753,7 @@ pub fn shader_texture_slot_if_present(shader_name: string, sampler: string) -> i
 }
 
 fn shader_texture_slot_impl(shader_name: string, sampler: string, required: bool) -> int {
-    let slots = SHADER_TEXTURE_SLOTS.get(shader_name)
+    let slots = shader_entry(SHADER_TEXTURE_SLOTS, shader_name)
     if slots == null || slots.names.len() == 0 {
         if required {
             log_once("SHADER",
@@ -755,7 +773,7 @@ fn shader_texture_slot_impl(shader_name: string, sampler: string, required: bool
 }
 
 pub fn shader_texture_slot_count(shader_name: string) -> int {
-    let slots = SHADER_TEXTURE_SLOTS.get(shader_name)
+    let slots = shader_entry(SHADER_TEXTURE_SLOTS, shader_name)
     if slots == null { return 0 }
     return slots.names.len()
 }
@@ -846,7 +864,7 @@ fn update_watcher() {
 pub fn set_shader(shader_id: string) {
     let shaders = WATCHER.shaders
 
-    let item = shaders.get(shader_id)
+    let item = shader_entry(shaders, shader_id)
     if item != null {
         shader_release_shared_textures()
         set_shader_raw(item.shader)

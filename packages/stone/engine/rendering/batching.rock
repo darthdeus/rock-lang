@@ -7,15 +7,8 @@ const PIVOT_TOP_RIGHT: Vec2 = v(1.0, 0.0)
 pub const PIVOT_BOTTOM_RIGHT: Vec2 = v(1.0, 1.0)
 const PIVOT_BOTTOM_LEFT: Vec2 = v(0.0, 1.0)
 
-@init
-fn init_batching() {
-    gpu_programs_drain()
-}
-
-// Compiles the rock_shader pipelines registered at chunk top level before a GL
-// context existed. The runner drains at @init; a host that
-// brings GL up outside the runner (`stone_gpu_host_ensure`) drains through this
-// call.
+// Compile all queued programs, including ones deferred by the frame runner.
+// Offscreen hosts call this when they acquire GL outside the runner.
 pub fn gpu_programs_drain() {
     load_pending_shader_sources()
 }

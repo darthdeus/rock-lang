@@ -56,7 +56,7 @@ pub global SHADER_UNIFORM_BLOCKS: Map<string, ShaderUniformBlocks> = map_new()
 pub fn shader_block_by_fingerprint(shader_name: string, fingerprint: int) -> ShaderUniformBlock? {
     // `if let` emits one nil guard; check-then-unwrap emits two, and the
     // second is a trace exit on a value already proven non-null.
-    if let entry = SHADER_UNIFORM_BLOCKS.get(shader_name) {
+    if let entry = shader_entry(SHADER_UNIFORM_BLOCKS, shader_name) {
         return entry.by_fingerprint.get(fingerprint)
     }
     return null
@@ -65,7 +65,7 @@ pub fn shader_block_by_fingerprint(shader_name: string, fingerprint: int) -> Sha
 fn shader_block_by_name(shader_name: string, block_name: string) -> ShaderUniformBlock? {
     // `if let` emits one nil guard; check-then-unwrap emits two, and the
     // second is a trace exit on a value already proven non-null.
-    if let entry = SHADER_UNIFORM_BLOCKS.get(shader_name) {
+    if let entry = shader_entry(SHADER_UNIFORM_BLOCKS, shader_name) {
         return entry.by_name.get(block_name)
     }
     return null
@@ -327,7 +327,7 @@ fn wire_kind_components(kind: int) -> int {
 
 // A program without this array block returns null without logging.
 pub fn array_block_find(shader_name: string, binding: int) -> ShaderUniformBlock? {
-    let entry = SHADER_UNIFORM_BLOCKS.get(shader_name)
+    let entry = shader_entry(SHADER_UNIFORM_BLOCKS, shader_name)
     if entry == null { return null }
     return entry.by_binding.get(binding)
 }
@@ -446,7 +446,7 @@ pub fn array_block_upload(
 }
 
 pub fn shader_block_uploads(shader_name: string, binding: int) -> int {
-    let entry = SHADER_UNIFORM_BLOCKS.get(shader_name)
+    let entry = shader_entry(SHADER_UNIFORM_BLOCKS, shader_name)
     if entry == null { return -1 }
     let block = entry.by_binding.get(binding)
     if block == null { return -1 }

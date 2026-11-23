@@ -799,7 +799,7 @@ pub fn queue_world_surface_geometry(mesh: GpuMesh, pipeline: Pipeline, bindings:
         "GPU geometry requires the main world pool")
     assert(sprite_pipeline_has_id_output(pipeline) && sprite_pipeline_has_material_output(pipeline)
         && sprite_pipeline_has_output(pipeline, 3, 3), "GPU geometry requires ID, material and normal outputs")
-    if let blocks = SHADER_UNIFORM_BLOCKS.get(pipeline.shader_name) {
+    if let blocks = shader_entry(SHADER_UNIFORM_BLOCKS, pipeline.shader_name) {
         assert(vertex != null || blocks.by_binding.get(UNIFORM_BLOCK_BINDING_VERTEX) == null,
             "GPU geometry requires its declared vertex block")
         assert(fragment != null || blocks.by_binding.get(UNIFORM_BLOCK_BINDING_FRAGMENT) == null,
@@ -1534,8 +1534,7 @@ fn add_line_segment(
 }
 
 pub fn get_shader_handle(shader_name: string) -> int {
-    let shaders = WATCHER.shaders
-    let shader_item = shaders.get(shader_name)
+    let shader_item = shader_entry(WATCHER.shaders, shader_name)
     if shader_item != null {
         transmute(shader_item.shader.0)
     } else {

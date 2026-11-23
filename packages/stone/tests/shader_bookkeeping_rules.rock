@@ -159,3 +159,58 @@ fn uniform_member_names_are_nul_separated_and_terminated() {
     assert_eq(blob.len(), 11)
     assert_eq(__ub_join_names([]), "\u{0}")
 }
+
+fn shader_startup_probe_registration() -> ShaderRegistration {
+    let source = r"""
+#version 330 core
+#ifdef VERTEX
+void main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }
+#endif
+#ifdef PIXEL
+uniform sampler2D input_tex;
+layout(std140) uniform ProbeU { vec4 factor; };
+out vec4 color;
+void main() { color = texture(input_tex, vec2(0.5)) * factor; }
+#endif
+"""
+    return ShaderRegistration {
+        src: source, texture_slots: ["input_tex"],
+        blocks: [UniformBlockDecl { name: "ProbeU", binding: 2, size: 16, fingerprint: 123.0,
+            members: ["factor"], offsets: [0], kinds: [WIRE_KIND_F32X4], capacities: [0], strides: [0] }],
+        hash: ShaderRegistrationKey { src_hash: __shader_src_hash(source),
+            block_fingerprint: 0, fullscreen_vertex: true, semantic_fingerprint: 42.0 },
+        semantic: bookkeeping_test_interface(42),
+    }
+}
+
+@test
+fn shader_startup_prepares_required_and_resolves_deferred_programs() {
+    gpu_test_host()
+    let eager = "startup-eager"
+    let query = "startup-query"
+    let bind = "startup-bind"
+    let drain = "startup-drain"
+    for key in [eager, query, bind, drain] {
+        PENDING_SHADER_SRCS.insert(key, shader_startup_probe_registration())
+    }
+    load_pending_shader_sources([query, bind, drain])
+    assert(WATCHER.shaders.contains(eager), "required program compiles before any use")
+    for key in [query, bind, drain] {
+        assert(!WATCHER.shaders.contains(key), "optional program remains pending")
+    }
+
+    set_shader(eager)
+    defer { end_shader() }
+    let before = json_decode(stone_uniform_block_binding_state_json(0)).unwrap()
+    assert(shader_block_by_fingerprint(query, 123) != null, "a uniform lookup realizes a program")
+    assert_eq(shader_texture_slot_if_present(query, "input_tex"), 0)
+    assert_eq(selected_shader_interface(query).unwrap().fingerprint as int, 42)
+    let after = json_decode(stone_uniform_block_binding_state_json(0)).unwrap()
+    assert_eq(json_int_at(after, ["gl_current_program"]), json_int_at(before, ["gl_current_program"]))
+
+    set_shader(bind)
+    assert_eq(WATCHER.current_shader_name.unwrap(), bind)
+    gpu_programs_drain()
+    assert(WATCHER.shaders.contains(drain), "explicit drain compiles remaining programs")
+    assert_eq(PENDING_SHADER_SRCS.len(), 0)
+}

@@ -149,8 +149,12 @@ pub extern "C" fn stone_shader_set_texture(h: u64, n: *const c_char, unit: c_int
     };
     with_gl(|gl| unsafe {
         if let Some(loc) = gl.get_uniform_location(program, &name) {
+            let previous =
+                std::num::NonZeroU32::new(gl.get_parameter_i32(glow::CURRENT_PROGRAM) as u32)
+                    .map(glow::NativeProgram);
             gl.use_program(Some(program));
             gl.uniform_1_i32(Some(&loc), unit);
+            gl.use_program(previous);
         }
     });
 }
