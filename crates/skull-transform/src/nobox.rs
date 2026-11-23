@@ -104,6 +104,9 @@ fn leaf_operand(
 /// The inner constructors can then disappear. GC tables keep declared keys;
 /// leaf-table constructors already take their leaves.
 fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) -> Result<bool, CompilerError> {
+    if skull_mir::pass_disabled("noboxflat") {
+        return Ok(false);
+    }
     let any_nobox = func.blocks.iter().any(|(_, b)| {
         b.insts.iter().any(|&i| match &func.insts[i] {
             Inst::MakeValueStruct { name, .. } | Inst::MaterializeValueStruct { name, .. } => ws
@@ -309,8 +312,12 @@ pub fn cleanup_with_nobox(ws: &Workspace, func: &mut MirFunc) -> Result<(), Comp
     while flatten_nobox_nested_ctors(ws, func)? {
         cleanup_in(Some(ws), func)?;
     }
-    promote_direct_cells(func);
-    fold_nobox_projections(ws, func);
+    if !skull_mir::pass_disabled("mem2reg") {
+        promote_direct_cells(func);
+    }
+    if !skull_mir::pass_disabled("noboxfold") {
+        fold_nobox_projections(ws, func);
+    }
     // After promotion, so a rounding that reached the store through a cell
     // (an inlined constructor with a defaulted argument) is seen directly.
     if drop_f32_rounding_into_float_views(func) {

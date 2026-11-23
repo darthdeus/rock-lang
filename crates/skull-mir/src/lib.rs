@@ -33,6 +33,50 @@ pub mod verdict;
 pub mod verify;
 pub mod vertex_plan;
 
+const DISABLE_ENV: &str = "ROCK_MIR_DISABLE";
+const SWITCHABLE: [&str; 13] = [
+    "sroa",
+    "copyprop",
+    "foldcmp",
+    "foldbr",
+    "inline",
+    "lambda",
+    "forl",
+    "bounds",
+    "noboxflat",
+    "mem2reg",
+    "noboxfold",
+    "latefloat",
+    "callfwd",
+];
+
+/// Whether `ROCK_MIR_DISABLE` (a comma-separated list of pass names) turns
+/// `pass` off. For differential testing of the optimizer: a pass that hides or
+/// causes a miscompile shows up as a different result with it disabled. The
+/// variable is read once; unset costs one load per call, and callers are
+/// per-function or per-site, never per-instruction.
+pub fn pass_disabled(pass: &str) -> bool {
+    static OFF: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    debug_assert!(SWITCHABLE.contains(&pass), "unregistered pass {pass}");
+    OFF.get_or_init(|| {
+        let list = std::env::var(DISABLE_ENV).unwrap_or_default();
+        let names: Vec<String> = list
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        if let Some(bad) = names.iter().find(|n| !SWITCHABLE.contains(&n.as_str())) {
+            panic!(
+                "{DISABLE_ENV}: unknown pass `{bad}`; known: {}",
+                SWITCHABLE.join(",")
+            );
+        }
+        names
+    })
+    .iter()
+    .any(|s| s == pass)
+}
+
 pub(crate) const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 
 /// Written out rather than `DefaultHasher`: these hashes are emitted and must stay

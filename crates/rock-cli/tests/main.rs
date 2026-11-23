@@ -10,6 +10,7 @@ mod gpu_process;
 mod guide;
 mod js_run_gate;
 mod js_test_backends;
+mod mir_disable;
 mod native_commands;
 mod package_cli;
 mod package_relative_output;

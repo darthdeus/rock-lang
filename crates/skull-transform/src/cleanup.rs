@@ -215,7 +215,7 @@ pub(crate) fn cleanup_in(ws: Option<&Workspace>, func: &mut MirFunc) -> Result<(
     // between SROA rounds so nested cursors can split one level at a time.
     let mut stale = true;
     loop {
-        let changed = if has_scalarizable_store(func) {
+        let changed = if !skull_mir::pass_disabled("sroa") && has_scalarizable_store(func) {
             scalarize_struct_cells_once(func)?
         } else {
             false
@@ -326,6 +326,9 @@ fn assert_round_settled(ws: Option<&Workspace>, func: &MirFunc) {
 /// Fold comparisons with known tags or nilness. A value-producing
 /// conversion alone does not prove its operand non-null.
 fn fold_known_compares(func: &mut MirFunc) -> bool {
+    if skull_mir::pass_disabled("foldcmp") {
+        return false;
+    }
     let never_nil = skull_mir::nilness::constructed_never_nil;
     let is_nil = |func: &MirFunc, v: Idx<Inst>| matches!(&func.insts[v], Inst::Const(Lit::Nil));
     let literal_equality =
@@ -362,6 +365,9 @@ fn fold_known_compares(func: &mut MirFunc) -> bool {
 }
 
 pub(crate) fn fold_const_branches(func: &mut MirFunc) -> bool {
+    if skull_mir::pass_disabled("foldbr") {
+        return false;
+    }
     let bids: Vec<Idx<Block>> = func.blocks.iter().map(|(b, _)| b).collect();
     let mut changed = false;
     for b in &bids {

@@ -147,6 +147,9 @@ pub(crate) fn call_arg_forwards(ws: &Workspace, func: &MirFunc) -> (CallArgForwa
     let mut forwards = Vec::new();
     let mut suppressed = vec![false; func.insts.len()];
     let references = std::cell::OnceCell::new();
+    if skull_mir::pass_disabled("callfwd") {
+        return (CallArgForwards(forwards), suppressed);
+    }
     for (_, block) in func.blocks.iter() {
         for first in 0..block.insts.len() {
             let producer_id = block.insts[first];

@@ -13,7 +13,7 @@ use skull_mir::cfg::successors;
 use skull_mir::mir::*;
 
 pub fn recover_counted_loops(ws: &Workspace, func: &mut MirFunc) {
-    if func.for_iter_headers.is_empty() {
+    if skull_mir::pass_disabled("forl") || func.for_iter_headers.is_empty() {
         return;
     }
     let headers = func.for_iter_headers.clone();

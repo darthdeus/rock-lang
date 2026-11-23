@@ -38,7 +38,7 @@ pub fn inline_mode_guard(off: bool) -> InlineOffGuard {
 }
 
 pub fn inline_off_active() -> bool {
-    INLINE_OFF.with(|off| off.get())
+    skull_mir::pass_disabled("inline") || INLINE_OFF.with(|off| off.get())
 }
 
 impl Drop for InlineOffGuard {

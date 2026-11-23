@@ -21,6 +21,9 @@ pub(crate) struct CopyProp {
 }
 
 pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) -> Option<CopyProp> {
+    if skull_mir::pass_disabled("copyprop") {
+        return None;
+    }
     // A call can invoke a closure that writes a cell.
     let mut main = vec![false; func.blocks.len()];
     for b in top_level_blocks(func) {

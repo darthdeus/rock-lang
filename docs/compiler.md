@@ -24,6 +24,15 @@ in MIR or its plans, so definitions, callers and backends agree. The structural
 verifier can be enabled with `ROCK_MIR_CHECKS=1`; the CLI leaves it off by
 default. See [testing](testing.md) for running compiler tests.
 
+`ROCK_MIR_DISABLE=pass1,pass2` turns optimizer passes off for differential
+testing: `sroa`, `copyprop`, `foldcmp`, `foldbr`, `inline`, `lambda`, `forl`,
+`bounds`, `noboxflat`, `mem2reg`, `noboxfold`, `latefloat` and `callfwd`. An
+unknown name aborts the compiler. A program must behave the same with any pass
+disabled, except that `@noalloc` and `nobox` checks and LuaJIT's register limit
+can reject code that SROA, copy propagation, inlining or nobox flattening would
+have fixed. `scripts/pass_differential.py` runs the corpus once per pass and
+reports differences from the default build.
+
 Function names are derived from signatures rather than declaration order, so
 compatible reloads retain stable symbols. Entrypoints and explicitly unmangled
 functions retain their declared names; raw target code that calls a Rock

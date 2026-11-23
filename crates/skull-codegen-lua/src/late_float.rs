@@ -17,6 +17,9 @@ fn scalar_call(inst: &Inst) -> bool {
 /// Return a reordered clone and the calls that must render at their MIR site.
 /// Call folding would otherwise move a guarded call back across the arithmetic.
 pub(crate) fn defer_wide_float_math(func: &MirFunc) -> Option<(MirFunc, Vec<Idx<Inst>>)> {
+    if skull_mir::pass_disabled("latefloat") {
+        return None;
+    }
     if !func.blocks.iter().any(|(_, block)| {
         block
             .insts

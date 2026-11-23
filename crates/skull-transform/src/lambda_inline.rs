@@ -258,6 +258,9 @@ fn move_body(mf: &mut MirFunc, body: &[Idx<Block>], lambda: Idx<Inst>, site: (Id
 
 /// Returns whether any body moved.
 pub(crate) fn inline_lambda_calls(mf: &mut MirFunc) -> bool {
+    if skull_mir::pass_disabled("lambda") {
+        return false;
+    }
     if !mf
         .insts
         .iter()

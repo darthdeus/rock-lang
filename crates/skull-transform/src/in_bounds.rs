@@ -35,6 +35,9 @@ pub fn elide_bounds_checks_for_target(
     func: &mut MirFunc,
     target: FnBackend,
 ) -> usize {
+    if skull_mir::pass_disabled("bounds") {
+        return 0;
+    }
     let proven = proven_accesses(ws, func, target);
     for &id in &proven {
         match &mut func.insts[id] {
