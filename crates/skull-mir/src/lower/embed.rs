@@ -120,12 +120,8 @@ impl<'a> Builder<'a> {
                 }
             }
             let plan = self.struct_field_plan(sname, child_field, false)?;
-            let child = match plan.inline_child() {
-                Some(child) => Some(child),
-                None => self.leaf_table_value_child(sname, child_field)?,
-            };
-            if let Some(child) = child {
-                let shape = self.nobox_embed_group_shape(child)?;
+            if let Some(child) = plan.inline_child() {
+                let shape = self.inline_group_shape(child)?;
                 let paths = self.embed_leaf_paths(child)?;
                 let relative = parts
                     .iter()
@@ -217,62 +213,6 @@ impl<'a> Builder<'a> {
         Ok((storage == ValueStorage::LeafTable).then_some(sname))
     }
 
-    /// A nested value may occupy leaves even under a Direct field plan.
-    pub(crate) fn leaf_table_value_child(
-        &self,
-        sname: Ustr,
-        field: Ustr,
-    ) -> Result<Option<Ustr>, CompilerError> {
-        if self.scx.values_first_class || !self.is_value_struct(sname) {
-            return Ok(None);
-        }
-        let Some(child) = self.struct_field_plan(sname, field, false)?.direct_child() else {
-            return Ok(None);
-        };
-        if !self.is_value_struct(child) {
-            return Ok(None);
-        }
-        let storage = self
-            .scx
-            .rep_arena()
-            .nominal_value_storage_required(self.ws, self.scx.target, sname)
-            .map_err(|e| self.gap_here(e.message))?;
-        Ok((storage == ValueStorage::LeafTable).then_some(child))
-    }
-
-    /// The child's leaves go to the parent's dotted keys under `key`, in the order
-    /// the parent's `<Name>_lct` ctor keys them.
-    pub(crate) fn store_leaf_table_child(
-        &mut self,
-        parent: Idx<Inst>,
-        sname: Ustr,
-        field: Ustr,
-        key: Ustr,
-        value: Idx<Expr>,
-    ) -> Result<(), CompilerError> {
-        let shape = self.nominal_rep_shape_required(sname, false)?;
-        let Some((_, FieldShape::Nested(sub))) = shape.fields.iter().find(|(f, _)| *f == field)
-        else {
-            return Err(self.gap_here(format!(
-                "leaf-table value `{sname}` has no nested field `{field}`"
-            )));
-        };
-        let repr = self.lower_expr_repr(value)?;
-        let leaves = self.repr_to_leaves_bundle_for_shape(&repr, sub)?;
-        let keys = super::shape::leaf_names(sub, key.as_str(), ".");
-        if keys.len() != leaves.len() {
-            return Err(self.gap_here(format!(
-                "`{sname}.{field}` has {} leaf keys but the value produced {} leaves",
-                keys.len(),
-                leaves.len()
-            )));
-        }
-        for (k, v) in keys.into_iter().zip(leaves) {
-            self.write_field(parent, crate::names::ustr(&k), v);
-        }
-        Ok(())
-    }
-
     pub(crate) fn materialize_embed(
         &mut self,
         parent: Idx<Inst>,
@@ -337,14 +277,18 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    pub(crate) fn nobox_embed_group_shape(
+    /// An inline value child sits in its holder as the leaves of its value shape.
+    pub(crate) fn inline_group_shape(
         &self,
         cname: Ustr,
     ) -> Result<Option<ValueShape>, CompilerError> {
-        if !self.is_nobox_struct(cname) {
-            return Ok(None);
+        if self.is_nobox_struct(cname) {
+            return self.nominal_rep_shape(cname, true);
         }
-        self.nominal_rep_shape(cname, true)
+        if self.is_value_struct(cname) {
+            return self.nominal_rep_shape(cname, false);
+        }
+        Ok(None)
     }
 
     pub(crate) fn embed_group(
@@ -367,7 +311,7 @@ impl<'a> Builder<'a> {
         cname: Ustr,
         nullable: bool,
     ) -> Result<ValueRepr, CompilerError> {
-        let Some(shape) = self.nobox_embed_group_shape(cname)? else {
+        let Some(shape) = self.inline_group_shape(cname)? else {
             let value = if nullable {
                 self.materialize_embed_nullable(parent, prefix, cname)?
             } else {
@@ -390,7 +334,7 @@ impl<'a> Builder<'a> {
         cname: Ustr,
         value: Idx<Expr>,
     ) -> Result<Vec<(Ustr, Idx<Inst>)>, CompilerError> {
-        if let Some(shape) = self.nobox_embed_group_shape(cname)? {
+        if let Some(shape) = self.inline_group_shape(cname)? {
             let paths = value_leaf_paths(&shape);
             let repr = self.lower_expr_repr(value)?;
             let leaves = self.repr_to_storage_leaves(&repr, &shape, "embedded value")?;
@@ -483,7 +427,7 @@ impl<'a> Builder<'a> {
     }
 
     pub(crate) fn embed_leaf_paths(&self, cname: Ustr) -> Result<Vec<Ustr>, CompilerError> {
-        if let Some(shape) = self.nobox_embed_group_shape(cname)? {
+        if let Some(shape) = self.inline_group_shape(cname)? {
             return Ok(value_leaf_paths(&shape));
         }
         let mut out = Vec::new();
@@ -522,7 +466,7 @@ impl<'a> Builder<'a> {
             let present = self.emit_cur(Inst::Const(Lit::Bool(true)));
             return Ok((present, leaves));
         }
-        if let Some(mut shape) = self.nobox_embed_group_shape(cname)? {
+        if let Some(mut shape) = self.inline_group_shape(cname)? {
             let paths = value_leaf_paths(&shape);
             shape.nullable = true;
             let bundle = self.lower_expr_repr(value)?;

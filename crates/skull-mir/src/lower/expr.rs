@@ -1609,11 +1609,6 @@ impl<'a> Builder<'a> {
         }
         // An embed leaf write composes to one dotted key on the parent
         // (`h.p.x = 9` -> `h["p.x"] = 9`).
-        if let Some(sname) = self.leaf_table_base(base)?
-            && self.leaf_table_value_child(sname, field)?.is_some()
-        {
-            return self.store_leaf_table_child(b, sname, field, key, value);
-        }
         if let Some(shape) = projected_shape {
             let repr = self.lower_expr_repr(value)?;
             let leaves = self.repr_to_leaves_bundle_for_shape(&repr, &shape)?;
@@ -2183,7 +2178,7 @@ impl<'a> Builder<'a> {
             direct_receiver || (direct.is_some() && self.nobox_value_name(base).is_none());
         let embed = plan.and_then(|p| p.inline_child());
         let group_shape = match embed {
-            Some(name) => self.nobox_embed_group_shape(name)?,
+            Some(name) => self.inline_group_shape(name)?,
             None => None,
         };
         let nullable_child = embed.is_some() && self.embed_read_is_nullable(base, field)?;

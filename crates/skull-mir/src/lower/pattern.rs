@@ -582,7 +582,7 @@ impl<'a> Builder<'a> {
         let ValueRepr::Group { name, present, .. } = repr else {
             return Ok(None);
         };
-        let Some(mut shape) = self.nobox_embed_group_shape(*name)? else {
+        let Some(mut shape) = self.inline_group_shape(*name)? else {
             return Ok(None);
         };
         shape.nullable = present.is_some();
@@ -805,7 +805,7 @@ impl<'a> Builder<'a> {
             }
             _ => return Ok(None),
         };
-        if let Some(mut shape) = self.nobox_embed_group_shape(child)? {
+        if let Some(mut shape) = self.inline_group_shape(child)? {
             shape.nullable = nullable;
             let leaves = self.repr_to_leaves_shape(&repr, &shape)?;
             return Ok(Some(Scrut::Leaves { leaves, shape }));

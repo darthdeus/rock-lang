@@ -682,6 +682,15 @@ impl Drop for ShapeMemoScope {
     }
 }
 
+pub(crate) fn planned_field_is_nested(ws: &Workspace, name: Ustr, field: Ustr) -> bool {
+    planned_value(ws, name).is_some_and(|plan| {
+        plan.shape
+            .fields
+            .iter()
+            .any(|(f, shape)| *f == field && matches!(shape, FieldShape::Nested(_)))
+    })
+}
+
 pub(crate) fn planned_value_contains_flat_enum(ws: &Workspace, name: Ustr) -> bool {
     planned_value(ws, name).is_some_and(|plan| plan.contains_flat_enum)
 }

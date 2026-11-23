@@ -726,19 +726,35 @@ impl Emitter<'_> {
                 format!("{fname} = ")
             };
             expr.push_str(&format!(" + {}", js_string_lit(&label)));
-            let rendered = if let Some((_, vid)) = exact.iter().find(|(f, _)| f == fname) {
-                if let Some(child_name) = nested_field_struct_name(self.ws, name, fname)? {
-                    self.render_value_struct_inspect(child_name, *vid, cyc, prec, &child_indent)?
-                } else {
-                    format!("inspect({}, {cyc}, {prec})", self.render_val(*vid)?)
-                }
-            } else if let Some((_, sub)) = groups.iter().find(|(h, _)| h == fname) {
+            let presence = exact.iter().find(|(f, _)| f == fname).map(|(_, vid)| *vid);
+            let leaves = groups.iter().find(|(h, _)| h == fname);
+            let rendered = if let Some((_, sub)) = leaves {
+                // A nullable inline child arrives as its presence under the field
+                // name plus its dotted leaves.
                 let sub_name = nested_field_struct_name(self.ws, name, fname)?.ok_or_else(|| {
                     err(format!(
                         "value struct `{name}` field `{fname}` arrives as leaves but is not a value struct"
                     ))
                 })?;
-                self.render_value_struct_inspect_fields(sub_name, sub, cyc, prec, &child_indent)?
+                let fields = self.render_value_struct_inspect_fields(
+                    sub_name,
+                    sub,
+                    cyc,
+                    prec,
+                    &child_indent,
+                )?;
+                match presence {
+                    Some(present) => {
+                        format!("({} ? {fields} : \"nil\")", self.render_val(present)?)
+                    }
+                    None => fields,
+                }
+            } else if let Some(vid) = presence {
+                if let Some(child_name) = nested_field_struct_name(self.ws, name, fname)? {
+                    self.render_value_struct_inspect(child_name, vid, cyc, prec, &child_indent)?
+                } else {
+                    format!("inspect({}, {cyc}, {prec})", self.render_val(vid)?)
+                }
             } else {
                 return Err(err(format!(
                     "value struct `{name}` field `{fname}` absent at inspect boundary"

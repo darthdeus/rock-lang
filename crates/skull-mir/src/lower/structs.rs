@@ -325,7 +325,7 @@ impl<'a> Builder<'a> {
                     .map(|key| (crate::names::ustr(key), *value))
             });
             let presence = nullable.then(|| slots.iter().find(|(key, _)| *key == field).unwrap().1);
-            if let Some(shape) = self.nobox_embed_group_shape(child)? {
+            if let Some(shape) = self.inline_group_shape(child)? {
                 let mut repr =
                     Self::rebuild_from_leaves(&shape, &leaves.map(|(_, v)| v).collect::<Vec<_>>());
                 if let ValueRepr::Group { present, .. } = &mut repr {

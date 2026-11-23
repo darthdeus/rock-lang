@@ -313,8 +313,13 @@ pub fn struct_field_plan(
         None
     };
     // Only a cdata parent nests a child whole; a table parent keys an inline
-    // child's leaves by dotted path.
-    if (fdef.is_embed || child.is_some_and(|s| s.is_nobox))
+    // child's leaves by dotted path. Leaf-table storage and a value spliced into
+    // its holder keep every planned nested value in leaves as well.
+    let nested_leaves = parent_is_value
+        && (spliced || parent_storage == Some(ValueStorage::LeafTable))
+        && child.is_some()
+        && super::shape::planned_field_is_nested(ws, sname, field);
+    if (fdef.is_embed || child.is_some_and(|s| s.is_nobox) || nested_leaves)
         && (spliced || !parent_is_value || parent_storage != Some(ValueStorage::CData))
     {
         return Ok(StructFieldPlan::Inline {

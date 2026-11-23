@@ -1,6 +1,7 @@
 // A leaf-table value parent (`LrRow`: a nullable `nobox` sibling keeps it off
 // cdata) keys its plain value child `pos` by the dotted leaves `pos.x`/`pos.y`,
-// never by `pos` itself. Whole and leaf access to `pos` must use those leaves.
+// never by `pos` itself. Whole and leaf access to `pos` must use those leaves,
+// and so must reflection (inspect, typed JSON).
 
 nobox value LrId {
     value: int,
@@ -96,4 +97,30 @@ fn vec_stored_parent() {
     assert_eq(rows[0].pos, LrV2 { x: 1, y: 2 })
     assert_eq(rows[1].tag.unwrap().value, 6)
     assert_eq(lr_sum(rows[1]), 341)
+}
+
+@test
+fn reflection_reads_leaf_children() {
+    let row = LrRow { id: 1, tag: LrId { value: 5 }, pos: LrV2 { x: 2, y: 3 } }
+    assert_eq(inspect(row), "LrRow {{\n  id = 1,\n  pos = LrV2 {{ x = 2, y = 3 }},\n  tag = LrId {{ value = 5 }}\n}}")
+    let codec = JsonRecordCodec {}
+    let wire = json_record_encode(codec, row)
+    assert_eq(json_encode(wire), "{{\"id\":1,\"pos\":{{\"x\":2,\"y\":3}},\"tag\":{{\"value\":5}}}}")
+    assert(json_record_decode(codec, wire, row).unwrap() == row)
+    let bare = LrRow { id: 2, pos: LrV2 { x: 4, y: 5 } }
+    assert_eq(inspect(bare), "LrRow {{\n  id = 2,\n  pos = LrV2 {{ x = 4, y = 5 }},\n  tag = nil\n}}")
+}
+
+// A value spliced into a table holder keeps its own nested values in leaves too.
+value LrWrap { inner: LrV2, k: int }
+value LrBox { name: string, embed w: LrWrap }
+
+@test
+fn embedded_value_writes_nested_leaves() {
+    let b = LrBox { name: "b", w: LrWrap { inner: LrV2 { x: 1, y: 2 }, k: 3 } }
+    b.w.inner.x = 7
+    b.w = LrWrap { inner: LrV2 { x: b.w.inner.x, y: 5 }, k: 6 }
+    b.w.inner.y = b.w.inner.y + 1
+    assert_eq(b.w.inner, LrV2 { x: 7, y: 6 })
+    assert_eq(b.w.k, 6)
 }
