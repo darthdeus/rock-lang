@@ -47,7 +47,10 @@ impl<'a> Builder<'a> {
         let variants = self.scrut_variants(scrut);
         let scrut_enum = self.scrut_enum_name(scrut);
         let scrut_ty = self.concrete_expr_ty(scrut).map(|ty| ty.peel_nullable().0);
-        let scrut_s = self.lower_scrut(scrut)?;
+        let record = arms
+            .into_iter()
+            .any(|arm| self.pattern_destructures_record(self.body.match_arm_arena[arm].pattern));
+        let scrut_s = self.lower_scrut(scrut, record)?;
         let join = self.f.new_block();
 
         // Over a nullable scrutinee, a structural arm must miss on nil before reading
@@ -58,10 +61,8 @@ impl<'a> Builder<'a> {
             let arm = self.body.match_arm_arena[aidx];
             let next = self.f.new_block();
             let matches_null = self.pattern_matches_null(arm.pattern, &variants);
-            if scrut_nullable && !matches_null {
+            if scrut_nullable && !matches_null && !matches!(scrut_s, Scrut::Leaves { .. }) {
                 let value = self.scrut_value(&scrut_s);
-                // The nil test can be skipped after an unguarded null arm, but the flat-box
-                // rebuild is a layout fact and applies on every non-null arm.
                 if nil_possible {
                     let cont = self.f.new_block();
                     self.branch_on_nil(value, next, cont);
@@ -312,6 +313,11 @@ impl<'a> Builder<'a> {
                 fields,
                 ..
             } => {
+                let record = match scrut {
+                    Scrut::Repr { repr, .. } => self.nobox_record_scrut(repr)?,
+                    _ => None,
+                };
+                let scrut = record.as_ref().unwrap_or(scrut);
                 if let Scrut::Leaves { leaves, shape } = scrut {
                     if shape.nullable {
                         self.branch_or_fail(leaves[0], fail);
@@ -418,41 +424,28 @@ impl<'a> Builder<'a> {
                         )?;
                         continue;
                     }
-                    // Embedded children are rebuilt from their parent's leaves.
-                    let embedded = match (name, scrut) {
-                        (Some(sname), Scrut::Val(parent))
-                            if self.ws.nominals.struct_id(sname).is_some() =>
-                        {
-                            let plan = self.struct_field_plan(sname, rpf.name, false)?;
-                            plan.embed()
-                                .map(|(child, _)| (*parent, child, plan.nullable()))
-                        }
-                        _ => None,
+                    let child = if let (true, Some(owner)) = (struct_destructure, name)
+                        && let Some(child) = self.inline_record_field(scrut, owner, rpf.name)?
+                    {
+                        child
+                    } else {
+                        Scrut::Val(self.scrut_named(scrut, rpf.name, cdata)?)
                     };
-                    let fv = match embedded {
-                        Some((parent, child, true)) => {
-                            self.materialize_embed_nullable(parent, rpf.name, child)?
-                        }
-                        Some((parent, child, false)) => {
-                            self.materialize_embed(parent, rpf.name, child)?
-                        }
-                        None => self.scrut_named(scrut, rpf.name, cdata)?,
-                    };
-                    let fv = match self.body.pattern_arena[rpf.pat] {
-                        Pattern::Bind(b)
+                    let child = match (child, self.body.pattern_arena[rpf.pat]) {
+                        (Scrut::Val(v), Pattern::Bind(b))
                             if struct_destructure
                                 && !self.binding_is_ref(b)
                                 && !self.binding_ref_borrowed(b) =>
                         {
                             match self.binding_ty(b).and_then(|ty| self.concrete_ty_id(ty)) {
-                                Some(ty) => self.copied_value_box(ty, fv)?,
-                                None => fv,
+                                Some(ty) => Scrut::Val(self.copied_value_box(ty, v)?),
+                                None => Scrut::Val(v),
                             }
                         }
-                        _ => fv,
+                        (child, _) => child,
                     };
                     self.match_pattern(
-                        &Scrut::Val(fv),
+                        &child,
                         rpf.pat,
                         fail,
                         variants,
@@ -553,7 +546,7 @@ impl<'a> Builder<'a> {
 
     /// A flattened enum field stays a `Scrut::Flat` read from the parent's slots,
     /// with no box.
-    pub(crate) fn lower_scrut(&mut self, e: Idx<Expr>) -> Result<Scrut, CompilerError> {
+    fn lower_scrut(&mut self, e: Idx<Expr>, record: bool) -> Result<Scrut, CompilerError> {
         if let Expr::FieldAccess { base, field } = self.body.expr_arena[e] {
             if let Some(TypeExpr::App {
                 ctor: TypeCtor::Nominal(sname),
@@ -579,7 +572,22 @@ impl<'a> Builder<'a> {
             return Ok(Scrut::Tuple(parts));
         }
         let repr = self.lower_expr_repr(e)?.into_value();
+        if record && let Some(scrut) = self.nobox_record_scrut(&repr)? {
+            return Ok(scrut);
+        }
         self.scrut_from_repr(repr)
+    }
+
+    fn nobox_record_scrut(&mut self, repr: &ValueRepr) -> Result<Option<Scrut>, CompilerError> {
+        let ValueRepr::Group { name, present, .. } = repr else {
+            return Ok(None);
+        };
+        let Some(mut shape) = self.nobox_embed_group_shape(*name)? else {
+            return Ok(None);
+        };
+        shape.nullable = present.is_some();
+        let leaves = self.repr_to_leaves_shape(repr, &shape)?;
+        Ok(Some(Scrut::Leaves { leaves, shape }))
     }
 
     pub(crate) fn scrut_from_repr(&mut self, repr: ValueRepr) -> Result<Scrut, CompilerError> {
@@ -765,6 +773,44 @@ impl<'a> Builder<'a> {
         }
     }
 
+    fn inline_record_field(
+        &mut self,
+        scrut: &Scrut,
+        owner: Ustr,
+        field: Ustr,
+    ) -> Result<Option<Scrut>, CompilerError> {
+        let plan = self.struct_field_plan(owner, field, false)?;
+        if let Scrut::Val(parent) = scrut
+            && let Some(shape) = plan.flat_shape()
+        {
+            return Ok(Some(Scrut::Flat {
+                parent: *parent,
+                prefix: field,
+                shape,
+            }));
+        }
+        let Some((child, nullable)) = plan.embed() else {
+            return Ok(None);
+        };
+        let repr = match scrut {
+            Scrut::Val(parent) => self.load_embed_repr(*parent, field, child, nullable)?,
+            Scrut::Repr {
+                repr: ValueRepr::Group { parts, .. },
+                ..
+            } if self.is_nobox_struct(child) => {
+                let i = self
+                    .field_index(owner, field)
+                    .ok_or_else(|| gap("record pattern field"))?;
+                parts[i].clone()
+            }
+            _ => return Ok(None),
+        };
+        if let Some(scrut) = self.nobox_record_scrut(&repr)? {
+            return Ok(Some(scrut));
+        }
+        self.scrut_from_repr(repr).map(Some)
+    }
+
     /// Tag test. A payload-free enum is its ordinal int; a cdata enum compares
     /// `.__tag` (int); a table enum compares `.__variant` (string); a flattened
     /// field compares its `{prefix}__tag` slot; threaded cells compare the held tag.
@@ -941,11 +987,11 @@ impl<'a> Builder<'a> {
             return self.bind_names_slot(pattern, &RepLayout::Tuple(shape), &slots, &mut 0);
         }
 
-        let scrut = self.lower_scrut(value)?;
+        let scrut = self.lower_scrut(value, self.pattern_destructures_record(pattern))?;
         let variants = self.scrut_variants(value);
         let scrut_enum = self.scrut_enum_name(value);
         let scrut_ty = self.concrete_expr_ty(value).map(|ty| ty.peel_nullable().0);
-        if self.expr_is_nullable(value) {
+        if self.expr_is_nullable(value) && !matches!(scrut, Scrut::Leaves { .. }) {
             let val = self.scrut_value(&scrut);
             let cont = self.f.new_block();
             self.branch_on_nil(val, miss, cont);
@@ -1058,6 +1104,17 @@ impl<'a> Builder<'a> {
             Pattern::Or { alternatives } => alternatives
                 .into_iter()
                 .any(|a| self.pattern_matches_null(a, variants)),
+            _ => false,
+        }
+    }
+
+    fn pattern_destructures_record(&self, pat: Idx<Pattern>) -> bool {
+        match self.body.pattern_arena[pat] {
+            Pattern::Record { .. } => true,
+            Pattern::Newtype { sub, .. } => self.pattern_destructures_record(sub),
+            Pattern::Or { alternatives } => alternatives
+                .into_iter()
+                .any(|p| self.pattern_destructures_record(p)),
             _ => false,
         }
     }
