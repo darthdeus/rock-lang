@@ -363,6 +363,23 @@ pub(crate) fn bone_check_single(path: &str, iters: usize) -> Result<()> {
     Ok(())
 }
 
+/// The test target admits more sources than a shipped build, so a production
+/// file can lean on a test-only helper and still pass the full check.
+fn check_production_subset(sources: &SourceFiles, path: &str) -> Option<Vec<CompilerError>> {
+    let production = match rock_host::source_files::production_only(sources, Path::new(path)) {
+        Ok(production) => production,
+        Err(error) => return Some(vec![error]),
+    };
+    if production.files.len() == sources.files.len() {
+        return None;
+    }
+    let errors = match workspace_frontend_timed(&production).0 {
+        Ok((ws, _)) => body_errors(&ws),
+        Err(errors) => errors,
+    };
+    (!errors.is_empty()).then_some(errors)
+}
+
 fn bone_check_project(path: &str, iters: usize) -> Result<()> {
     let sources = rock_host::compilation_units::load_sources(std::path::Path::new(path))?;
 
@@ -395,6 +412,10 @@ fn bone_check_project(path: &str, iters: usize) -> Result<()> {
                 }
             }
         }
+    }
+
+    if first_err.is_none() {
+        first_err = check_production_subset(&sources, path);
     }
 
     if let Some(errs) = first_err {

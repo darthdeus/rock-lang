@@ -1,4 +1,4 @@
-use crate::support::{invoke, repo_root, rock, success, text, write_files};
+use crate::support::{failure, invoke, repo_root, rock, success, text, write_files};
 
 fn project(files: &[(&str, &str)]) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
@@ -118,4 +118,35 @@ fn package_test_program_reflects_nobox_globals_by_logical_value() {
         text.contains("1/1 @tests passed"),
         "expected one passing test:\n{text}"
     );
+}
+
+#[test]
+fn check_rejects_production_sources_that_use_test_only_helpers() {
+    let dir = project(&[
+        ("main.rock", "fn main() { print(helper()) }"),
+        ("tests/helpers.rock", "pub fn helper() -> int { 7 }"),
+        (
+            "tests/check.rock",
+            "@test fn check() { assert(helper() == 7) }",
+        ),
+    ]);
+    assert!(
+        success(invoke(dir.path(), &["test", "."])).contains("1/1 @tests passed"),
+        "the test target admits the helper"
+    );
+    failure(invoke(dir.path(), &["check", "."]), "helper");
+    failure(invoke(dir.path(), &["compile", "."]), "helper");
+}
+
+#[test]
+fn check_accepts_tests_that_use_their_own_helpers() {
+    let dir = project(&[
+        ("lib.rock", "pub fn api() -> int { 7 }"),
+        ("tests/helpers.rock", "pub fn helper() -> int { api() }"),
+        (
+            "tests/check.rock",
+            "@test fn check() { assert(helper() == 7) }",
+        ),
+    ]);
+    success(invoke(dir.path(), &["check", "."]));
 }
