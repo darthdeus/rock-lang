@@ -85,3 +85,7 @@ bundled-sdl2 = ["sdl2/bundled", "sdl2/static-link"]
 
 [build-dependencies]
 gamelibs = { workspace = true }
+
+[[test]]
+name = "graphics_capture"
+harness = false

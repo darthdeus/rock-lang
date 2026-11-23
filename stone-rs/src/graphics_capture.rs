@@ -140,7 +140,7 @@ unsafe fn record(gl: &DebugGl, operation: &str, arguments: &[i64]) {
             gl.active_texture(glow::TEXTURE0 + unit as u32);
             let texture = gl.get_parameter_i32(glow::TEXTURE_BINDING_2D) as u32;
             if texture == 0 { continue; }
-            let sampler = gl.get_parameter_indexed_i32(glow::SAMPLER_BINDING, unit as u32);
+            let sampler = gl.get_parameter_i32(glow::SAMPLER_BINDING);
             let width = gl.get_tex_level_parameter_i32(glow::TEXTURE_2D, 0, glow::TEXTURE_WIDTH);
             let height = gl.get_tex_level_parameter_i32(glow::TEXTURE_2D, 0, glow::TEXTURE_HEIGHT);
             let format = gl.get_tex_level_parameter_i32(glow::TEXTURE_2D, 0, glow::TEXTURE_INTERNAL_FORMAT);
@@ -227,6 +227,7 @@ unsafe fn snapshot(
     let depth = [
         glow::DEPTH_COMPONENT16 as i32,
         glow::DEPTH_COMPONENT24 as i32,
+        glow::DEPTH_COMPONENT32 as i32,
         glow::DEPTH_COMPONENT32F as i32,
     ]
     .contains(&format);
