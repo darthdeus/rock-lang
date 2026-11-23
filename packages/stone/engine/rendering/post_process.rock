@@ -531,28 +531,10 @@ fn present_composite(target: GpuTarget = GpuTarget::Window) {
 global PRESENT_COMPOSITE_COMMAND: GpuPass? = null
 
 fn present_composite_command(target: GpuTarget, source: Canvas, viewport: GpuRect) -> GpuPass {
-    let retained = gpu_submission_retains_commands()
-    let pass = if !retained && PRESENT_COMPOSITE_COMMAND != null {
-        PRESENT_COMPOSITE_COMMAND
-    } else {
-        let draw = GpuDraw {
-            shader: PRESENT_PIPELINE.shader_name,
-            bindings: [GpuBinding { slot: 0, resource: SampledTexture::Canvas(source), filter: TextureFilter::Linear }],
-            blend: BlendMode::Replace,
-            color_write: GPU_WRITE_RGBA,
-        }
-        GpuPass {
-            target: target,
-            load: GpuLoad::Load,
-            viewport: viewport,
-            draws: [draw],
-        }
-    }
-    if !retained { PRESENT_COMPOSITE_COMMAND = pass }
-    pass.target = target
-    pass.viewport = viewport
-    let draw = pass.draws[0]
-    draw.shader = PRESENT_PIPELINE.shader_name
-    draw.bindings[0].resource = SampledTexture::Canvas(source)
+    let reusable = !gpu_submission_retains_commands()
+    let cached = if reusable { PRESENT_COMPOSITE_COMMAND } else { null }
+    let pass = gpu_single_texture_command(cached, target, viewport,
+        source, PRESENT_PIPELINE.shader_name, TextureFilter::Linear, BlendMode::Replace)
+    if reusable && cached == null { PRESENT_COMPOSITE_COMMAND = pass }
     return pass
 }

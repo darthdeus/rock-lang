@@ -23,7 +23,7 @@
 // A destination rectangle in drawable pixels, bottom-left origin (GL's
 // viewport convention). Semantic because it is where the draw LANDS, not how a backend
 // spells it.
-pub value GpuRect { x: int, y: int, w: int, h: int }
+pub nobox value GpuRect { x: int, y: int, w: int, h: int }
 
 // Where a pass writes. A canvas is named by its `Canvas` handle, which the
 // registry resolves; no GL name, texture id or FBO reaches this contract.
@@ -189,6 +189,28 @@ pub fn gpu_trace_take() -> [GpuTracedPass] {
 // reuse unpublished commands only when this is false.
 pub @noalloc fn gpu_submission_retains_commands() -> bool {
     return GPU_TRACE_ON || UI_SUBMISSION_PROBE_ON || ENGINE.show_pipeline_inspector
+}
+
+@inline fn gpu_single_texture_command(cached: GpuPass?, target: GpuTarget, viewport: GpuRect,
+    source: Canvas, shader: string, filter: TextureFilter, blend: BlendMode) -> GpuPass {
+    // Each caller keeps a separate cache with a fixed sampler and blend.
+    if let pass = cached {
+        pass.target = target
+        pass.viewport = viewport
+        let draw = pass.draws[0]
+        draw.shader = shader
+        draw.bindings[0].resource = SampledTexture::Canvas(source)
+        return pass
+    }
+    return GpuPass {
+        target,
+        load: GpuLoad::Load,
+        viewport,
+        draws: [GpuDraw {
+            shader, blend, color_write: GPU_WRITE_RGBA,
+            bindings: [GpuBinding { slot: 0, resource: SampledTexture::Canvas(source), filter }],
+        }],
+    }
 }
 
 // The one entry point. Validate, optionally resolve and record, then execute,

@@ -76,8 +76,9 @@ fn ui_blit_test_refusal_and_retry() {
         let refusal = ""
         let refusals = 0
         let executed = 0
+        let observed: GpuPass? = null
         UI_SUBMISSION_PROBE_ON = true
-        UI_SUBMISSION_PROBE_PASS_HOOK = (_pass) => {}
+        UI_SUBMISSION_PROBE_PASS_HOOK = (pass) => { observed = pass }
         UI_SUBMISSION_PROBE_DRAW_HOOK = (draw, _geometry) => {
             executed += 1
             assert_eq(draw.blend, BlendMode::Alpha)
@@ -115,6 +116,11 @@ fn ui_blit_test_refusal_and_retry() {
                     "pixel {x},{y}: expected {expected}, got {actual[(y * 8 + x) * 4]}")
             }
         }
+        let retained = observed.unwrap()
+        UI_SUBMISSION_PROBE_ON = false
+        valid.drawable_size = iv(4, 8)
+        composite_scaled_ui(GpuTarget::Canvas(out))
+        assert_eq(retained.viewport.w, 8, "an unobserved blit leaves the probe's submission intact")
     })
 }
 
@@ -182,4 +188,32 @@ fn ui_blit_fixture_restores_after_assertion_failure() {
     assert(!canvas_is_live(source.unwrap()) && !canvas_is_live(target.unwrap()), "fixture releases both canvases")
     assert(stone_gpu_host_ensure(), "failure leaves the process GPU host usable")
     ui_blit_test_refusal_and_retry()
+}
+
+fn ui_blit_warmed_allocations(target: GpuTarget) -> (float, int) {
+    __gc_collect_stop()
+    stone_lua_counter_install()
+    stone_lua_counter_begin()
+    let kb0 = lua_alloc_gross_request_kb()
+    let calls0 = lua_alloc_allocation_call_count()
+    for _ in 0..128 { composite_scaled_ui(target) }
+    let kb = lua_alloc_gross_request_kb() - kb0
+    let calls = lua_alloc_allocation_call_count() - calls0
+    stone_lua_counter_end()
+    __gc_restart()
+    return (kb, calls)
+}
+
+@test
+fn ui_blit_reuses_unobserved_command() {
+    ui_blit_test_fixture((_src, out) => {
+        let inspector = ENGINE.show_pipeline_inspector
+        ENGINE.show_pipeline_inspector = false
+        defer { ENGINE.show_pipeline_inspector = inspector }
+        let target = GpuTarget::Canvas(out)
+        let _ = ui_blit_warmed_allocations(target)
+        let (kb, calls) = ui_blit_warmed_allocations(target)
+        assert(kb < 16.0 && calls < 256,
+            "scaled UI reuses its warmed command: {kb} KiB, {calls} allocations")
+    })
 }

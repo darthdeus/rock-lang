@@ -86,7 +86,8 @@ fn present_command_warmed_allocation_rule() {
         let kb = min(kb_a, kb_b)
         let calls = min(calls_a, calls_b)
         log_info("PERF", "PRESENT_COMMAND operations=1024 kb={kb} calls={calls}")
-        assert(kb < 256.0, "warmed presentation avoids rebuilding command containers: {kb} KiB")
+        assert(kb < 8.0 && calls < 64,
+            "warmed presentation keeps the viewport in the retained command: {kb} KiB, {calls} allocations")
     })
 }
 

@@ -204,27 +204,16 @@ fn render_scaled_ui_batches(pool: RenderBatchPool = UI_RENDER_BATCHES) {
     unset_canvas()
 }
 
-fn submit_ui_blit(src: Canvas, target: GpuTarget, blend: BlendMode) {
+global UI_BLIT_COMMAND: GpuPass? = null
+
+fn submit_ui_blit(src: Canvas, target: GpuTarget) {
     let view = RENDER_VIEW ?? return
-    let pass = GpuPass {
-        target: target,
-        load: GpuLoad::Load,
-        viewport: GpuRect { x: 0, y: 0, w: view.drawable_size.x, h: view.drawable_size.y },
-        draws: [
-            GpuDraw {
-                shader: BLIT_PIPELINE.shader_name,
-                bindings: [
-                    GpuBinding {
-                        slot: 0,
-                        resource: SampledTexture::Canvas(src),
-                        filter: TextureFilter::Nearest,
-                    }
-                ],
-                blend: blend,
-                color_write: GPU_WRITE_RGBA,
-            }
-        ],
-    }
+    let reusable = !gpu_submission_retains_commands()
+    let cached = if reusable { UI_BLIT_COMMAND } else { null }
+    let pass = gpu_single_texture_command(cached, target,
+        GpuRect { x: 0, y: 0, w: view.drawable_size.x, h: view.drawable_size.y },
+        src, BLIT_PIPELINE.shader_name, TextureFilter::Nearest, BlendMode::Alpha)
+    if reusable && cached == null { UI_BLIT_COMMAND = pass }
     if !submit_pass(pass) {
         let reason = gpu_pass_rejection(pass)
         error("submit_ui_blit: UI blit submission failed: {reason}")
@@ -233,7 +222,7 @@ fn submit_ui_blit(src: Canvas, target: GpuTarget, blend: BlendMode) {
 
 fn composite_scaled_ui(target: GpuTarget) {
     let src = UI_RASTER_CANVAS ?? return
-    submit_ui_blit(src, target, BlendMode::Alpha)
+    submit_ui_blit(src, target)
 }
 
 pub fn scene_target(existing: Canvas, rw: int, rh: int, format: string, with_depth: bool) -> Canvas {
