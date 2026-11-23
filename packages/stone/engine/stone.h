@@ -75,7 +75,6 @@ uint8_t stone_pad_connected(void);
 const char* stone_pad_type_name(void);
 StoneWindow* stone_create_window_ex(const char* title, int x, int y, int width, int height, int display, bool resizable, int fullscreen);
 StoneWindow* stone_gpu_host_acquire(void);
-const char* stone_sdl_video_driver(void);
 unsigned long long stone_gl_swap_count(void);
 uint8_t stone_poll_event(StoneEvent* event);
 void stone_start_text_input(void);

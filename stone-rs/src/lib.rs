@@ -1161,13 +1161,6 @@ pub extern "C" fn stone_init() -> bool {
     true
 }
 
-/// SDL's current video driver name (e.g. "x11", "offscreen"), for sims that
-/// skip what the offscreen driver cannot do.
-#[no_mangle]
-pub extern "C" fn stone_sdl_video_driver() -> *const c_char {
-    unsafe { sdl2::sys::SDL_GetCurrentVideoDriver() as *const c_char }
-}
-
 /// Request quit after the current frame, keeping its window and GL context alive.
 #[no_mangle]
 pub extern "C" fn stone_quit() {
