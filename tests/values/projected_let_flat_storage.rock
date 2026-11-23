@@ -1,0 +1,45 @@
+value Leaf { a: int, b: string }
+value Middle { k: int, l: Leaf }
+nobox value Parent { m: Middle, t: float }
+nobox value MaybeParent { m: Middle?, t: float }
+value TupleLeaf { a: int, pair: (int, string) }
+value TupleMiddle { l: TupleLeaf, k: int }
+nobox value TupleParent { m: TupleMiddle, t: float }
+
+fn middle() -> Middle { return Middle { k: 1, l: Leaf { a: 2, b: "x" } } }
+
+@test fn projected_let_from_vec() {
+    let v = [Parent { m: middle(), t: 4.0 }]
+    let l = v[0].m.l
+    v[0].m.l.a = 9
+    assert_eq(l.a, 2)
+}
+
+@test fn projected_let_from_map() {
+    let m: Map<int, Parent> = map_new()
+    m[1] = Parent { m: middle(), t: 4.0 }
+    let l = m[1].m.l
+    assert_eq(l.a, 2)
+}
+
+@test fn projected_let_through_nullable_field() {
+    let v = [MaybeParent { m: middle(), t: 4.0 }]
+    let l = v[0].m.unwrap().l
+    assert_eq(l.a, 2)
+}
+
+@test fn projected_let_with_tuple_field() {
+    let v = [TupleParent { m: TupleMiddle { l: TupleLeaf { a: 2, pair: (3, "x") }, k: 1 }, t: 4.0 }]
+    let l = v[0].m.l
+    assert(l.a == 2 && l.pair.0 == 3 && l.pair.1 == "x")
+}
+
+fn projected_ref(parent: ref Parent) -> int {
+    let l = parent.m.l
+    return l.a
+}
+
+@test fn projected_let_from_flat_ref() {
+    let v = [Parent { m: middle(), t: 4.0 }]
+    assert_eq(projected_ref(v[0]), 2)
+}

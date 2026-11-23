@@ -80,8 +80,8 @@ impl<'a> Builder<'a> {
         }
         // Constructors and control flow keep their normal eager evaluation. A source
         // binding already held in leaves has no box to read.
-        let place = match self.body.expr_arena[value] {
-            Expr::Var(b) => !self.group_binds.contains_key(&raw(b)),
+        match self.body.expr_arena[value] {
+            Expr::Var(b) if !self.group_binds.contains_key(&raw(b)) => {}
             Expr::FieldAccess { base, field } => {
                 if self.physical_field_layout(base, field)?.2.is_some() {
                     return Ok(false);
@@ -90,16 +90,21 @@ impl<'a> Builder<'a> {
                 while let Expr::FieldAccess { base, .. } = self.body.expr_arena[root] {
                     root = base;
                 }
-                if matches!(self.body.expr_arena[root], Expr::Var(b) if self.group_binds.contains_key(&raw(b)))
-                {
-                    return Ok(false);
+                match self.body.expr_arena[root] {
+                    Expr::Var(b) if self.group_binds.contains_key(&raw(b)) => return Ok(false),
+                    Expr::Var(b) if self.flat_ref_binds.contains_key(&raw(b)) => return Ok(false),
+                    Expr::Index { base, .. } if self.flat_stored_container(base)? => {
+                        return Ok(false);
+                    }
+                    Expr::Call { .. } | Expr::SafeNavCall { .. }
+                        if self.expr_is_value_struct(root) =>
+                    {
+                        return Ok(false);
+                    }
+                    _ => {}
                 }
-                true
             }
             _ => return Ok(false),
-        };
-        if matches!(self.body.expr_arena[value], Expr::Var(_)) && !place {
-            return Ok(false);
         }
         let expanded = super::abi::expanded_nullable_parameter_shape(self.ws, &shape);
         for (field, kind) in &expanded.fields {
