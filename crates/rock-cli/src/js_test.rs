@@ -190,7 +190,11 @@ fn js_run_tests(
     // loaded. Missing/short markers = the emitted JS itself is bad (a backend
     // bug), surfaced with the program for diagnosis -- never silently absorbed.
     let markers = match parse_skull_markers(&run.stdout) {
-        Some(m) if m.passed + m.fails.len() + m.values.len() == meta.len() => m,
+        Some(m)
+            if run.status.success() && m.passed + m.fails.len() + m.values.len() == meta.len() =>
+        {
+            m
+        }
         _ if run.stderr.contains("Maximum call stack size exceeded") => {
             return Err(UnitFailure {
                 reason: "emitted program too deeply nested for node's parser".to_string(),
@@ -199,7 +203,11 @@ fn js_run_tests(
         }
         _ => {
             return Err(UnitFailure::new(
-                "invalid JS emitted (js backend bug)",
+                if run.status.success() {
+                    "invalid JS emitted (js backend bug)".to_string()
+                } else {
+                    format!("node test process failed: {}", run.status)
+                },
                 format!(
                     "stdout:\n{}\nstderr:\n{}\n\n--- emitted js (truncated) ---\n{}",
                     run.stdout,

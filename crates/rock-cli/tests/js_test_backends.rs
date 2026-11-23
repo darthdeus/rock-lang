@@ -147,6 +147,28 @@ fn mismatched_value() -> int { return 42 }
     );
 }
 
+#[test]
+fn passing_markers_do_not_hide_a_failed_node_exit() {
+    if !crate::support::require_node() {
+        return;
+    }
+    let (ok, text) = rock_test_source(
+        r#"
+inline(js) fn mark_process_failed() = "process.exitCode = 23;"
+
+@test fn reports_a_pass_before_process_exit() {
+    mark_process_failed()
+}
+"#,
+        &["--backend", "js"],
+    );
+    assert!(!ok, "{text}");
+    assert!(
+        text.contains("node test process failed: exit status: 23"),
+        "{text}"
+    );
+}
+
 #[cfg(not(feature = "sequential"))]
 #[test]
 fn concurrent_js_files_keep_verdicts_when_a_node_exits() {

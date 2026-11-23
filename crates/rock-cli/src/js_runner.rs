@@ -10,9 +10,10 @@ use std::time::Duration;
 
 /// One node run's outcome. Unlike `lua_runner`, stderr stays separate: the JS
 /// executor's protocol lives on stdout and its error reports quote stderr
-/// verbatim. There is no exit status: the harness catches every test, so the
-/// stdout markers alone decide the outcome.
+/// verbatim. The harness catches test failures, so a nonzero status is a
+/// failure of the test process itself.
 pub(crate) struct NodeRun {
+    pub status: std::process::ExitStatus,
     pub stdout: String,
     pub stderr: String,
 }
@@ -74,6 +75,7 @@ pub(crate) fn run_node_code_with_timeout(
         )));
     }
     Ok(NodeRun {
+        status: run.output.status,
         stdout: String::from_utf8_lossy(&run.output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&run.output.stderr).into_owned(),
     })
