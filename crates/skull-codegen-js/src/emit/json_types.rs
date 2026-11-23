@@ -295,34 +295,41 @@ fn shape_js(shape: &Shape, extra: &str) -> String {
     }
 }
 
-fn variant_js(entry: &VariantEntry) -> String {
+pub(super) fn variant_js(entry: &VariantEntry) -> String {
     match entry {
         VariantEntry::Positional(positions) => {
-            let positions = positions
-                .iter()
-                .map(|p| {
-                    let mut extra = String::new();
-                    if let Some(slot) = p.slot {
-                        extra.push_str(&format!(", slot: {slot}"));
-                    }
-                    if let Some(leaves) = &p.leaves {
-                        extra.push_str(&format!(", leaves: {}", strings_js(leaves)));
-                    }
-                    shape_js(p.shape.as_ref().unwrap_or(&Shape::Prim("any")), &extra)
-                })
-                .collect::<Vec<_>>();
+            let positions = positions.iter().map(payload_js).collect::<Vec<_>>();
             format!("{{pos: [{}]}}", positions.join(", "))
         }
         VariantEntry::Named(fields) => {
             let fields = fields
                 .iter()
-                .map(|(name, shape)| {
-                    format!("{}: {}", js_string_lit(name.as_str()), shape_js(shape, ""))
+                .map(|(name, position)| {
+                    format!("{}: {}", js_string_lit(name.as_str()), payload_js(position))
                 })
                 .collect::<Vec<_>>();
             format!("{{named: {{{}}}}}", fields.join(", "))
         }
     }
+}
+
+fn payload_js(p: &skull_mir::type_table::PositionEntry) -> String {
+    let mut extra = String::new();
+    if let Some(slot) = p.slot {
+        extra.push_str(&format!(", slot: {slot}"));
+    }
+    if let Some(leaves) = &p.leaves {
+        extra.push_str(&format!(", leaves: {}", strings_js(leaves)));
+    }
+    if !p.presence.is_empty() {
+        let presence = p
+            .presence
+            .iter()
+            .map(|i| format!("{i}: true"))
+            .collect::<Vec<_>>();
+        extra.push_str(&format!(", presence: {{{}}}", presence.join(", ")));
+    }
+    shape_js(p.shape.as_ref().unwrap_or(&Shape::Prim("any")), &extra)
 }
 
 fn field_js(f: &FieldEntry) -> String {

@@ -1,0 +1,178 @@
+nobox value Place {
+    x: int,
+    y: int,
+}
+
+enum Receipt {
+    Probe(int, Place?),
+}
+
+fn make_receipt(pad: Place?) -> Receipt {
+    return Receipt::Probe(1, pad)
+}
+
+@test fn optional_place_in_receipt() {
+    let receipt = make_receipt(Place { x: 7, y: 8 })
+    match receipt {
+        Receipt::Probe(_, pad) => assert(pad?.x == 7),
+    }
+}
+
+nobox value ZoneKey { value: int }
+
+nobox value Location {
+    space: ZoneKey,
+    enabled: bool,
+}
+
+enum Step {
+    Move(Location),
+    Wait,
+}
+
+enum Result {
+    Probe(Step, Location?, int),
+    Required(Step, Location, int),
+    Named { where_at: Location?, trailing: int },
+    NamedRequired { where_at: Location, trailing: int },
+}
+
+fn make_result<T>(step: Step, pad: Location?, _witness: T) -> Result {
+    return Result::Probe(step, pad, 9)
+}
+
+fn score(result: Result) -> int {
+    return match result {
+        Result::Probe(Step::Wait, null, trailing) => trailing,
+        Result::Probe(Step::Move(at), pad, trailing) =>
+            if pad?.enabled == false { at.space.value + (pad?.space?.value ?? 0) + trailing }
+            else { -1 },
+        Result::Probe(_, _, _) => -2,
+        Result::Required(_, Location { space: ZoneKey { value }, .. }, trailing) => value + trailing,
+        Result::Named { where_at, trailing } => (where_at?.space?.value ?? 0) + trailing,
+        Result::NamedRequired { where_at, trailing } => where_at.space.value + trailing,
+    }
+}
+
+@test fn nested_payload_in_generic_constructor() {
+    let at = Location { space: ZoneKey { value: 7 }, enabled: false }
+    let present = make_result(Step::Move(at), at, "specialize")
+    let absent = make_result(Step::Wait, null, 0)
+    assert_eq(score(present), 23)
+    assert_eq(score(absent), 9)
+    assert(present == Result::Probe(Step::Move(at), at, 9))
+    assert(absent == Result::Probe(Step::Wait, null, 9))
+    assert(present != Result::Probe(Step::Move(at), null, 9))
+    assert_eq(score(Result::Required(Step::Wait, at, 5)), 12)
+    assert_eq(score(Result::Named { where_at: at, trailing: 5 }), 12)
+    assert_eq(score(Result::Named { where_at: null, trailing: 5 }), 5)
+    assert_eq(score(Result::NamedRequired { where_at: at, trailing: 5 }), 12)
+    assert_eq(tostring(present), "Result::Probe(Step::Move(Location {{ space: ZoneKey {{ value: 7 }}, enabled: false }}), Location {{ space: ZoneKey {{ value: 7 }}, enabled: false }}, 9)")
+}
+
+@test fn inspect_shows_payload_fields_and_absence() {
+    let present = make_receipt(Place { x: 0, y: 8 })
+    let absent = make_receipt(null)
+    assert_eq(inspect(present), "Receipt::Probe {{\n  [1] = 1,\n  [2].x = 0,\n  [2].y = 8\n}}")
+    assert_eq(inspect(absent), "Receipt::Probe {{ [1] = 1, [2] = nil }}")
+    let at = Location { space: ZoneKey { value: 7 }, enabled: false }
+    let named = Result::Named { where_at: at, trailing: 9 }
+    assert(inspect(named).contains("where_at.space.value = 7"))
+    assert(inspect(named).contains("where_at.enabled = false"))
+}
+
+enum Bookmark {
+    Point(Location?, int),
+    Plain(int, int),
+}
+
+@test fn optional_payload_typed_json_round_trip() {
+    let codec = JsonRecordCodec {}
+    let at = Location { space: ZoneKey { value: 7 }, enabled: false }
+    let a = Bookmark::Point(at, 9)
+    let b = Bookmark::Point(null, 9)
+    let wa = json_record_encode(codec, a)
+    let wb = json_record_encode(codec, b)
+    assert_eq(json_encode(wa), "[\"Point\",{{\"enabled\":false,\"space\":{{\"value\":7}}}},9]")
+    assert_eq(json_encode(wb), "[\"Point\",null,9]")
+    assert(json_record_decode(codec, wa, a).unwrap() == a)
+    assert(json_record_decode(codec, wb, a).unwrap() == b)
+}
+
+@noalloc fn inspect_receipt_leaves(pad: Place?) -> int {
+    let receipt = Receipt::Probe(1, pad)
+    return match receipt {
+        Receipt::Probe(index, point) => index + (point?.x ?? 0),
+    }
+}
+
+@test fn optional_payload_stays_scalar_in_a_local_match() {
+    assert_eq(inspect_receipt_leaves(Place { x: 7, y: 8 }), 8)
+    assert_eq(inspect_receipt_leaves(null), 1)
+}
+
+nobox value Marker {}
+
+enum MarkerResult {
+    Maybe(Marker?, Marker),
+    Counts(int, int),
+}
+
+fn marker_score(result: MarkerResult) -> int {
+    return match result {
+        MarkerResult::Maybe(marker, _) => if marker == null { 0 } else { 1 },
+        MarkerResult::Counts(first, second) => first + second,
+    }
+}
+
+@test fn zero_leaf_payload_leaves_room_for_presence_and_sibling_slots() {
+    assert_eq(marker_score(MarkerResult::Maybe(Marker {}, Marker {})), 1)
+    assert_eq(marker_score(MarkerResult::Maybe(null, Marker {})), 0)
+    assert_eq(marker_score(MarkerResult::Counts(2, 3)), 5)
+}
+
+nobox value SavedLocation { location: Location? }
+
+enum CacheEntry { Cached(SavedLocation?) }
+
+@test fn nested_presence_survives_serialization() {
+    let codec = JsonRecordCodec {}
+    let entry = CacheEntry::Cached(SavedLocation { location: null })
+    assert_eq(inspect(entry), "CacheEntry::Cached {{ [1].location = nil }}")
+    let json = json_record_encode(codec, entry)
+    assert_eq(json_encode(json), "[\"Cached\",{{\"location\":null}}]")
+    assert(json_record_decode(codec, json, entry).unwrap() == entry)
+    let absent = CacheEntry::Cached(null)
+    assert(json_record_decode(codec, json_record_encode(codec, absent), entry).unwrap() == absent)
+}
+
+enum RequiredLocation { Saved(SavedLocation) }
+
+fn save_location(location: Location?) -> RequiredLocation {
+    return RequiredLocation::Saved(SavedLocation { location })
+}
+
+@test fn required_payload_preserves_nested_absence() {
+    let codec = JsonRecordCodec {}
+    let entry = save_location(null)
+    assert_eq(inspect(entry), "RequiredLocation::Saved {{ [1].location = nil }}")
+    let json = json_record_encode(codec, entry)
+    assert_eq(json_encode(json), "[\"Saved\",{{\"location\":null}}]")
+    assert(json_record_decode(codec, json, entry).unwrap() == entry)
+}
+
+nobox value PathNode { index: int, next: Path? }
+enum Path { End, Link(PathNode?) }
+
+fn link(node: PathNode?) -> Path { return Path::Link(node) }
+
+@test fn recursive_enum_reference_remains_a_payload_leaf() {
+    let path = link(PathNode { index: 7, next: Path::End })
+    match path {
+        Path::Link(node) => {
+            assert_eq(node?.index, 7)
+            assert(node?.next == Path::End)
+        },
+        Path::End => assert(false),
+    }
+}

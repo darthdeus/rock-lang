@@ -340,17 +340,34 @@ impl<'a> Builder<'a> {
                         && flat_enum_equality_is_leafwise(self.ws, lhs_shape.name)
                     {
                         let lhs_repr = self.lower_expr_repr(lhs)?;
-                        let lhs_leaves = self.repr_to_storage_leaves(
+                        let mut lhs_leaves = self.repr_to_storage_leaves(
                             &lhs_repr,
                             &lhs_shape,
                             "flat enum equality",
                         )?;
                         let rhs_repr = self.lower_expr_repr(rhs)?;
-                        let rhs_leaves = self.repr_to_storage_leaves(
+                        let mut rhs_leaves = self.repr_to_storage_leaves(
                             &rhs_repr,
                             &rhs_shape,
                             "flat enum equality",
                         )?;
+                        // A boxed enum omits absent fields. JS loads these as
+                        // undefined, while the scalar ABI passes null.
+                        if self.scx.target() == bone_core::hir::FnBackend::Js
+                            && EnumPlan::for_name(self.ws, lhs_shape.name).is_some_and(|plan| {
+                                plan.flat()
+                                    .is_some_and(|flat| flat.has_inline_record_payload(self.ws))
+                            })
+                        {
+                            for value in lhs_leaves.iter_mut().chain(&mut rhs_leaves) {
+                                let missing = self.is_nil(*value);
+                                let present = self.emit_cur(Inst::Not(missing));
+                                *value = self.emit_cur(Inst::MakeNullableValue {
+                                    present,
+                                    value: *value,
+                                });
+                            }
+                        }
                         let equal = self.emit_all_equal(&lhs_leaves, &rhs_leaves);
                         return Ok(if matches!(op, BinOp::Eq) {
                             equal

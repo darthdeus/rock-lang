@@ -1986,6 +1986,43 @@ const EPSILON: float = 0.0000001
     return names
 """
 // Hoisted recursion avoids per-call closures and LuaJIT FNEW aborts.
+// Use declared positions for widened payloads. Presence lanes are storage,
+// while a null payload is still a logical field.
+@nomangle inline(lua) fn __rock_inline_payload_view(t: any, variant: any) -> (any, any) = """
+    local keys, values = {}, {}
+    local function add(key, value)
+        keys[#keys + 1], values[key] = key, value
+    end
+    local function payload(key, name, p)
+        local slot = p.slot or key
+        if not p.leaves then return add(name, t[slot]) end
+        if p.k == "opt" then
+            if not t[slot] then return add(name, nil) end
+            slot = type(slot) == "number" and slot + 1 or slot
+        end
+        local absent
+        for i, path in ipairs(p.leaves) do
+            if not absent or path:sub(1, #absent) ~= absent then
+                local label = name .. "." .. path
+                local value = t[type(slot) == "number" and slot + i - 1 or label]
+                absent = nil
+                if p.presence and p.presence[i] then
+                    if not value then
+                        add(label, nil)
+                        absent = path .. "."
+                    end
+                else add(label, value) end
+            end
+        end
+    end
+    if variant.pos then
+        for i, p in ipairs(variant.pos) do payload(i, "[" .. i .. "]", p) end
+    else
+        for name, p in pairs(variant.named) do payload(name, name, p) end
+    end
+    return keys, values
+"""
+
 @nomangle inline(lua) fn __rock_inspect_value(v: any, indent: string, path: string, visited: any, precision: int) -> string = """
     local vt = type(v)
     if vt == "cdata" then
@@ -2100,10 +2137,12 @@ const EPSILON: float = 0.0000001
         end
         -- A flat-enum box widens value payloads into positional slots; name
         -- the leaves from the variant descriptor when the walk is exact.
-        local payload_names = nil
+        local payload_names, payload_values = nil, nil
         if t.__variant and decl and decl.variant_desc then
             local vd = decl.variant_desc[t.__variant]
-            if vd and vd.pos then
+            if vd and vd.inline then
+                keys, payload_values = __rock_inline_payload_view(t, vd)
+            elseif vd and vd.pos then
                 payload_names = __rock_enum_payload_names(keys, vd.pos)
             end
         end
@@ -2135,6 +2174,7 @@ const EPSILON: float = 0.0000001
                 local key_str = type(dk) == "string" and dk or ("[" .. tostring(dk) .. "]")
                 local v = t[slots and slots[k] or k]
                 if embed_vals and embed_vals[k] ~= nil then v = embed_vals[k] end
+                if payload_values then v = payload_values[k] end
                 parts[i] = key_str .. " = " .. __rock_inspect_value(v, indent, path .. "." .. tostring(dk), visited, precision)
             end
             if header ~= "" then
@@ -2150,6 +2190,7 @@ const EPSILON: float = 0.0000001
                 local key_str = type(dk) == "string" and dk or ("[" .. tostring(dk) .. "]")
                 local v = t[slots and slots[k] or k]
                 if embed_vals and embed_vals[k] ~= nil then v = embed_vals[k] end
+                if payload_values then v = payload_values[k] end
                 lines[#lines + 1] = indent .. "  " .. key_str .. " = " .. __rock_inspect_value(v, indent .. "  ", path .. "." .. tostring(dk), visited, precision)
             end
             local body = table.concat(lines, ",\n")

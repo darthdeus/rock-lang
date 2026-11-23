@@ -1744,6 +1744,11 @@ fn shape_lua_string(shape: &skull_mir::type_table::Shape) -> String {
 
 fn variant_lua(entry: &skull_mir::type_table::VariantEntry) -> String {
     use skull_mir::type_table::VariantEntry;
+    let inline = if entry.has_inline_record_payload() {
+        ",inline=true"
+    } else {
+        ""
+    };
     match entry {
         VariantEntry::Positional(positions) if positions.is_empty() => "pos={}".to_string(),
         VariantEntry::Positional(positions) => {
@@ -1758,28 +1763,47 @@ fn variant_lua(entry: &skull_mir::type_table::VariantEntry) -> String {
                     if let Some(slot) = p.slot {
                         d.pop();
                         d.push_str(&format!(",slot={}", slot + 1));
-                        if let Some(paths) = &p.leaves {
-                            let paths = paths
-                                .iter()
-                                .map(|path| format!("{:?}", path.as_str()))
-                                .collect::<Vec<_>>()
-                                .join(",");
-                            d.push_str(&format!(",leaves={{{paths}}}"));
-                        }
                         d.push('}');
                     }
+                    append_payload_paths(&mut d, p);
                     format!("[{}]={d}", i + 1)
                 })
                 .collect();
-            format!("pos={{{}}}", entries.join(","))
+            format!("pos={{{}}}{inline}", entries.join(","))
         }
         VariantEntry::Named(fields) => {
             let entries: Vec<String> = fields
                 .iter()
-                .map(|(name, shape)| format!("[{:?}]={}", name.as_str(), shape_lua_string(shape)))
+                .map(|(name, position)| {
+                    let shape = position.shape.as_ref().expect("a named payload has a type");
+                    let mut d = shape_lua_string(shape);
+                    append_payload_paths(&mut d, position);
+                    format!("[{:?}]={d}", name.as_str())
+                })
                 .collect();
-            format!("named={{{}}}", entries.join(","))
+            format!("named={{{}}}{inline}", entries.join(","))
         }
+    }
+}
+
+fn append_payload_paths(d: &mut String, p: &skull_mir::type_table::PositionEntry) {
+    if let Some(paths) = &p.leaves {
+        let paths = paths
+            .iter()
+            .map(|path| format!("{:?}", path.as_str()))
+            .collect::<Vec<_>>()
+            .join(",");
+        d.pop();
+        d.push_str(&format!(",leaves={{{paths}}}}}"));
+    }
+    if !p.presence.is_empty() {
+        let presence = p
+            .presence
+            .iter()
+            .map(|i| format!("[{}]=true", i + 1))
+            .collect::<Vec<_>>();
+        d.pop();
+        d.push_str(&format!(",presence={{{}}}}}", presence.join(",")));
     }
 }
 

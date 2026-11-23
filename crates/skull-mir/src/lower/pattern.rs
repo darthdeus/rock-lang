@@ -138,6 +138,9 @@ impl<'a> Builder<'a> {
                         return Ok(());
                     }
                 }
+                if let Scrut::Leaves { leaves, shape } = scrut {
+                    return self.bind_leaves(b, leaves, shape.clone());
+                }
                 if let Some(shape) = self.whole_tuple_binding(b)? {
                     let whole = self.scrut_repr(scrut);
                     let slots = self.tuple_repr_to_slots(whole, &shape)?;
@@ -166,6 +169,17 @@ impl<'a> Builder<'a> {
                 Ok(())
             }
             Pattern::Literal(le) => {
+                if let Scrut::Leaves { leaves, shape } = scrut
+                    && self.is_null_lit(le)
+                {
+                    let absent = if shape.nullable {
+                        self.emit_cur(Inst::Not(leaves[0]))
+                    } else {
+                        self.emit_cur(Inst::Const(Lit::Bool(false)))
+                    };
+                    self.branch_or_fail(absent, fail);
+                    return Ok(());
+                }
                 let val = self.scrut_value(scrut);
                 let lv = self.lower_expr(le)?;
                 let cond = self.emit_cur(Inst::Eq(val, lv));
@@ -200,6 +214,24 @@ impl<'a> Builder<'a> {
                         if let Pattern::Bind(b) = self.body.pattern_arena[sp] {
                             let leaves = self.scrut_payload_leaves(scrut, slot, vs);
                             self.bind_leaves(b, &leaves, vs.clone())?;
+                            continue;
+                        }
+                        if super::shape::is_nobox_nominal(self.ws, vs.name)
+                            && !matches!(self.body.pattern_arena[sp], Pattern::Wildcard)
+                        {
+                            let leaves = self.scrut_payload_leaves(scrut, slot, vs);
+                            self.match_pattern(
+                                &Scrut::Leaves {
+                                    leaves,
+                                    shape: vs.clone(),
+                                },
+                                sp,
+                                fail,
+                                variants,
+                                false,
+                                sub_enum,
+                                payload_ty.as_ref(),
+                            )?;
                             continue;
                         }
                         // A position widened for a nested flat enum holds that enum's cells, not a
@@ -280,6 +312,52 @@ impl<'a> Builder<'a> {
                 fields,
                 ..
             } => {
+                if let Scrut::Leaves { leaves, shape } = scrut {
+                    if shape.nullable {
+                        self.branch_or_fail(leaves[0], fail);
+                    }
+                    for rfidx in fields {
+                        let field = self.body.record_pat_field_arena[rfidx];
+                        if matches!(self.body.pattern_arena[field.pat], Pattern::Wildcard) {
+                            continue;
+                        }
+                        let (range, child_shape) = self
+                            .value_projection_range(shape, &[field.name])
+                            .ok_or_else(|| gap("record pattern field has no payload leaves"))?;
+                        let field_ty = ty.and_then(|ty| {
+                            self.member_ty(ty, shape.name, Member::Field(field.name))
+                        });
+                        let child = match child_shape {
+                            FieldShape::Prim => Scrut::Val(leaves[range.start]),
+                            FieldShape::Nested(shape) => {
+                                let leaves = &leaves[range];
+                                if let Some(flat) = EnumPlan::for_name(self.ws, shape.name)
+                                    .and_then(|plan| plan.flat().cloned())
+                                {
+                                    Scrut::Cells {
+                                        cells: FlatCells::from_slots(&flat, leaves),
+                                        shape: flat,
+                                    }
+                                } else {
+                                    Scrut::Leaves {
+                                        leaves: leaves.to_vec(),
+                                        shape,
+                                    }
+                                }
+                            }
+                        };
+                        self.match_pattern(
+                            &child,
+                            field.pat,
+                            fail,
+                            variants,
+                            false,
+                            None,
+                            field_ty.as_ref(),
+                        )?;
+                    }
+                    return Ok(());
+                }
                 let name = if enum_name.or(scrut_enum).is_some() {
                     name.map(|name| Ustr::from(crate::mangle::declared_name(name.as_str())))
                 } else {
@@ -313,8 +391,33 @@ impl<'a> Builder<'a> {
                         self.mark_record_owner(value, Some(owner));
                     }
                 }
+                let plan = en.and_then(|e| EnumPlan::for_name(self.ws, e));
+                let flat = plan.as_ref().and_then(|plan| plan.flat());
                 for rfidx in fields {
                     let rpf = self.body.record_pat_field_arena[rfidx];
+                    let field_ty = match (ty, name) {
+                        (Some(ty), Some(owner)) => {
+                            self.member_ty(ty, owner, Member::Field(rpf.name))
+                        }
+                        _ => None,
+                    };
+                    if let Some(payload) = flat.and_then(|flat| flat.named_payload(name?, rpf.name))
+                    {
+                        let leaves = self.scrut_named_payload_leaves(scrut, &payload.keys)?;
+                        self.match_pattern(
+                            &Scrut::Leaves {
+                                leaves,
+                                shape: payload.shape.clone(),
+                            },
+                            rpf.pat,
+                            fail,
+                            variants,
+                            false,
+                            None,
+                            field_ty.as_ref(),
+                        )?;
+                        continue;
+                    }
                     // Embedded children are rebuilt from their parent's leaves.
                     let embedded = match (name, scrut) {
                         (Some(sname), Scrut::Val(parent))
@@ -347,12 +450,6 @@ impl<'a> Builder<'a> {
                             }
                         }
                         _ => fv,
-                    };
-                    let field_ty = match (ty, name) {
-                        (Some(ty), Some(owner)) => {
-                            self.member_ty(ty, owner, Member::Field(rpf.name))
-                        }
-                        _ => None,
                     };
                     self.match_pattern(
                         &Scrut::Val(fv),
@@ -529,6 +626,7 @@ impl<'a> Builder<'a> {
         match scrut {
             Scrut::Val(v) => ValueRepr::Scalar(*v),
             Scrut::Repr { repr, .. } => repr.clone(),
+            Scrut::Leaves { leaves, shape } => Self::rebuild_from_leaves(shape, leaves),
             Scrut::Tuple(parts) => ValueRepr::Tuple {
                 parts: parts.iter().map(|p| self.scrut_repr(p)).collect(),
                 present: None,
@@ -542,6 +640,7 @@ impl<'a> Builder<'a> {
     pub(crate) fn scrut_value(&mut self, scrut: &Scrut) -> Idx<Inst> {
         match scrut {
             Scrut::Val(v) | Scrut::Repr { boxed: v, .. } => *v,
+            Scrut::Leaves { .. } => unreachable!("a leaf record has no scalar scrutinee"),
             Scrut::Tuple(parts) => {
                 let values = parts.iter().map(|p| self.scrut_value(p)).collect();
                 self.element_tuple(values)
@@ -563,6 +662,16 @@ impl<'a> Builder<'a> {
     ) -> Vec<Idx<Inst>> {
         (offset..offset + shape.leaf_count())
             .map(|slot| self.scrut_payload(scrut, slot, false))
+            .collect()
+    }
+
+    pub(crate) fn scrut_named_payload_leaves(
+        &mut self,
+        scrut: &Scrut,
+        keys: &[Ustr],
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        keys.iter()
+            .map(|&key| self.scrut_named(scrut, key, false))
             .collect()
     }
 
@@ -607,7 +716,7 @@ impl<'a> Builder<'a> {
             }
             Scrut::Val(v) if cdata => self.read_field(*v, crate::names::indexed("_", "", i)),
             Scrut::Val(v) => self.emit_cur(Inst::TupleIndex { base: *v, index: i }),
-            Scrut::Tuple(_) => {
+            Scrut::Tuple(_) | Scrut::Leaves { .. } => {
                 let value = self.scrut_value(scrut);
                 self.emit_cur(Inst::TupleIndex {
                     base: value,
@@ -649,7 +758,7 @@ impl<'a> Builder<'a> {
                 };
                 Ok(self.read_field(*v, f))
             }
-            Scrut::Tuple(_) => {
+            Scrut::Tuple(_) | Scrut::Leaves { .. } => {
                 let value = self.scrut_value(scrut);
                 Ok(self.read_field(value, field))
             }
@@ -671,7 +780,7 @@ impl<'a> Builder<'a> {
                 Some(self.read_field(*parent, flat_tag_slot(*prefix)))
             }
             Scrut::Cells { cells, .. } => Some(cells.tag()),
-            Scrut::Val(_) | Scrut::Tuple(_) | Scrut::Repr { .. } => None,
+            Scrut::Val(_) | Scrut::Tuple(_) | Scrut::Repr { .. } | Scrut::Leaves { .. } => None,
         };
         let (tag, literal) = if let Some(tag) = flat_tag {
             // Inactive flat payload lanes may carry a different literal type.

@@ -109,6 +109,16 @@ pub fn value_leaf_presence_flags(shape: &ValueShape) -> Vec<bool> {
     out
 }
 
+pub(crate) fn track_enum_payload_presence(ws: &Workspace, shape: &ValueShape) -> bool {
+    shape.nullable || (is_nobox_nominal(ws, shape.name) && has_nested_presence(shape))
+}
+
+fn has_nested_presence(shape: &ValueShape) -> bool {
+    shape.fields.iter().any(|(_, field)| {
+        matches!(field, FieldShape::Nested(child) if child.nullable || has_nested_presence(child))
+    })
+}
+
 pub(crate) fn leaf_names(shape: &ValueShape, prefix: &str, sep: &str) -> Vec<String> {
     let mut out = Vec::new();
     for_each_leaf(shape, &mut prefix.to_owned(), sep, &mut |path, _| {
@@ -1471,7 +1481,8 @@ pub struct EnumFlatShape {
     // Variant shapes share leading slots at each position. An empty list needs one opaque slot.
     positions: Vec<EnumPosition>,
     width: usize,
-    /// Named payload slots `f__<name>`.
+    named_shapes: std::sync::Arc<[EnumNamedPayload]>,
+    /// Physical named slots, including dotted record leaves.
     pub(crate) record_fields: std::sync::Arc<[Ustr]>,
 }
 
@@ -1479,6 +1490,14 @@ pub struct EnumFlatShape {
 struct EnumPosition {
     offset: usize,
     shapes: Vec<ValueShape>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EnumNamedPayload {
+    variant: Ustr,
+    field: Ustr,
+    pub(crate) shape: ValueShape,
+    pub(crate) keys: Vec<Ustr>,
 }
 
 pub(super) fn enum_position_ty(
@@ -1516,32 +1535,43 @@ impl EnumFlatShape {
         self.positions.get(pos).map_or(self.width, |p| p.offset)
     }
 
-    /// The oracle for both the ctor's placement and a match arm's read, so a write
-    /// and a read of one position cannot disagree.
-    pub(crate) fn position_shape(&self, pos: usize, name: Option<Ustr>) -> Option<&ValueShape> {
-        let name = name?;
+    fn find_position_shape(&self, pos: usize, name: Ustr, nullable: bool) -> Option<&ValueShape> {
         self.positions
             .get(pos)?
             .shapes
             .iter()
-            .find(|shape| shape.name == name)
+            .find(|shape| shape.name == name && shape.nullable == nullable)
     }
 
-    pub(super) fn payload_shape(
+    /// The constructor, pattern and descriptor use the variant's declared type.
+    pub(crate) fn payload_shape(
         &self,
         ws: &Workspace,
         variant: Ustr,
         pos: usize,
     ) -> Option<&ValueShape> {
-        self.position_shape(
-            pos,
-            nominal_name_from_ty(ws, enum_position_ty(ws, self.name, variant, pos)?)
-                .and_then(|(name, nullable)| (!nullable).then_some(name)),
-        )
+        let (name, nullable) =
+            nominal_name_from_ty(ws, enum_position_ty(ws, self.name, variant, pos)?)?;
+        self.find_position_shape(pos, name, nullable)
+    }
+
+    pub fn has_inline_record_payload(&self, ws: &Workspace) -> bool {
+        !self.named_shapes.is_empty()
+            || self
+                .positions
+                .iter()
+                .any(|p| p.shapes.iter().any(|s| track_enum_payload_presence(ws, s)))
+    }
+
+    pub(crate) fn named_payload(&self, variant: Ustr, field: Ustr) -> Option<&EnumNamedPayload> {
+        self.named_shapes
+            .iter()
+            .find(|p| p.variant == variant && p.field == field)
     }
 
     pub fn position_leaf_paths(&self, pos: usize, name: Ustr) -> Option<Vec<Ustr>> {
-        self.position_shape(pos, Some(name)).map(value_leaf_paths)
+        self.find_position_shape(pos, name, false)
+            .map(value_leaf_paths)
     }
 
     pub fn leaf_count(&self) -> usize {
@@ -1571,6 +1601,7 @@ fn build_flat_enum_shape(ws: &Workspace, ed: &EnumDef, visiting: &mut Vec<Ustr>)
     // back to the opaque slot would reintroduce an aggregate at the enum boundary.
     let mut positions: Vec<Vec<ValueShape>> = Vec::new();
     let mut record_fields: Vec<Ustr> = Vec::new();
+    let mut named_shapes = Vec::new();
     for v in &ed.variants {
         match &v.payload {
             VariantPayload::Unit => {}
@@ -1582,14 +1613,33 @@ fn build_flat_enum_shape(ws: &Workspace, ed: &EnumDef, visiting: &mut Vec<Ustr>)
                     let Some(vs) = flat_payload_shape(ws, *ty, visiting) else {
                         continue;
                     };
-                    if !positions[i].iter().any(|prev| prev.name == vs.name) {
+                    if !positions[i]
+                        .iter()
+                        .any(|prev| prev.name == vs.name && prev.nullable == vs.nullable)
+                    {
                         positions[i].push(vs);
                     }
                 }
             }
             VariantPayload::Record(fields) => {
                 for f in fields {
-                    if !record_fields.contains(&f.name) {
+                    if let Some(shape) = nobox_payload_shape(ws, f.ty, visiting) {
+                        let keys: Vec<_> = leaf_keys(&shape, f.name.as_str())
+                            .into_iter()
+                            .map(|(key, _)| key)
+                            .collect();
+                        for &key in &keys {
+                            if !record_fields.contains(&key) {
+                                record_fields.push(key);
+                            }
+                        }
+                        named_shapes.push(EnumNamedPayload {
+                            variant: v.name,
+                            field: f.name,
+                            shape,
+                            keys,
+                        });
+                    } else if !record_fields.contains(&f.name) {
                         record_fields.push(f.name);
                     }
                 }
@@ -1602,7 +1652,12 @@ fn build_flat_enum_shape(ws: &Workspace, ed: &EnumDef, visiting: &mut Vec<Ustr>)
         .into_iter()
         .map(|shapes| {
             let offset = width;
-            width += shapes.iter().map(ValueShape::leaf_count).max().unwrap_or(1);
+            width += shapes
+                .iter()
+                .map(ValueShape::leaf_count)
+                .max()
+                .unwrap_or(0)
+                .max(1);
             EnumPosition { offset, shapes }
         })
         .collect();
@@ -1610,6 +1665,7 @@ fn build_flat_enum_shape(ws: &Workspace, ed: &EnumDef, visiting: &mut Vec<Ustr>)
         name: ed.name,
         positions,
         width,
+        named_shapes: named_shapes.into(),
         record_fields: record_fields.into(),
     }
 }
@@ -1677,20 +1733,29 @@ impl EnumPlan {
     }
 }
 
+fn nobox_payload_shape(ws: &Workspace, ty: TyId, visiting: &[Ustr]) -> Option<ValueShape> {
+    let (name, nullable) = nominal_name_from_ty(ws, ty)?;
+    if !is_nobox_nominal(ws, name)
+        || reaches_enum_in(ws, ty, visiting, true, &mut HashSet::default())
+    {
+        return None;
+    }
+    let mut shape = value_shape_of_nominal(ws, name)?;
+    shape.nullable = nullable;
+    Some(shape)
+}
+
 /// Keyed on the declared payload type, so the ctor and the match arm derive
 /// the same layout without seeing each other.
 fn flat_payload_shape(ws: &Workspace, ty: TyId, visiting: &mut Vec<Ustr>) -> Option<ValueShape> {
-    let TypeExpr::App {
-        ctor: TypeCtor::Nominal(n),
-        ..
-    } = static_ty(ws, ty)?
-    else {
-        return None;
-    };
+    let (n, nullable) = nominal_name_from_ty(ws, ty)?;
+    if nullable || is_nobox_nominal(ws, n) {
+        return nobox_payload_shape(ws, ty, visiting);
+    }
     if is_value_struct(ws, n) {
         // Planned without `visiting`, so a payload cycling back to an enum under
         // construction stays opaque.
-        if reaches_enum_in(ws, ty, visiting, &mut HashSet::default()) {
+        if reaches_enum_in(ws, ty, visiting, false, &mut HashSet::default()) {
             return None;
         }
         return value_shape_of_nominal(ws, n);
@@ -1702,21 +1767,32 @@ fn flat_payload_shape(ws: &Workspace, ty: TyId, visiting: &mut Vec<Ustr>) -> Opt
     Some(build_flat_enum_shape(ws, ed, visiting).value_shape())
 }
 
-fn reaches_enum_in(ws: &Workspace, ty: TyId, goals: &[Ustr], seen: &mut HashSet<Ustr>) -> bool {
+fn reaches_enum_in(
+    ws: &Workspace,
+    ty: TyId,
+    goals: &[Ustr],
+    skip_boxed_optional: bool,
+    seen: &mut HashSet<Ustr>,
+) -> bool {
     let TyId::Static(mid, _) = ty else {
         return false;
     };
     let sub = |idx| TyId::Static(mid, idx);
+    let reaches =
+        |ty, seen: &mut HashSet<Ustr>| reaches_enum_in(ws, ty, goals, skip_boxed_optional, seen);
     match static_ty(ws, ty) {
-        Some(TypeExpr::Nullable(inner)) => reaches_enum_in(ws, sub(inner), goals, seen),
-        Some(TypeExpr::Tuple { elements }) => elements
-            .into_iter()
-            .any(|idx| reaches_enum_in(ws, sub(idx), goals, seen)),
+        // Only nullable nobox records are expanded by the value field planner.
+        Some(TypeExpr::Nullable(inner)) => {
+            (!skip_boxed_optional
+                || nominal_name_from_ty(ws, sub(inner))
+                    .is_some_and(|(name, _)| is_nobox_nominal(ws, name)))
+                && reaches(sub(inner), seen)
+        }
+        Some(TypeExpr::Tuple { elements }) => {
+            elements.into_iter().any(|idx| reaches(sub(idx), seen))
+        }
         Some(TypeExpr::App { ctor, params }) => {
-            if params
-                .into_iter()
-                .any(|idx| reaches_enum_in(ws, sub(idx), goals, seen))
-            {
+            if params.into_iter().any(|idx| reaches(sub(idx), seen)) {
                 return true;
             }
             let TypeCtor::Nominal(n) = ctor else {
@@ -1730,22 +1806,14 @@ fn reaches_enum_in(ws: &Workspace, ty: TyId, goals: &[Ustr], seen: &mut HashSet<
             }
             if let Some(sid) = ws.nominals.struct_id(n) {
                 let sd = &ws.modules[sid.module.index()].structs[sid.def];
-                return sd.is_value
-                    && sd
-                        .fields
-                        .iter()
-                        .any(|f| reaches_enum_in(ws, f.ty, goals, seen));
+                return sd.is_value && sd.fields.iter().any(|f| reaches(f.ty, seen));
             }
             if let Some(eid) = ws.nominals.enum_id(n) {
                 let ed = &ws.modules[eid.module.index()].enums[eid.def];
                 return ed.variants.iter().any(|v| match &v.payload {
                     VariantPayload::Unit => false,
-                    VariantPayload::Tuple(tys) => {
-                        tys.iter().any(|t| reaches_enum_in(ws, *t, goals, seen))
-                    }
-                    VariantPayload::Record(fields) => fields
-                        .iter()
-                        .any(|f| reaches_enum_in(ws, f.ty, goals, seen)),
+                    VariantPayload::Tuple(tys) => tys.iter().any(|t| reaches(*t, seen)),
+                    VariantPayload::Record(fields) => fields.iter().any(|f| reaches(f.ty, seen)),
                 });
             }
             false

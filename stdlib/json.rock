@@ -1337,7 +1337,12 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
 
 @nomangle inline(lua) fn __json_record_payload_get(value: any, shape: any, index: int) -> any = """
     local slot = shape.slot or index
-    if not shape.leaves then return value[slot] end
+    local leaves = shape.leaves
+    if not leaves then return value[slot] end
+    if shape.k == 'opt' then
+        if not value[slot] then return nil end
+        slot, shape = slot + 1, shape.inner
+    end
     local flat = _G.__ROCK_ENUM_FLAT_LAYOUT[shape.name]
     if flat then
         local result = setmetatable({ __variant = value[slot] }, __rock_box_mts[shape.name])
@@ -1346,25 +1351,55 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     end
     local decl = _G.__ROCK_TYPE_TABLE[shape.name]
     local result = decl.kind == 'c_struct' and _G[shape.name .. '_ct']() or setmetatable({}, __rock_box_mts[shape.name])
-    for i, path in ipairs(shape.leaves) do
-        if path:find('.', 1, true) then error('json record unsupported nested value payload', 0) end
-        result[path] = value[slot + i - 1]
+    local nested = false
+    for i, path in ipairs(leaves) do
+        local dot = path:find('.', 1, true)
+        if dot and decl.kind == 'c_struct' then
+            local child = result
+            local start = 1
+            while dot do
+                child, start = child[path:sub(start, dot - 1)], dot + 1
+                dot = path:find('.', start, true)
+            end
+            child[path:sub(start)] = value[slot + i - 1]
+        else
+            result[path] = value[slot + i - 1]
+            nested = nested or dot ~= nil
+        end
     end
-    return result
+    return nested and __json_record_row_object(result, shape.name) or result
 """
 
 @nomangle inline(lua) fn __json_record_payload_put(target: any, shape: any, index: int, value: any) = """
     local slot = shape.slot or index
-    if not shape.leaves then target[slot] = value; return end
+    local leaves = shape.leaves
+    if not leaves then target[slot] = value; return end
+    local presence = shape.presence
+    if shape.k == 'opt' then
+        target[slot] = value ~= nil
+        if value == nil then
+            if presence then
+                for i in pairs(presence) do target[slot + i] = false end
+            end
+            return
+        end
+        slot, shape = slot + 1, shape.inner
+    end
     local flat = _G.__ROCK_ENUM_FLAT_LAYOUT[shape.name]
     if flat then
         target[slot] = value.__variant
         for i = 1, flat.tuple_width do target[slot + i] = value[i] end
         return
     end
-    for i, path in ipairs(shape.leaves) do
-        if path:find('.', 1, true) then error('json record unsupported nested value payload', 0) end
-        target[slot + i - 1] = value[path]
+    for i, path in ipairs(leaves) do
+        local leaf
+        if path:find('.', 1, true) then
+            leaf = __json_record_row_leaf(value, path)
+        else
+            leaf = value[path]
+        end
+        if presence and presence[i] then leaf = not not leaf end
+        target[slot + i - 1] = leaf
     end
 """
 

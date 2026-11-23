@@ -192,6 +192,10 @@ enum FlatPayload {
 enum Scrut {
     Val(Idx<Inst>),
     Tuple(Vec<Scrut>),
+    Leaves {
+        leaves: Vec<Idx<Inst>>,
+        shape: ValueShape,
+    },
     Repr {
         repr: ValueRepr,
         boxed: Idx<Inst>,

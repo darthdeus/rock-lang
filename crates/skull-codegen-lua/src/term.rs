@@ -463,7 +463,8 @@ impl Emitter<'_> {
             self.write_opnd(out, *id);
         }
         for (name, id) in named {
-            let _ = write!(out, ", {name} = ");
+            out.push_str(", ");
+            write_table_key(out, name.as_str());
             self.write_opnd(out, *id);
         }
         out.push('}');

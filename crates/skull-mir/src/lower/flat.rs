@@ -81,22 +81,11 @@ impl<'a> Builder<'a> {
             // Use this variant's payload width and leave the remaining slots inactive.
             match shape.payload_shape(self.ws, variant, pos) {
                 Some(vs) => {
-                    // The enum is immutable and outlives its operands, so its payload owns its
-                    // value children from the start.
-                    let leaves = match arg {
-                        FlatPayload::Expr(a) => {
-                            let r = self.lower_expr_repr(a)?;
-                            let r = ValueBundle::new(
-                                r.representation(),
-                                self.owned_value_children(r.into_value())?,
-                            );
-                            self.repr_to_storage_leaves(&r, vs, "flat enum payload")?
-                        }
-                        FlatPayload::Repr(r) => {
-                            let r = self.owned_value_children(r)?;
-                            self.repr_to_leaves_shape(&r, vs)?
-                        }
-                    };
+                    let leaves = self.flat_payload_leaves(
+                        arg,
+                        vs,
+                        super::shape::track_enum_payload_presence(self.ws, vs),
+                    )?;
                     for (k, lv) in leaves.into_iter().enumerate() {
                         slots[off + k] = Some(lv);
                     }
@@ -118,7 +107,13 @@ impl<'a> Builder<'a> {
         }
         let mut rec_vals = Vec::with_capacity(rec_args.len());
         for (name, value) in rec_args {
-            rec_vals.push((name, self.lower_expr(value)?));
+            if let Some(payload) = shape.named_payload(variant, name) {
+                let leaves =
+                    self.flat_payload_leaves(FlatPayload::Expr(value), &payload.shape, true)?;
+                rec_vals.extend(payload.keys.iter().copied().zip(leaves));
+            } else {
+                rec_vals.push((name, self.lower_expr(value)?));
+            }
         }
         let nil = || Inst::Const(Lit::Nil);
         let mut cells = Vec::with_capacity(shape.leaf_count());
@@ -139,6 +134,44 @@ impl<'a> Builder<'a> {
             slots: cells,
             fields: shape.record_fields.clone(),
         })
+    }
+
+    fn flat_payload_leaves(
+        &mut self,
+        arg: FlatPayload,
+        shape: &ValueShape,
+        normalize_presence: bool,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let mut leaves = match arg {
+            FlatPayload::Expr(expr) => {
+                let repr = self.lower_expr_repr(expr)?;
+                let repr = ValueBundle::new(
+                    repr.representation(),
+                    self.owned_value_children(repr.into_value())?,
+                );
+                self.repr_to_storage_leaves(&repr, shape, "flat enum payload")?
+            }
+            FlatPayload::Repr(repr) => {
+                let repr = self.owned_value_children(repr)?;
+                self.repr_to_leaves_shape(&repr, shape)?
+            }
+        };
+        // ABI and field loads may spell absence differently. Keep one presence
+        // representation in enum slots so both leafwise and boxed equality agree.
+        if normalize_presence {
+            let flags = shape
+                .nullable
+                .then_some(true)
+                .into_iter()
+                .chain(super::shape::value_leaf_presence_flags(shape));
+            for (leaf, presence) in leaves.iter_mut().zip(flags) {
+                if presence {
+                    let absent = self.emit_cur(Inst::Not(*leaf));
+                    *leaf = self.emit_cur(Inst::Not(absent));
+                }
+            }
+        }
+        Ok(leaves)
     }
 
     pub(crate) fn spread_maybe_null_box_to_cells(
@@ -421,7 +454,12 @@ impl EnumFlatShape {
                     .record_fields
                     .iter()
                     .copied()
-                    .filter(|name| fields.iter().any(|field| field.name == *name))
+                    .filter(|name| {
+                        fields.iter().any(|field| {
+                            self.named_payload(variant, field.name)
+                                .map_or(field.name == *name, |payload| payload.keys.contains(name))
+                        })
+                    })
                     .collect();
                 (0, names)
             }

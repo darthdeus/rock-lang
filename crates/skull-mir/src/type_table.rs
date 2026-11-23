@@ -197,12 +197,52 @@ pub struct PositionEntry {
     pub slot: Option<usize>,
     /// Leaf paths of a value payload spread across consecutive slots.
     pub leaves: Option<Vec<Ustr>>,
+    /// Indices of nested presence slots, relative to `leaves`.
+    pub presence: Vec<usize>,
+}
+
+impl PositionEntry {
+    fn from_layout(
+        shape: Option<Shape>,
+        slot: Option<usize>,
+        layout: Option<&crate::lower::ValueShape>,
+        track_presence: bool,
+    ) -> Self {
+        let leaves = layout.map(crate::lower::value_leaf_paths);
+        let presence = layout
+            .filter(|_| track_presence)
+            .map_or_else(Vec::new, |layout| {
+                crate::lower::value_leaf_presence_flags(layout)
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(i, presence)| presence.then_some(i))
+                    .collect()
+            });
+        Self {
+            shape,
+            slot,
+            leaves,
+            presence,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 pub enum VariantEntry {
     Positional(Vec<PositionEntry>),
-    Named(Vec<(Ustr, Shape)>),
+    Named(Vec<(Ustr, PositionEntry)>),
+}
+
+impl VariantEntry {
+    pub fn has_inline_record_payload(&self) -> bool {
+        match self {
+            Self::Positional(positions) => positions.iter().any(|p| {
+                p.leaves.is_some()
+                    && (matches!(p.shape, Some(Shape::Opt(_))) || !p.presence.is_empty())
+            }),
+            Self::Named(fields) => fields.iter().any(|(_, p)| p.leaves.is_some()),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -269,9 +309,10 @@ impl Entry {
                             .iter()
                             .filter_map(|p| p.shape.as_ref())
                             .for_each(|s| s.nominals(&mut out)),
-                        VariantEntry::Named(named) => {
-                            named.iter().for_each(|(_, s)| s.nominals(&mut out))
-                        }
+                        VariantEntry::Named(named) => named
+                            .iter()
+                            .filter_map(|(_, p)| p.shape.as_ref())
+                            .for_each(|s| s.nominals(&mut out)),
                     }
                 }
             }
@@ -441,27 +482,20 @@ fn boxed_variants(ws: &Workspace, e: &EnumDef) -> Option<Vec<(Ustr, VariantEntry
         let entry = match &variant.payload {
             VariantPayload::Unit => VariantEntry::Positional(Vec::new()),
             VariantPayload::Tuple(types) => {
-                let entries: Vec<PositionEntry> = types
+                let entries: Vec<_> = types
                     .iter()
                     .enumerate()
                     .map(|(i, ty)| {
-                        let mut entry = PositionEntry {
-                            shape: type_shape(ws, *ty),
-                            slot: None,
-                            leaves: None,
-                        };
-                        if let Some(flat) = &flat {
-                            entry.slot = Some(flat.slot_offset(i));
-                            if let TyId::Static(mid, idx) = *ty
-                                && let TypeExpr::App {
-                                    ctor: TypeCtor::Nominal(name),
-                                    ..
-                                } = ws.modules[mid.index()].ty_arena[idx]
-                            {
-                                entry.leaves = flat.position_leaf_paths(i, name);
-                            }
-                        }
-                        entry
+                        let layout = flat
+                            .as_ref()
+                            .and_then(|flat| flat.payload_shape(ws, variant.name, i));
+                        PositionEntry::from_layout(
+                            type_shape(ws, *ty),
+                            flat.as_ref().map(|flat| flat.slot_offset(i)),
+                            layout,
+                            layout
+                                .is_some_and(|s| crate::lower::track_enum_payload_presence(ws, s)),
+                        )
                     })
                     .collect();
                 if entries.is_empty() {
@@ -470,9 +504,19 @@ fn boxed_variants(ws: &Workspace, e: &EnumDef) -> Option<Vec<(Ustr, VariantEntry
                 VariantEntry::Positional(entries)
             }
             VariantPayload::Record(fields) => {
-                let entries: Vec<(Ustr, Shape)> = fields
+                let entries: Vec<_> = fields
                     .iter()
-                    .filter_map(|f| Some((f.name, type_shape(ws, f.ty)?)))
+                    .filter_map(|f| {
+                        let shape = type_shape(ws, f.ty)?;
+                        let layout = flat
+                            .as_ref()
+                            .and_then(|flat| flat.named_payload(variant.name, f.name))
+                            .map(|payload| &payload.shape);
+                        Some((
+                            f.name,
+                            PositionEntry::from_layout(Some(shape), None, layout, true),
+                        ))
+                    })
                     .collect();
                 if entries.is_empty() {
                     continue;

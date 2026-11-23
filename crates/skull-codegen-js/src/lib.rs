@@ -670,6 +670,7 @@ pub const JS_INSPECT_RUNTIME: &str = r#"
 var __rock_inspect_ty = {};
 var __rock_col_mat = {};
 var __rock_enum_inspect_payloads = Object.create(null);
+var __rock_enum_inline_payloads = Object.create(null);
 // A column-stored Vec has no `_data`: one plain array per leaf, sharing the
 // Vec's `len`. Rendering its own keys would show the PHYSICAL layout (`@vec`,
 // `x = { 1 }`), so materialize each element first -- luajit's
@@ -773,6 +774,37 @@ function __rock_enum_payload_names(pairs, positions) {
   if (slot !== numeric) return null;
   return names;
 }
+function __rock_inline_payload_pairs(t, variant) {
+  var pairs = [];
+  function payload(key, label, p) {
+    var slot = p.slot === undefined ? key : p.slot;
+    if (!p.leaves) { pairs.push([label, t[slot]]); return; }
+    if (p.k === "opt") {
+      if (!t[slot]) { pairs.push([label, null]); return; }
+      if (typeof slot === "number") slot++;
+    }
+    var absent;
+    for (var i = 0; i < p.leaves.length; i++) {
+      var path = p.leaves[i];
+      if (absent && path.startsWith(absent)) continue;
+      absent = undefined;
+      var name = label + "." + path;
+      var value = t[typeof slot === "number" ? slot + i : name];
+      if (p.presence && p.presence[i]) {
+        if (!value) {
+          pairs.push([name, null]);
+          absent = path + ".";
+        }
+      } else pairs.push([name, value]);
+    }
+  }
+  if (variant.pos) {
+    for (var i = 0; i < variant.pos.length; i++) payload(i, "[" + (i + 1) + "]", variant.pos[i]);
+  } else {
+    for (var name in variant.named) payload(name, name, variant.named[name]);
+  }
+  return pairs;
+}
 function __rock_inspect_value(v, indent, path, visited, precision) {
   if (v === null || v === undefined) return "nil";
   var vt = typeof v;
@@ -838,15 +870,20 @@ function __rock_inspect_value(v, indent, path, visited, precision) {
       }
     }
   }
-  pairs.sort(function(a, b) { return __rock_inspect_key_lt(a[0], b[0]); });
   var variant = t.__variant;
   var enumBox = variant !== undefined;
   var payloadNames = null;
   if (enumBox && type_name !== undefined) {
-    var enumPayloads = __rock_enum_inspect_payloads[type_name];
-    var positions = enumPayloads && enumPayloads[variant];
-    if (positions !== undefined) payloadNames = __rock_enum_payload_names(pairs, positions);
+    var inline = __rock_enum_inline_payloads[type_name];
+    if (inline && inline[variant]) {
+      pairs = __rock_inline_payload_pairs(t, inline[variant]);
+    } else {
+      var enumPayloads = __rock_enum_inspect_payloads[type_name];
+      var positions = enumPayloads && enumPayloads[variant];
+      if (positions !== undefined) payloadNames = __rock_enum_payload_names(pairs, positions);
+    }
   }
+  pairs.sort(function(a, b) { return __rock_inspect_key_lt(a[0], b[0]); });
   if (type_name !== undefined && variant !== undefined && pairs.length === 0) {
     if (visited) visited.delete(t);
     return type_name + "::" + variant;

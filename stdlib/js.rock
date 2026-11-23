@@ -598,7 +598,12 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
 // Payload slots are 0-based here; luajit's are 1-based.
 @nomangle inline(js) fn __json_record_js_payload_get(value: any, shape: any, index: int) -> any = """
     var slot = shape.slot !== undefined ? shape.slot : index;
-    if (!shape.leaves) return value[slot];
+    var leaves = shape.leaves;
+    if (!leaves) return value[slot];
+    if (shape.k === "opt") {
+        if (!value[slot++]) return null;
+        shape = shape.inner;
+    }
     var flat = __rock_json_types.flat[shape.name];
     var result, i, item;
     if (flat) {
@@ -609,19 +614,34 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
         }
         return result;
     }
+    var nested = false;
     result = { __ty: shape.name };
-    for (i = 0; i < shape.leaves.length; i++) {
-        var path = shape.leaves[i];
-        if (path.indexOf(".") >= 0) throw new Error("json record unsupported nested value payload");
+    for (i = 0; i < leaves.length; i++) {
+        var path = leaves[i];
         result[path] = value[slot + i];
+        nested = nested || path.indexOf(".") >= 0;
     }
-    return result;
+    if (!nested) return result;
+    var decl = __rock_json_types.types[shape.name];
+    return decl.kind === "c_struct" ? __json_record_js_native_get(result, shape.name, "")
+        : __json_record_js_row_object(result, shape.name);
 """
 
 @nomangle inline(js) fn __json_record_js_payload_put(target: any, shape: any, index: int, value: any) = """
     var slot = shape.slot !== undefined ? shape.slot : index;
+    var leaves = shape.leaves;
     function put(key, item) { if (item !== null && item !== undefined) target[key] = item; }
-    if (!shape.leaves) { put(slot, value); return; }
+    if (!leaves) { put(slot, value); return; }
+    var presence = shape.presence;
+    if (shape.k === "opt") {
+        var present = value !== null && value !== undefined;
+        target[slot++] = present;
+        if (!present) {
+            if (presence) for (var key in presence) target[slot + Number(key)] = false;
+            return;
+        }
+        shape = shape.inner;
+    }
     var flat = __rock_json_types.flat[shape.name];
     var i;
     if (flat) {
@@ -629,10 +649,10 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
         for (i = 0; i < flat.tuple_width; i++) put(slot + 1 + i, value[i]);
         return;
     }
-    for (i = 0; i < shape.leaves.length; i++) {
-        var path = shape.leaves[i];
-        if (path.indexOf(".") >= 0) throw new Error("json record unsupported nested value payload");
-        put(slot + i, value[path]);
+    for (i = 0; i < leaves.length; i++) {
+        var path = leaves[i];
+        var leaf = path.indexOf(".") < 0 ? value[path] : __json_record_js_row_leaf(value, path);
+        put(slot + i, presence && presence[i] ? !!leaf : leaf);
     }
 """
 

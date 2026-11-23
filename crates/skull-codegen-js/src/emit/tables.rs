@@ -264,6 +264,22 @@ pub(super) fn emit_inspect_enum_payloads(ws: &Workspace) -> String {
             continue;
         };
         let ed = &ws.modules[eid.module.index()].enums[eid.def];
+        if flat.has_inline_record_payload(ws) {
+            let enum_name = js_string_lit(skull_mir::mangle::type_symbol(ws, name).as_str());
+            for entry in skull_mir::type_table::enum_entries(ws, ed) {
+                if let skull_mir::type_table::Entry::Enum { variants, .. } = entry {
+                    for (variant, payload) in variants {
+                        if payload.has_inline_record_payload() {
+                            let variant = js_string_lit(variant.as_str());
+                            let payload = super::json_types::variant_js(&payload);
+                            out.push_str(&format!(
+                                "__rock_enum_inline_payloads[{enum_name}] ||= Object.create(null);\n                                 __rock_enum_inline_payloads[{enum_name}][{variant}] = {payload};\n"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
         let mut variants = Vec::new();
         for variant in &ed.variants {
             let VariantPayload::Tuple(types) = &variant.payload else {

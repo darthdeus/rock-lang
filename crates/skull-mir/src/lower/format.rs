@@ -533,7 +533,7 @@ impl<'a> Builder<'a> {
                                     self.render_enum(child, vs.name, child_path, &inner)?
                                 } else {
                                     let leaves = self.scrut_payload_leaves(scrut, slot, vs);
-                                    let repr = leaves_to_repr(vs, &mut leaves.into_iter())?;
+                                    let repr = Self::rebuild_from_leaves(vs, &leaves);
                                     self.render_fmt(child, child_path, repr)?
                                 }
                             }
@@ -550,9 +550,15 @@ impl<'a> Builder<'a> {
                     let mut pieces = Vec::with_capacity(fields.len());
                     for (i, (field, child)) in fields.iter().enumerate() {
                         let child_path = [path.as_slice(), &[vi as u32, i as u32]].concat();
-                        let payload = self.scrut_named(scrut, *field, cdata)?;
-                        let piece =
-                            self.render_fmt(child, child_path, ValueRepr::Scalar(payload))?;
+                        let payload = if let Some(payload) =
+                            flat_shape.and_then(|flat| flat.named_payload(variant.name, *field))
+                        {
+                            let leaves = self.scrut_named_payload_leaves(scrut, &payload.keys)?;
+                            Self::rebuild_from_leaves(&payload.shape, &leaves)
+                        } else {
+                            ValueRepr::Scalar(self.scrut_named(scrut, *field, cdata)?)
+                        };
+                        let piece = self.render_fmt(child, child_path, payload)?;
                         pieces.push((format!("{field}: "), piece));
                     }
                     self.join_pieces(&format!("{head} {{ "), pieces, " }")
@@ -566,32 +572,4 @@ impl<'a> Builder<'a> {
         self.cur = join;
         Ok(self.emit_cur(Inst::Load(result)))
     }
-}
-
-fn leaves_to_repr(
-    shape: &ValueShape,
-    leaves: &mut impl Iterator<Item = Idx<Inst>>,
-) -> Result<ValueRepr, CompilerError> {
-    if shape.nullable {
-        return Err(gap(format!(
-            "nullable widened payload `{}` cannot be formatted",
-            shape.name
-        )));
-    }
-    let mut parts = Vec::with_capacity(shape.fields.len());
-    for (_, field) in &shape.fields {
-        parts.push(match field {
-            FieldShape::Prim => ValueRepr::Scalar(
-                leaves
-                    .next()
-                    .ok_or_else(|| gap(format!("`{}` ran out of leaves", shape.name)))?,
-            ),
-            FieldShape::Nested(inner) => leaves_to_repr(inner, leaves)?,
-        });
-    }
-    Ok(ValueRepr::Group {
-        name: shape.name,
-        parts,
-        present: None,
-    })
 }
