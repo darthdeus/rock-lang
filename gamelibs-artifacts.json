@@ -1,6 +1,6 @@
 {
-  "gamelibs-linux-x86_64.zip": "b2652289c2a0ecbc54c2b1bc805ae50b09fc6c1095a7616eccf94623387f28b1",
-  "gamelibs-lua-bindings.zip": "d6a2e5d549e11d34bbcd8ec3468e165b77f12bfe2c1f48f7002a42696c6d87dc",
-  "gamelibs-macos-arm64.zip": "b6cef628c7428af1b5d98b08f9f7c571077edca62b14857417ae21261120faa1",
-  "gamelibs-windows-x86_64.zip": "7602d365abe455f581fbc80d1c5b5c6b43e0ffb349811032467adfd19f7ade39"
+  "gamelibs-linux-x86_64.zip": "ce6e874fcacf53df3b634a616f7ec26eb46d4d041e6829096a0d82ea6efedcdb",
+  "gamelibs-lua-bindings.zip": "bcaf6b75164dc42f2a104b6e455098e231695fb1b8874039feb6c6a68248d582",
+  "gamelibs-macos-arm64.zip": "4c3851fdc840359718e15c65359b25296b068810bf0abac5be089c78af006d24",
+  "gamelibs-windows-x86_64.zip": "f54c495cfe81a5bdf9acb9be52c84983bc030d7db48f2422c8c22ecb4c904a06"
 }
