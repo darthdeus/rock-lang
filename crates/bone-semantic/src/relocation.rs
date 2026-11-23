@@ -5,7 +5,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bone_core::hir_walk::HirChild;
 use bone_core::modules::is_stdlib_module_file;
-use bone_core::suspension::{SuspensionPolicy, uses_after_suspension, uses_after_suspension_in};
+use bone_core::suspension::{
+    SuspensionPoint::{self, Expression, IteratorNext},
+    SuspensionPolicy, uses_after_suspension_in,
+};
 use bone_core::workspace::{BodyInference, BoundNext};
 
 use crate::hir::{
@@ -41,79 +44,53 @@ fn function_body((module, function): FnKey) -> BodyKey {
     (module, BodyOwner::Function(function))
 }
 
-/// What a call may do to collection structure. Each entry keeps the first
-/// site that established it, for the diagnostic.
-#[derive(Clone, Default)]
-struct Effect {
-    /// Runs a closure or foreign code whose effect is not known.
-    unknown: Option<Span>,
-    /// Accesses a record whose fields can run host callbacks.
-    host_property: Option<Span>,
-    host_params: BTreeMap<u16, Span>,
-    /// Keeps these reference parameters in a coroutine frame.
-    retained: BTreeMap<u16, Span>,
-    /// Changes the structure of the collection passed as this parameter.
-    params: BTreeMap<u16, Span>,
-    /// Changes the structure of some other reachable collection with this
-    /// element-type key.
-    elements: BTreeMap<String, Span>,
-    /// Changes the structure of this fresh local of the calling body. Only
-    /// that body can reach it, so it never enters a summary.
-    locals: BTreeMap<Idx<BindingInfo>, Span>,
+/// Each effect keeps the first site that established it, for the diagnostic.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum EffectOn {
+    Unknown,
+    Host,
+    HostParam(u16),
+    Retained(u16),
+    Param(u16),
+    Local(Idx<BindingInfo>),
+    Element(String),
 }
 
-impl Effect {
-    fn add_unknown(&mut self, at: Span) {
-        self.unknown.get_or_insert(at);
-    }
+use EffectOn::{Element, HostParam, Local, Param, Retained, Unknown};
 
-    fn add_element(&mut self, key: String, at: Span) {
-        self.elements.entry(key).or_insert(at);
+#[derive(Clone, Default)]
+struct Effect(BTreeMap<EffectOn, Span>);
+
+impl Effect {
+    fn add(&mut self, effect: EffectOn, at: Span) {
+        self.0.entry(effect).or_insert(at);
     }
 
     fn add_host_access(&mut self, origin: CollectionOrigin, at: Span) {
         match origin {
             CollectionOrigin::Rock => {}
-            CollectionOrigin::Host => {
-                self.host_property.get_or_insert(at);
-            }
-            CollectionOrigin::Param(p) => {
-                self.host_params.entry(p).or_insert(at);
-            }
+            CollectionOrigin::Host => self.add(EffectOn::Host, at),
+            CollectionOrigin::Param(p) => self.add(HostParam(p), at),
         }
-    }
-
-    /// Equal apart from witnesses. Witnesses can shift while a cycle
-    /// settles; only the keys decide convergence.
-    fn same_shape(&self, other: &Effect) -> bool {
-        self.unknown.is_some() == other.unknown.is_some()
-            && self.host_property.is_some() == other.host_property.is_some()
-            && self.host_params.keys().eq(other.host_params.keys())
-            && self.retained.keys().eq(other.retained.keys())
-            && self.params.keys().eq(other.params.keys())
-            && self.elements.keys().eq(other.elements.keys())
     }
 
     fn union(&mut self, other: &Effect) {
-        self.host_property = self.host_property.or(other.host_property);
-        for (&p, &at) in &other.host_params {
-            self.host_params.entry(p).or_insert(at);
+        for (effect, &at) in &other.0 {
+            self.add(effect.clone(), at);
         }
-        for (&p, &at) in &other.retained {
-            self.retained.entry(p).or_insert(at);
-        }
-        if let Some(at) = other.unknown {
-            self.add_unknown(at);
-        }
-        for (&p, &at) in &other.params {
-            self.params.entry(p).or_insert(at);
-        }
-        for (key, &at) in &other.elements {
-            self.elements.entry(key.clone()).or_insert(at);
-        }
-        for (&local, &at) in &other.locals {
-            self.locals.entry(local).or_insert(at);
-        }
+    }
+
+    fn invalidating<'a>(&'a self, root: &Root) -> Option<(&'a EffectOn, Span)> {
+        self.0.iter().find_map(|(effect, &witness)| {
+            let applies = match effect {
+                Unknown => true,
+                EffectOn::Host | HostParam(_) => root.key.starts_with("Arena<"),
+                Local(binding) => root.local == Some(*binding),
+                Element(key) => keys_may_alias(&root.key, key),
+                Retained(_) | Param(_) => false,
+            };
+            applies.then_some((effect, witness))
+        })
     }
 }
 
@@ -190,31 +167,24 @@ struct Root {
     local: Option<Idx<BindingInfo>>,
 }
 
-enum CallSite {
-    Known(Edge),
-    Unknown,
+enum Operation {
+    Call(Option<Edge>),
+    Implicit(Option<Edge>),
     HostAccess(CollectionOrigin),
 }
 
+type EffectsAt = FxHashMap<SuspensionPoint, Effect>;
+
 struct FnFacts {
     direct: Effect,
-    calls: Vec<(Idx<Expr>, CallSite)>,
-    iterations: Vec<(Idx<Expr>, CallSite)>,
-    conversions: Vec<(Idx<Expr>, CallSite)>,
+    operations: Vec<(SuspensionPoint, Operation)>,
 }
 
 impl FnFacts {
-    fn all_calls(&self) -> impl Iterator<Item = &(Idx<Expr>, CallSite)> {
-        self.calls
-            .iter()
-            .chain(&self.iterations)
-            .chain(&self.conversions)
-    }
-
     fn callees(&self) -> impl Iterator<Item = BodyKey> {
-        self.all_calls().filter_map(|(_, site)| match site {
-            CallSite::Known(edge) => Some(edge.callee),
-            CallSite::Unknown | CallSite::HostAccess(_) => None,
+        self.operations.iter().filter_map(|(_, op)| match op {
+            Operation::Call(Some(edge)) | Operation::Implicit(Some(edge)) => Some(edge.callee),
+            _ => None,
         })
     }
 }
@@ -568,14 +538,18 @@ impl<'a> BodyCtx<'a> {
         Some(self.key(element))
     }
 
-    fn arg(&self, expr: Idx<Expr>, at: Idx<Expr>) -> Arg {
-        let (fresh, param) = match self.body.expr_arena[expr] {
+    fn place_binding(&self, expr: Idx<Expr>) -> (Option<Idx<BindingInfo>>, Option<u16>) {
+        match self.body.expr_arena[expr] {
             Expr::Var(binding) => (
                 self.fresh_locals.contains(&binding).then_some(binding),
                 self.params.get(&binding).copied(),
             ),
             _ => (None, None),
-        };
+        }
+    }
+
+    fn arg(&self, expr: Idx<Expr>, at: Idx<Expr>) -> Arg {
+        let (fresh, param) = self.place_binding(expr);
         let mut ref_params = BTreeSet::new();
         self.ref_params(expr, &mut ref_params, &mut FxHashSet::default());
         Arg {
@@ -652,16 +626,12 @@ impl<'a> BodyCtx<'a> {
     }
 
     fn write(&self, effect: &mut Effect, target: Idx<Expr>, at: Span) {
-        let arg = self.arg(target, target);
-        if let Some(local) = arg.fresh {
-            effect.locals.entry(local).or_insert(at);
-        } else if let Some(p) = arg.param {
-            effect.params.entry(p).or_insert(at);
-        } else if let Some(key) = arg.element {
-            effect.add_element(key, at);
-        } else {
-            effect.add_unknown(at);
-        }
+        let (fresh, param) = self.place_binding(target);
+        let target = fresh
+            .map(Local)
+            .or_else(|| param.map(Param))
+            .or_else(|| self.element_key(target).map(Element));
+        effect.add(target.unwrap_or(Unknown), at);
     }
 
     fn call_args(&self, call: Idx<Expr>) -> impl Iterator<Item = Idx<Expr>> {
@@ -940,9 +910,9 @@ impl<'a> BodyCtx<'a> {
         }
         let mut direct = Effect::default();
         if let Some(at) = self.arena_remove {
-            direct.params.insert(0, at);
+            direct.add(Param(0), at);
         }
-        let mut calls = Vec::new();
+        let mut operations = Vec::new();
         let private_records = self.private_records(host_records);
         let may_callback = |base| {
             self.ty(base)
@@ -953,7 +923,7 @@ impl<'a> BodyCtx<'a> {
         for (id, expr) in self.body.expr_arena.iter() {
             match expr {
                 Expr::Call { .. } | Expr::SafeNavCall { .. } => {
-                    calls.push((id, self.call_site(id)));
+                    operations.push((Expression(id), Operation::Call(self.call_edge(id))));
                     if host_records.host_boundary
                         && let Some(base) = self.raw_table_receiver(id)
                         && !private_records.contains(&base)
@@ -964,12 +934,12 @@ impl<'a> BodyCtx<'a> {
                             self.collection_origin(base, id)
                         };
                         if origin != CollectionOrigin::Rock {
-                            calls.push((id, CallSite::HostAccess(origin)));
+                            operations.push((Expression(id), Operation::HostAccess(origin)));
                         }
                     }
                 }
                 Expr::CompoundAssign { .. } if self.resolved(id).is_some() => {
-                    calls.push((id, self.call_site(id)));
+                    operations.push((Expression(id), Operation::Call(self.call_edge(id))));
                 }
                 Expr::Index { base, .. }
                     if self
@@ -978,7 +948,7 @@ impl<'a> BodyCtx<'a> {
                 {
                     let origin = self.collection_origin(*base, id);
                     if origin != CollectionOrigin::Rock {
-                        calls.push((id, CallSite::HostAccess(origin)));
+                        operations.push((Expression(id), Operation::HostAccess(origin)));
                     }
                 }
                 Expr::FieldAccess { base, field } | Expr::SafeNav { base, field }
@@ -987,7 +957,7 @@ impl<'a> BodyCtx<'a> {
                 {
                     let origin = self.collection_origin(*base, id);
                     if origin != CollectionOrigin::Rock {
-                        calls.push((id, CallSite::HostAccess(origin)));
+                        operations.push((Expression(id), Operation::HostAccess(origin)));
                     }
                 }
                 Expr::Assign { .. } => self.assign_write(id, &mut direct),
@@ -996,20 +966,29 @@ impl<'a> BodyCtx<'a> {
                 | Expr::Spread(base)
                     if may_callback(*base) =>
                 {
-                    calls.push((id, CallSite::HostAccess(CollectionOrigin::Host)));
+                    operations.push((
+                        Expression(id),
+                        Operation::HostAccess(CollectionOrigin::Host),
+                    ));
                 }
                 Expr::StructLiteral { bases, fields, .. } => {
                     if bases.into_iter().any(may_callback) {
-                        calls.push((id, CallSite::HostAccess(CollectionOrigin::Host)));
+                        operations.push((
+                            Expression(id),
+                            Operation::HostAccess(CollectionOrigin::Host),
+                        ));
                     }
                     if let Some(edge) = self.default_fields(id, *fields) {
-                        calls.push((id, CallSite::Known(edge)));
+                        operations.push((Expression(id), Operation::Implicit(Some(edge))));
                     }
                 }
                 Expr::IfLet { pattern, value, .. }
                     if self.pattern_may_callback(host_records, *pattern) =>
                 {
-                    calls.push((*value, CallSite::HostAccess(CollectionOrigin::Host)));
+                    operations.push((
+                        Expression(*value),
+                        Operation::HostAccess(CollectionOrigin::Host),
+                    ));
                 }
                 Expr::Match {
                     scrutinee, arms, ..
@@ -1017,63 +996,61 @@ impl<'a> BodyCtx<'a> {
                     self.pattern_may_callback(host_records, self.body.match_arm_arena[arm].pattern)
                 }) =>
                 {
-                    calls.push((*scrutinee, CallSite::HostAccess(CollectionOrigin::Host)));
+                    operations.push((
+                        Expression(*scrutinee),
+                        Operation::HostAccess(CollectionOrigin::Host),
+                    ));
                 }
                 _ => {}
             }
         }
-        let mut iterations = Vec::new();
-        if !!host_records.host_boundary {
+        if host_records.host_boundary {
             for statement in self.body.statement_arena.values() {
                 match *statement {
                     Statement::Let { pattern, value, .. }
                         if self.pattern_may_callback(host_records, pattern) =>
                     {
-                        calls.push((value, CallSite::HostAccess(CollectionOrigin::Host)));
+                        operations.push((
+                            Expression(value),
+                            Operation::HostAccess(CollectionOrigin::Host),
+                        ));
                     }
                     Statement::For { pattern, iter, .. }
                         if self.pattern_may_callback(host_records, pattern) =>
                     {
-                        iterations.push((iter, CallSite::HostAccess(CollectionOrigin::Host)));
+                        operations.push((
+                            IteratorNext(iter),
+                            Operation::HostAccess(CollectionOrigin::Host),
+                        ));
                     }
                     _ => {}
                 }
             }
         }
-        let mut conversions: Vec<_> = self
-            .bi
-            .implicit_iter_args
-            .iter()
-            .map(|(&arg, witness)| {
-                (
-                    arg,
-                    self.unary_witness(witness.func, &witness.generics, Some(arg)),
-                )
-            })
-            .collect();
+        for (&arg, witness) in &self.bi.implicit_iter_args {
+            let edge = self.unary_witness(witness.func, &witness.generics, Some(arg));
+            operations.push((Expression(arg), Operation::Implicit(Some(edge))));
+        }
         for (&iter, info) in &self.bi.for_iter_protocol {
             if let Some(witness) = &info.iter {
-                conversions.push((
-                    iter,
-                    self.unary_witness(witness.func, &witness.generics, Some(iter)),
-                ));
+                let edge = self.unary_witness(witness.func, &witness.generics, Some(iter));
+                operations.push((Expression(iter), Operation::Implicit(Some(edge))));
             }
             let next = match &info.next {
                 BoundNext::Concrete {
                     func,
                     next_generics,
                     ..
-                } => self.unary_witness(*func, next_generics, info.iter.is_none().then_some(iter)),
-                BoundNext::CallerGeneric(_) => CallSite::Unknown,
+                } => Some(self.unary_witness(
+                    *func,
+                    next_generics,
+                    info.iter.is_none().then_some(iter),
+                )),
+                BoundNext::CallerGeneric(_) => None,
             };
-            iterations.push((iter, next));
+            operations.push((IteratorNext(iter), Operation::Implicit(next)));
         }
-        FnFacts {
-            direct,
-            calls,
-            iterations,
-            conversions,
-        }
+        FnFacts { direct, operations }
     }
 
     fn default_fields(
@@ -1203,7 +1180,7 @@ impl<'a> BodyCtx<'a> {
         callee: FnKey,
         subs: &FxHashMap<VarId, TyId>,
         receiver: Option<Idx<Expr>>,
-    ) -> CallSite {
+    ) -> Edge {
         let function = &self.ws.module(callee.0).functions[callee.1];
         let generics = function
             .generics
@@ -1217,14 +1194,14 @@ impl<'a> BodyCtx<'a> {
                 ANY_KEY.to_string()
             })
             .collect();
-        CallSite::Known(Edge {
+        Edge {
             callee: function_body(callee),
             generics,
             // A missing receiver here is the iterator returned by a preceding iter call.
             args: receiver
                 .map(|arg| vec![Some(self.arg(arg, arg))])
                 .unwrap_or_default(),
-        })
+        }
     }
 
     /// Map index assignment inserts; a Vec `len` write resizes.
@@ -1254,15 +1231,13 @@ impl<'a> BodyCtx<'a> {
         }
     }
 
-    fn call_site(&self, call: Idx<Expr>) -> CallSite {
+    fn call_edge(&self, call: Idx<Expr>) -> Option<Edge> {
         if self.bi.fn_field_calls.contains_key(&call) || self.bi.bound_calls.contains_key(&call) {
-            return CallSite::Unknown;
+            return None;
         }
-        let Some(callee) = self.resolved(call) else {
-            return CallSite::Unknown;
-        };
+        let callee = self.resolved(call)?;
         let function = &self.ws.module(callee.0).functions[callee.1];
-        CallSite::Known(Edge {
+        Some(Edge {
             callee: function_body(callee),
             generics: self.generic_keys(call),
             args: self.bind_args(function, call),
@@ -1319,7 +1294,7 @@ impl<'a> BodyCtx<'a> {
             Expr::Index { base, .. } => match self.element_key(*base) {
                 Some(key) => out.push(Root {
                     key,
-                    local: self.arg(*base, e).fresh,
+                    local: self.place_binding(*base).0,
                 }),
                 None => self.element_roots_inner(*base, out, seen),
             },
@@ -1408,8 +1383,7 @@ struct ArenaCrossings<'a> {
     returns_ref: bool,
     roots: FxHashMap<Idx<BindingInfo>, Vec<Root>>,
     active_values: FxHashSet<Idx<Expr>>,
-    effects: &'a FxHashMap<Idx<Expr>, Effect>,
-    iterations: &'a FxHashMap<Idx<Expr>, Effect>,
+    effects: &'a EffectsAt,
 }
 
 impl SuspensionPolicy for ArenaCrossings<'_> {
@@ -1421,36 +1395,23 @@ impl SuspensionPolicy for ArenaCrossings<'_> {
         self.roots.contains_key(&binding)
             && value.is_none_or(|value| self.active_values.contains(&value))
     }
-    fn is_barrier(&self, _body: &Body, at: Idx<Expr>) -> bool {
+    fn is_barrier(&self, _body: &Body, at: SuspensionPoint) -> bool {
         self.effects.contains_key(&at)
     }
-    fn crosses_binding(&self, binding: Idx<BindingInfo>, at: Idx<Expr>) -> bool {
+    fn crosses_binding(&self, binding: Idx<BindingInfo>, at: SuspensionPoint) -> bool {
         self.crosses(binding, &self.effects[&at])
     }
 
-    fn crosses_iteration(&self, binding: Idx<BindingInfo>, iter: Idx<Expr>) -> bool {
-        self.iterations
-            .get(&iter)
-            .is_some_and(|effect| self.crosses(binding, effect))
-    }
-
-    fn crosses_return(&self, value: Idx<Expr>, at: Idx<Expr>, iteration: bool) -> bool {
+    fn crosses_return(&self, value: Idx<Expr>, at: SuspensionPoint) -> bool {
         if !self.returns_ref {
             return false;
         }
-        let sites = if iteration {
-            self.iterations
-        } else {
-            self.effects
-        };
-        let Some(effect) = sites.get(&at) else {
-            return false;
-        };
+        let effect = &self.effects[&at];
         let mut roots = Vec::new();
         self.ctx.element_roots(value, &mut roots);
         roots
             .iter()
-            .any(|root| root.key.starts_with("Arena<") && Self::invalidates(&root.key, effect))
+            .any(|root| root.key.starts_with("Arena<") && effect.invalidating(root).is_some())
     }
 }
 
@@ -1458,17 +1419,7 @@ impl ArenaCrossings<'_> {
     fn crosses(&self, binding: Idx<BindingInfo>, effect: &Effect) -> bool {
         self.roots[&binding]
             .iter()
-            .any(|root| Self::invalidates(&root.key, effect))
-    }
-
-    fn invalidates(key: &str, effect: &Effect) -> bool {
-        effect.unknown.is_some()
-            || effect.host_property.is_some()
-            || !effect.host_params.is_empty()
-            || effect
-                .elements
-                .keys()
-                .any(|other| keys_may_alias(key, other))
+            .any(|root| effect.invalidating(root).is_some())
     }
 }
 
@@ -1606,52 +1557,46 @@ fn shown(key: &str) -> String {
 }
 
 fn map_edge(edge: &Edge, callee: &Effect, at: Span) -> Effect {
-    let mut mapped = Effect {
-        host_property: callee.host_property,
-        ..Effect::default()
-    };
-    for (&p, &witness) in &callee.host_params {
-        let origin = edge
-            .args
-            .get(p as usize)
-            .and_then(Option::as_ref)
-            .map_or(CollectionOrigin::Host, |arg| arg.collection_origin);
-        mapped.add_host_access(origin, witness);
-    }
-    for (&p, &witness) in &callee.retained {
-        if let Some(Some(arg)) = edge.args.get(p as usize) {
-            for &q in &arg.ref_params {
-                mapped.retained.entry(q).or_insert(witness);
-            }
-        }
-    }
-    if let Some(witness) = callee.unknown {
-        mapped.add_unknown(witness);
-    }
-    for (&p, &witness) in &callee.params {
-        match edge.args.get(p as usize) {
-            Some(Some(Arg {
-                fresh: Some(local), ..
-            })) => {
-                mapped.locals.entry(*local).or_insert(witness);
-            }
-            Some(Some(arg)) => {
-                if let Some(q) = arg.param {
-                    mapped.params.entry(q).or_insert(witness);
-                }
-                match &arg.element {
-                    Some(key) => mapped.add_element(key.clone(), witness),
-                    None if arg.param.is_none() => mapped.add_unknown(witness),
-                    None => {}
+    let mut mapped = Effect::default();
+    let arg = |p: u16| edge.args.get(p as usize);
+    for (effect, &witness) in &callee.0 {
+        match *effect {
+            Unknown | EffectOn::Host => mapped.add(effect.clone(), witness),
+            HostParam(p) => mapped.add_host_access(
+                arg(p)
+                    .and_then(Option::as_ref)
+                    .map_or(CollectionOrigin::Host, |arg| arg.collection_origin),
+                witness,
+            ),
+            Retained(p) => {
+                if let Some(Some(arg)) = arg(p) {
+                    for &q in &arg.ref_params {
+                        mapped.add(Retained(q), witness);
+                    }
                 }
             }
-            // A defaulted parameter is a value the callee builds itself.
-            Some(None) => {}
-            None => mapped.add_unknown(at),
+            Param(p) => match arg(p) {
+                Some(Some(arg)) => {
+                    if let Some(local) = arg.fresh {
+                        mapped.add(Local(local), witness);
+                    } else {
+                        if let Some(q) = arg.param {
+                            mapped.add(Param(q), witness);
+                        }
+                        if let Some(key) = &arg.element {
+                            mapped.add(Element(key.clone()), witness);
+                        } else if arg.param.is_none() {
+                            mapped.add(Unknown, witness);
+                        }
+                    }
+                }
+                // A defaulted parameter is a value the callee builds itself.
+                Some(None) => {}
+                None => mapped.add(Unknown, at),
+            },
+            Element(ref key) => mapped.add(Element(substitute(key, &edge.generics)), witness),
+            Local(_) => {}
         }
-    }
-    for (key, &witness) in &callee.elements {
-        mapped.add_element(substitute(key, &edge.generics), witness);
     }
     mapped
 }
@@ -1665,7 +1610,7 @@ fn bodiless_summary(ws: &Workspace, key: FnKey) -> Effect {
         .iter()
         .any(|a| a.is_builtin(RELOCATES_ANNOTATION))
     {
-        effect.params.insert(0, function.span);
+        effect.add(Param(0), function.span);
     } else if !is_stdlib_module_file(module.file.as_str())
         || matches!(
             function.name.as_str(),
@@ -1679,7 +1624,7 @@ fn bodiless_summary(ws: &Workspace, key: FnKey) -> Effect {
         })
     {
         // Foreign code, or a stdlib primitive that calls back into a closure.
-        effect.add_unknown(function.span);
+        effect.add(Unknown, function.span);
     }
     if is_stdlib_module_file(module.file.as_str())
         && function.inline_body.is_some()
@@ -1696,7 +1641,7 @@ fn bodiless_summary(ws: &Workspace, key: FnKey) -> Effect {
             )
         })
     {
-        effect.host_params.insert(0, function.span);
+        effect.add(HostParam(0), function.span);
     }
     effect
 }
@@ -1723,15 +1668,30 @@ impl Relevance {
 
     /// Unknown code subsumes structural effects; retention still propagates.
     fn trim(&self, effect: &mut Effect) {
-        if effect.unknown.is_some() {
-            effect.host_property = None;
-            effect.host_params.clear();
-            effect.params.clear();
-            effect.elements.clear();
-            effect.locals.clear();
+        if effect.0.contains_key(&Unknown) {
+            effect
+                .0
+                .retain(|effect, _| matches!(effect, Unknown | Retained(_)));
         } else {
-            effect.elements.retain(|key, _| self.keeps(key));
+            effect.0.retain(|effect, _| match effect {
+                Element(key) => self.keeps(key),
+                _ => true,
+            });
         }
+    }
+}
+
+fn evaluated(body: &Body, root: Idx<Expr>, mut visit: impl FnMut(HirChild)) {
+    let mut visit = |node| {
+        visit(node);
+        match node {
+            HirChild::Expr(e) => !matches!(body.expr_arena[e], Expr::Lambda { .. }),
+            HirChild::Statement(s) => !matches!(body.statement_arena[s], Statement::Fn { .. }),
+            HirChild::Pattern(_) => true,
+        }
+    };
+    if visit(HirChild::Expr(root)) {
+        body.walk_descendants(HirChild::Expr(root), &mut visit);
     }
 }
 
@@ -1761,21 +1721,21 @@ impl ReturnOrigins {
             let ctx = BodyCtx::new(ws, Some(function), body, bi, self);
             if let Some(root) = body.root {
                 ctx.element_roots(root, &mut roots);
-                body.walk_descendants(HirChild::Expr(root), &mut |child| {
-                    match child {
+                evaluated(body, root, |node| {
+                    let value = match node {
                         HirChild::Expr(e) => match body.expr_arena[e] {
-                            Expr::Lambda { .. } => return false,
-                            Expr::Return(Some(value)) => ctx.element_roots(value, &mut roots),
-                            _ => {}
+                            Expr::Return(value) => value,
+                            _ => None,
                         },
                         HirChild::Statement(s) => match body.statement_arena[s] {
-                            Statement::Fn { .. } => return false,
-                            Statement::Return(Some(value)) => ctx.element_roots(value, &mut roots),
-                            _ => {}
+                            Statement::Return(value) => value,
+                            _ => None,
                         },
-                        HirChild::Pattern(_) => {}
+                        HirChild::Pattern(_) => None,
+                    };
+                    if let Some(value) = value {
+                        ctx.element_roots(value, &mut roots);
                     }
-                    true
                 });
             }
         }
@@ -1959,22 +1919,31 @@ impl<'a> Program<'a> {
         if function.is_coroutine {
             for (index, param) in function.param_decls.iter().enumerate() {
                 if self.ws.type_contains_ref(None, param.ty) {
-                    effect.retained.insert(index as u16, function.span);
+                    effect.add(Retained(index as u16), function.span);
                 }
             }
         }
         effect
     }
 
-    fn call_effect(&self, body: &Body, call: Idx<Expr>, site: &CallSite) -> Effect {
-        let at = body.expr_spans[call];
-        let mut effect = match site {
-            CallSite::Known(edge) => map_edge(edge, &self.summary(edge.callee), at),
-            CallSite::Unknown => Effect {
-                unknown: Some(at),
-                ..Effect::default()
-            },
-            CallSite::HostAccess(origin) => {
+    fn operation_effect(
+        &self,
+        body: &Body,
+        point: SuspensionPoint,
+        operation: &Operation,
+    ) -> Effect {
+        let (Expression(expr) | IteratorNext(expr)) = point;
+        let at = body.expr_spans[expr];
+        let mut effect = match operation {
+            Operation::Call(Some(edge)) | Operation::Implicit(Some(edge)) => {
+                map_edge(edge, &self.summary(edge.callee), at)
+            }
+            Operation::Call(None) | Operation::Implicit(None) => {
+                let mut effect = Effect::default();
+                effect.add(Unknown, at);
+                effect
+            }
+            Operation::HostAccess(origin) => {
                 let mut effect = Effect::default();
                 effect.add_host_access(*origin, at);
                 effect
@@ -1999,15 +1968,15 @@ impl<'a> Program<'a> {
             let body = &self.ws.module(key.0).bodies[&key.1];
             let facts = &self.facts[&key];
             let mut effect = facts.direct.clone();
-            for (call, site) in facts.all_calls() {
-                effect.union(&self.call_effect(body, *call, site));
+            for (point, op) in &facts.operations {
+                effect.union(&self.operation_effect(body, *point, op));
             }
-            effect.locals.clear();
+            effect.0.retain(|target, _| !matches!(target, Local(_)));
             self.relevance.trim(&mut effect);
             if self
                 .summaries
                 .get(&key)
-                .is_some_and(|old| old.same_shape(&effect))
+                .is_some_and(|old| old.0.keys().eq(effect.0.keys()))
             {
                 continue;
             }
@@ -2026,8 +1995,13 @@ impl<'a> Program<'a> {
         };
         let ctx = BodyCtx::new(self.ws, function, body, bi, &self.return_origins);
         let facts = &self.facts[&(mid, owner)];
-        let effects = self.effects_at(body, facts.calls.iter().chain(&facts.conversions));
-        let iterations = self.effects_at(body, &facts.iterations);
+        let mut effects = EffectsAt::default();
+        for &(point, ref op) in &facts.operations {
+            effects
+                .entry(point)
+                .or_default()
+                .union(&self.operation_effect(body, point, op));
+        }
         let mut errors = Vec::new();
         let mut borrowed = FxHashMap::default();
         let mut active_values = FxHashSet::default();
@@ -2051,16 +2025,23 @@ impl<'a> Program<'a> {
         let returns_ref = function
             .and_then(|f| f.return_ty)
             .is_some_and(|ty| ref_target(self.ws, bi, ty).is_some());
-        if !borrowed.is_empty() || returns_ref {
+        if !effects.is_empty() && (!borrowed.is_empty() || returns_ref) {
             let mut policy = ArenaCrossings {
                 ctx: &ctx,
                 returns_ref,
                 roots: borrowed,
                 active_values,
                 effects: &effects,
-                iterations: &iterations,
             };
-            let mut crossings = uses_after_suspension(body, &policy);
+            let mut crossings = Vec::new();
+            if let Some(root) = body.root {
+                crossings.extend(uses_after_suspension_in(
+                    body,
+                    root,
+                    body.param_bindings,
+                    &policy,
+                ));
+            }
             policy.returns_ref = false;
             for &default in body
                 .param_defaults
@@ -2096,13 +2077,10 @@ impl<'a> Program<'a> {
                 ));
             }
         }
-        for (call, site) in &facts.calls {
-            if !matches!(
-                body.expr_arena[*call],
-                Expr::Call { .. } | Expr::SafeNavCall { .. }
-            ) {
+        for (point, operation) in &facts.operations {
+            let (Expression(call), Operation::Call(edge)) = (point, operation) else {
                 continue;
-            }
+            };
             let Some(ref_args) = bi.ref_call_args.get(call) else {
                 continue;
             };
@@ -2113,12 +2091,13 @@ impl<'a> Program<'a> {
                     continue;
                 }
                 if roots.iter().any(|root| !root.key.starts_with("Arena<"))
-                    && let CallSite::Known(edge) = site
+                    && let Some(edge) = edge
                     && let Some(witness) =
                         self.summary(edge.callee)
-                            .retained
+                            .0
                             .iter()
-                            .find_map(|(&p, &at)| {
+                            .find_map(|(effect, &at)| {
+                                let Retained(p) = *effect else { return None };
                                 edge.args
                                     .get(p as usize)
                                     .and_then(Option::as_ref)
@@ -2132,7 +2111,7 @@ impl<'a> Program<'a> {
                     ).with_label(witness, "the coroutine retains its parameters until resume".to_string()));
                     continue;
                 }
-                let effect = self.effect_while_live(&ctx, &effects, &iterations, *call, ref_arg);
+                let effect = self.effect_while_live(&ctx, &effects, *call, ref_arg);
                 if let Some(error) = rejection(&ctx, *call, ref_arg, &roots, &effect) {
                     errors.push(error);
                 }
@@ -2141,52 +2120,38 @@ impl<'a> Program<'a> {
         errors
     }
 
-    fn effects_at<'b>(
-        &self,
-        body: &Body,
-        sites: impl IntoIterator<Item = &'b (Idx<Expr>, CallSite)>,
-    ) -> FxHashMap<Idx<Expr>, Effect> {
-        use std::collections::hash_map::Entry;
-        let mut effects = FxHashMap::<_, Effect>::default();
-        for (expr, site) in sites {
-            let effect = self.call_effect(body, *expr, site);
-            match effects.entry(*expr) {
-                Entry::Vacant(entry) => {
-                    entry.insert(effect);
-                }
-                Entry::Occupied(mut entry) => entry.get_mut().union(&effect),
-            }
-        }
-        effects
-    }
-
     /// What may run while `ref_arg` is live: the call itself and the
     /// arguments evaluated after it.
     fn effect_while_live(
         &self,
         ctx: &BodyCtx,
-        effects: &FxHashMap<Idx<Expr>, Effect>,
-        iterations: &FxHashMap<Idx<Expr>, Effect>,
+        effects: &EffectsAt,
         call: Idx<Expr>,
         ref_arg: Idx<Expr>,
     ) -> Effect {
-        let mut effect = effects[&call].clone();
+        let mut effect = effects[&Expression(call)].clone();
         let taken = ctx.body.expr_spans[ref_arg];
         for arg in ctx.call_args(call) {
             let span = ctx.body.expr_spans[arg];
             if span.offset_range().0 <= taken.offset_range().0 {
                 continue;
             }
-            for (id, _) in ctx.body.expr_arena.iter() {
-                let inner = ctx.body.expr_spans[id];
-                if !span.contains(inner) {
-                    continue;
-                }
-                for nested in effects.get(&id).into_iter().chain(iterations.get(&id)) {
+            evaluated(ctx.body, arg, |node| {
+                let point = match node {
+                    HirChild::Expr(id) => {
+                        ctx.assign_write(id, &mut effect);
+                        Expression(id)
+                    }
+                    HirChild::Statement(stmt) => match ctx.body.statement_arena[stmt] {
+                        Statement::For { iter, .. } => IteratorNext(iter),
+                        _ => return,
+                    },
+                    HirChild::Pattern(_) => return,
+                };
+                if let Some(nested) = effects.get(&point) {
                     effect.union(nested);
                 }
-                ctx.assign_write(id, &mut effect);
-            }
+            });
         }
         effect
     }
@@ -2208,50 +2173,55 @@ fn rejection(
 ) -> Option<CompilerError> {
     let at = ctx.body.expr_spans[ref_arg];
     let callee = callee_name(ctx, call);
-    let remedy = if roots.iter().any(|root| root.key.starts_with("Arena<")) {
+    let arena = roots.iter().any(|root| root.key.starts_with("Arena<"));
+    let remedy = if arena {
         "borrow again after the invalidating call, or copy the value and write it back after the call"
     } else {
         "copy the element out and write it back after the call, or keep data that is referenced across calls in an Arena"
     };
-    let arena = roots.iter().any(|root| root.key.starts_with("Arena<"));
-    let host = effect
-        .host_property
-        .or_else(|| effect.host_params.values().next().copied());
-    if let Some(witness) = effect.unknown.or(host.filter(|_| arena)) {
-        return Some(
-            CompilerError::new_with_label(
-                at,
+    let mut invalidating = roots.iter().filter_map(|root| {
+        effect
+            .invalidating(root)
+            .map(|(effect, witness)| (root, effect, witness))
+    });
+    let first = invalidating.next()?;
+    let (root, cause, witness) = std::iter::once(first)
+        .chain(invalidating)
+        .find(|(_, effect, _)| matches!(effect, Unknown | EffectOn::Host | HostParam(_)))
+        .unwrap_or(first);
+    let (prefix, reason, label) = match cause {
+        Unknown | EffectOn::Host | HostParam(_) => (
+            if arena {
+                ARENA_REJECTION
+            } else {
+                REJECTION_PREFIX
+            },
+            "the call runs a closure or foreign function whose effect on the collection is unknown"
+                .to_string(),
+            "the call may run unknown code here".to_string(),
+        ),
+        target => {
+            let key = shown(match target {
+                Element(key) => key,
+                _ => &root.key,
+            });
+            (
+                if root.key.starts_with("Arena<") {
+                    ARENA_REJECTION
+                } else {
+                    REJECTION_PREFIX
+                },
                 format!(
-                    "{} to `{callee}`: the call runs a closure or foreign function whose effect on the collection is unknown; {remedy}",
-                    if roots.iter().any(|r| r.key.starts_with("Arena<")) { ARENA_REJECTION } else { REJECTION_PREFIX }
+                    "the call may invalidate a collection of `{key}` while the reference is live"
                 ),
+                format!("a collection of `{key}` may change structure here"),
             )
-            .with_label(witness, "the call may run unknown code here".to_string()),
-        );
-    }
-    for root in roots {
-        let local = root.local.and_then(|local| effect.locals.get(&local));
-        let element = effect
-            .elements
-            .iter()
-            .find(|(key, _)| keys_may_alias(&root.key, key));
-        let (key, witness) = match (local, element) {
-            (Some(&witness), _) => (shown(&root.key), witness),
-            (None, Some((key, &witness))) => (shown(key), witness),
-            (None, None) => continue,
-        };
-        return Some(
-            CompilerError::new_with_label(
-                at,
-                format!(
-                    "{} to `{callee}`: the call may invalidate a collection of `{key}` while the reference is live; {remedy}",
-                    if root.key.starts_with("Arena<") { ARENA_REJECTION } else { REJECTION_PREFIX }
-                ),
-            )
-            .with_label(witness, format!("a collection of `{key}` may change structure here")),
-        );
-    }
-    None
+        }
+    };
+    Some(
+        CompilerError::new_with_label(at, format!("{prefix} to `{callee}`: {reason}; {remedy}"))
+            .with_label(witness, label),
+    )
 }
 
 fn annotation_errors(module: &Module) -> Vec<(BodyOwner, CompilerError)> {

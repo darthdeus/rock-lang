@@ -2,25 +2,26 @@ use crate::hir::{BinOp, BindingInfo, Callee, Expr, Pattern, Statement};
 use crate::hir_walk::HirChild;
 use crate::prelude::*;
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SuspensionPoint {
+    Expression(Idx<Expr>),
+    IteratorNext(Idx<Expr>),
+}
+
 pub trait SuspensionPolicy {
     fn binding_holds_frame_data(&self, binding: Idx<BindingInfo>, value: Option<Idx<Expr>>)
     -> bool;
 
-    /// Collection invalidation can reuse the structured flow walk without
-    /// crossing bindings whose storage the operation cannot affect.
-    fn is_barrier(&self, body: &Body, at: Idx<Expr>) -> bool {
-        matches!(body.expr_arena[at], Expr::Yield(_) | Expr::YieldDelegate(_))
+    fn is_barrier(&self, body: &Body, at: SuspensionPoint) -> bool {
+        matches!(at, SuspensionPoint::Expression(expr)
+            if matches!(body.expr_arena[expr], Expr::Yield(_) | Expr::YieldDelegate(_)))
     }
 
-    fn crosses_iteration(&self, _binding: Idx<BindingInfo>, _iter: Idx<Expr>) -> bool {
+    fn crosses_return(&self, _value: Idx<Expr>, _at: SuspensionPoint) -> bool {
         false
     }
 
-    fn crosses_return(&self, _value: Idx<Expr>, _at: Idx<Expr>, _iteration: bool) -> bool {
-        false
-    }
-
-    fn crosses_binding(&self, _binding: Idx<BindingInfo>, _at: Idx<Expr>) -> bool {
+    fn crosses_binding(&self, _binding: Idx<BindingInfo>, _at: SuspensionPoint) -> bool {
         true
     }
 }
@@ -32,7 +33,7 @@ pub fn uses_after_suspension(body: &Body, policy: &impl SuspensionPolicy) -> Vec
     if !body
         .expr_arena
         .iter()
-        .any(|(at, _)| policy.is_barrier(body, at))
+        .any(|(at, _)| policy.is_barrier(body, SuspensionPoint::Expression(at)))
     {
         return Vec::new();
     }
@@ -269,8 +270,7 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
                 self.expr(*iter, flow);
                 let vars = self.body.pattern_bindings(*pattern);
                 self.loop_body(&vars, *body, flow, |walk, pass| {
-                    pass.suspend(|binding| walk.policy.crosses_iteration(binding, *iter));
-                    walk.check_return(*iter, true);
+                    walk.cross_barrier(SuspensionPoint::IteratorNext(*iter), pass);
                 });
             }
             Statement::While { cond, body } => {
@@ -406,21 +406,17 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
                 });
             }
         }
-        self.cross_barrier(expr, flow);
+        self.cross_barrier(SuspensionPoint::Expression(expr), flow);
     }
 
-    fn cross_barrier(&mut self, expr: Idx<Expr>, flow: &mut Flow) {
-        if self.policy.is_barrier(self.body, expr) {
-            flow.suspend(|binding| self.policy.crosses_binding(binding, expr));
-            self.check_return(expr, false);
-        }
-    }
-
-    fn check_return(&mut self, at: Idx<Expr>, iteration: bool) {
-        if let Some(value) = self.returning
-            && self.policy.crosses_return(value, at, iteration)
-        {
-            self.reported.insert(value);
+    fn cross_barrier(&mut self, at: SuspensionPoint, flow: &mut Flow) {
+        if self.policy.is_barrier(self.body, at) {
+            flow.suspend(|binding| self.policy.crosses_binding(binding, at));
+            if let Some(value) = self.returning
+                && self.policy.crosses_return(value, at)
+            {
+                self.reported.insert(value);
+            }
         }
     }
 
