@@ -102,26 +102,6 @@ fn derived_scalar_constant_edits_refresh_transitive_readers_at_runtime() {
     assert_eq!(run_luajit(&runtime), "ok");
 }
 
-fn inline_budget_eligibility_flip_fixture(large_helper: bool) -> String {
-    let mut src = String::from("@inline @nomangle fn helper(flag: bool) -> int {\n");
-    if large_helper {
-        for i in 0..64 {
-            src.push_str(&format!(
-                "let value_{i} = {i}\nif flag {{ return value_{i} }}\n"
-            ));
-        }
-        src.push_str("return 17\n}\n");
-    } else {
-        src.push_str("if flag { return 3 }\nreturn 5\n}\n");
-    }
-    src.push_str("@nomangle fn caller() -> int {\n");
-    for i in 0..380 {
-        src.push_str(&format!("let unused_{i} = 0\nunused_{i} = {i}\n"));
-    }
-    src.push_str("return helper(false)\n}\n@nomangle fn other() -> int { 7 }\n");
-    src
-}
-
 #[test]
 fn transitive_effect_changes_rebuild_residual_callers_in_both_directions() {
     let grow = r#"
@@ -484,7 +464,8 @@ fn inline_decisions_follow_helper_edits() {
              @nomangle fn other() -> int {{ 7 }}"
         )
     };
-    let over_budget = |value: i32| {
+    // Caller size does not bound splicing.
+    let large_caller = |value: i32| {
         let mut src = format!(
             "@inline @nomangle fn helper() -> int {{ {value} }}\n\
              @nomangle fn caller() -> int {{\n"
@@ -494,13 +475,36 @@ fn inline_decisions_follow_helper_edits() {
         }
         src + "return helper()\n}\n@nomangle fn other() -> int { 7 }\n"
     };
+    // A lambda the body keeps makes the helper ineligible for splicing.
+    let helper = |value: i32, keeps_lambda: bool| {
+        let keep = if keeps_lambda { "take(() => 1)\n" } else { "" };
+        format!(
+            "@nomangle fn take(f: fn() -> int) -> int {{ f() }}\n\
+             @inline @nomangle fn helper() -> int {{\n{keep}return {value}\n}}\n\
+             @nomangle fn caller() -> int {{ helper() }}\n\
+             @nomangle fn other() -> int {{ 7 }}"
+        )
+    };
     for (_label, v1, v2, residual_before, residual_after) in [
         ("stays inlined", small(3), small(5), false, false),
-        ("stays residual", over_budget(3), over_budget(5), true, true),
+        (
+            "large caller",
+            large_caller(3),
+            large_caller(5),
+            false,
+            false,
+        ),
+        (
+            "stays residual",
+            helper(3, true),
+            helper(5, true),
+            true,
+            true,
+        ),
         (
             "becomes inlinable",
-            inline_budget_eligibility_flip_fixture(true),
-            inline_budget_eligibility_flip_fixture(false),
+            helper(3, true),
+            helper(3, false),
             true,
             false,
         ),
@@ -512,6 +516,21 @@ fn inline_decisions_follow_helper_edits() {
         let updated = check_incremental(&ws, &mut cache, &[body_id(&ws, "helper")]);
         assert_eq!(residual(&updated.lua), residual_after);
     }
+}
+
+#[test]
+fn mutually_recursive_inline_helpers_splice_each_callee_once_per_chain() {
+    let (full, _) = emit_full_of(
+        &ws_with_stdlib(
+            "@inline @nomangle fn is_even(n: int) -> bool { if n == 0 { return true } return is_odd(n - 1) }\n\
+             @inline @nomangle fn is_odd(n: int) -> bool { if n == 0 { return false } return is_even(n - 1) }\n\
+             @nomangle fn caller() -> bool { is_even(10) }",
+        ),
+        "emit",
+    );
+    let body = function_body(&full.lua, "caller");
+    assert_eq!(body.matches(" then").count(), 2, "{body}");
+    assert_eq!(body.matches("is_even(").count(), 1, "{body}");
 }
 
 const ABI_FLIP_V1: &str = "value V2 { x: float, y: float }\n\

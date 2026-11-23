@@ -17,8 +17,6 @@ use ustr::Ustr;
 use crate::{top_level_blocks, visit::raw};
 
 const MAX_INLINES_PER_FN: usize = 1000;
-/// Bound expansion even when register allocation can coalesce most cells.
-const CELL_BUDGET: usize = 400;
 
 thread_local! {
     static INLINE_OFF: ThreadCell<bool> = const { ThreadCell::new(false) };
@@ -67,21 +65,12 @@ struct CalleeBody {
     ret_arity: usize,
     reachable: Vec<Idx<Block>>,
     insts: usize,
-    source_cells: usize,
     /// Coalescing preserves field mutation through a shared argument. A
     /// parameter assigned as a whole needs its own cell.
     coalescable_params: Vec<bool>,
     /// A lambda sub-CFG reads captured cells, so its body cannot forward these reads.
     forwardable_reads: Vec<(usize, Idx<Inst>)>,
     forwards_reads: bool,
-}
-
-impl CalleeBody {
-    /// Cells a splice charges to the caller's budget: the callee's cells and
-    /// the `let`s it holds as values, which a cell would have held before.
-    fn budget_cells(&self) -> usize {
-        self.source_cells + self.func.value_lets
-    }
 }
 
 /// Rejected candidates are cached too.
@@ -177,7 +166,6 @@ impl InlineCandidateTable {
             && before.abi == after.abi
             && before.func.params.len() == after.func.params.len()
             && before.ret_arity == after.ret_arity
-            && before.budget_cells() == after.budget_cells()
     }
 
     pub fn keys(&self) -> Vec<Instance> {
@@ -642,8 +630,6 @@ fn compact_region(
     template.nested_fn_identities = arena.nested_fn_identities.clone();
     template.rep_arena = arena.rep_arena.clone();
     template.params = header.params.iter().map(|param| cell_map[param]).collect();
-    template.value_lets = header.value_lets;
-    template.value_leaves = header.value_leaves;
     template.abi_plan = header.abi_plan.clone();
     template.abi_representation = header.abi_representation.clone();
     template.statics = header.statics.clone();
@@ -864,7 +850,6 @@ fn classify(
     }
     let coalescable_params: Vec<bool> = mf.params.iter().map(|p| !rebound.contains(p)).collect();
     let live = live_closure(&mf);
-    let source_cells = mf.cells.len();
     let (mf, block_map) = compact_live_template(mf, &live);
 
     let mut reachable = Vec::new();
@@ -903,7 +888,6 @@ fn classify(
         ret_arity,
         reachable,
         insts: reachable_insts,
-        source_cells,
         coalescable_params,
         forwardable_reads,
         forwards_reads: !has_lambda,
@@ -1001,6 +985,10 @@ fn get<'a>(
     Ok(cache.cands[inst].as_deref())
 }
 
+/// The callees whose splices produced a call. Splicing a callee again inside
+/// its own expansion would unroll recursion.
+type SpliceChain = SmallVec<[FuncRef; 4]>;
+
 struct Site {
     pos: (Idx<Block>, usize),
     call_id: Idx<Inst>,
@@ -1067,8 +1055,7 @@ fn find_site(
     self_ref: FuncRef,
     top: &[bool],
     resume: Option<(Idx<Block>, usize)>,
-    cell_budget: usize,
-    pinned: &HashSet<Idx<Cell>>,
+    splice_chains: &HashMap<Idx<Inst>, SpliceChain>,
     concrete_plans: &ConcretePlans,
 ) -> Result<Option<Site>, CompilerError> {
     let (first_block, first_inst) = resume.map_or((0, 0), |(block, index)| (raw(block), index));
@@ -1087,7 +1074,7 @@ fn find_site(
                 Inst::CallMulti { func, args, dests } => (*func, args, Some(dests)),
                 _ => continue,
             };
-            if fref == self_ref {
+            if fref == self_ref || splice_chains.get(&iid).is_some_and(|c| c.contains(&fref)) {
                 continue;
             }
             let Some((inst, abi)) = call_target(func, iid, fref, ws)? else {
@@ -1103,17 +1090,8 @@ fn find_site(
             {
                 continue;
             }
-            // A coalesced argument already occupies a counted caller cell.
-            let cost = cell_budget + cand.budget_cells() + cand.func.params.len();
-            let pos = (bid, idx);
-            if inst.args.is_empty()
-                && cost > CELL_BUDGET
-                && cost - for_each_coalesced(func, cand, args, pos, pinned, |_, _| {}) > CELL_BUDGET
-            {
-                continue;
-            }
             return Ok(Some(Site {
-                pos,
+                pos: (bid, idx),
                 call_id: iid,
                 args: args.clone(),
                 dests: dests.cloned(),
@@ -1277,42 +1255,25 @@ fn coalesce_overrides(
     pos: (Idx<Block>, usize),
     pinned: &HashSet<Idx<Cell>>,
     scratch: &mut InlineScratch,
-) -> usize {
+) {
     let callee = &cand.func;
     scratch.overrides.clear();
     scratch.coalesced.clear();
     scratch.coalesced.resize(callee.params.len(), false);
-    for_each_coalesced(caller, cand, args, pos, pinned, |i, c| {
-        scratch.overrides.insert(callee.params[i], c);
-        scratch.coalesced[i] = true;
-    })
-}
-
-fn for_each_coalesced(
-    caller: &MirFunc,
-    cand: &CalleeBody,
-    args: &[Idx<Inst>],
-    pos: (Idx<Block>, usize),
-    pinned: &HashSet<Idx<Cell>>,
-    mut visit: impl FnMut(usize, Idx<Cell>),
-) -> usize {
     let mut preds = None;
-    let mut count = 0;
-    for (i, arg) in args.iter().enumerate().take(cand.func.params.len()) {
+    for (i, &load) in args.iter().enumerate().take(callee.params.len()) {
         if !cand.coalescable_params.get(i).copied().unwrap_or(false) {
             continue;
         }
         // Coalescing a converted load would erase its numeric conversion.
-        let load = *arg;
         let Inst::Load(c) = caller.insts[load] else {
             continue;
         };
         if snapshot_holds(caller, pinned, &mut preds, c, load, pos) {
-            visit(i, c);
-            count += 1;
+            scratch.overrides.insert(callee.params[i], c);
+            scratch.coalesced[i] = true;
         }
     }
-    count
 }
 
 /// A copied argument is a snapshot until the call and throughout the splice.
@@ -1651,14 +1612,14 @@ fn splice(
     pinned: &HashSet<Idx<Cell>>,
     scratch: &mut InlineScratch,
     uses: &mut UseIndex,
-) -> Result<usize, CompilerError> {
+) -> Result<(), CompilerError> {
     scratch.added_blocks.clear();
     let callee = &cand.func;
     let (bid, idx) = site.pos;
     let args = &site.args;
     let site_tree = func.bound_trees.remove(&site.call_id);
     let site_resolved_tree = func.resolved_bound_trees.remove(&site.call_id);
-    let coalesced_cells = coalesce_overrides(func, cand, args, (bid, idx), pinned, scratch);
+    coalesce_overrides(func, cand, args, (bid, idx), pinned, scratch);
     clone_body(func, callee, scratch, cand.kind);
     let repack_mark = func.insts.len();
     resolve_cloned_bound_calls(
@@ -1693,7 +1654,7 @@ fn splice(
         Kind::Straight => splice_straight(func, &site, cand, scratch, uses, &forwarded),
         Kind::General => splice_general(func, &site, cand, scratch, uses),
     }
-    Ok(coalesced_cells)
+    Ok(())
 }
 
 fn bind_params(
@@ -1884,7 +1845,7 @@ pub(crate) fn inline_functions_with_plans(
     pin_cells(func, &top, 0, &mut pinned);
     let mut uses: Option<UseIndex> = None;
     let mut resume: Option<(Idx<Block>, usize)> = None;
-    let mut cell_budget = func.cells.len() + func.value_leaves;
+    let mut splice_chains: HashMap<Idx<Inst>, SpliceChain> = HashMap::default();
     let mut budget = MAX_INLINES_PER_FN;
     let mut copied_instructions = 0;
     while budget > 0 {
@@ -1896,8 +1857,7 @@ pub(crate) fn inline_functions_with_plans(
             self_ref,
             &top,
             resume,
-            cell_budget,
-            &pinned,
+            &splice_chains,
             concrete_plans,
         )?
         else {
@@ -1905,14 +1865,15 @@ pub(crate) fn inline_functions_with_plans(
         };
         let pos = site.pos;
         let fref = site.inst.func;
+        let mut chain = splice_chains.remove(&site.call_id).unwrap_or_default();
+        chain.push(fref);
         let uses = uses.get_or_insert_with(|| UseIndex::build(func));
         let (cands, scratch) = (&cache.cands, &mut cache.scratch);
         let cand = cands[&site.inst]
             .as_ref()
             .expect("site implies a cached candidate");
-        let result_cell = usize::from(cand.kind == Kind::General && site.dests.is_none());
         let blocks_before = func.blocks.len();
-        let coalesced_cells = splice(
+        splice(
             func,
             site,
             cand,
@@ -1928,15 +1889,17 @@ pub(crate) fn inline_functions_with_plans(
             top[raw(block)] = true;
         }
         pin_cells(func, &top, blocks_before, &mut pinned);
+        for &inst in &scratch.inst_ids {
+            if matches!(func.insts[inst], Inst::Call { .. } | Inst::CallMulti { .. }) {
+                splice_chains.insert(inst, chain.clone());
+            }
+        }
         copied_instructions += cand.insts;
         func.statics.extend(cand.func.statics.iter().cloned());
         func.comptime_reads
             .extend(cand.func.comptime_reads.iter().cloned());
         func.struct_registry_roots
             .extend(cand.func.struct_registry_roots.iter().copied());
-        func.value_lets += cand.func.value_lets;
-        func.value_leaves += cand.func.value_leaves;
-        cell_budget += cand.budget_cells().saturating_sub(coalesced_cells) + result_cell;
         spliced.insert(fref);
         resume = Some(pos);
         budget -= 1;

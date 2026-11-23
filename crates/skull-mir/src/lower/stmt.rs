@@ -135,8 +135,6 @@ impl<'a> Builder<'a> {
         if self.binding_stays_unwritten(name) {
             self.bind_value_leaves(name, &leaves, selected);
         } else {
-            self.f.value_lets += leaves.len();
-            self.f.value_leaves += leaves.len();
             let cells = self
                 .store_binding_slots(name, &leaves)
                 .into_iter()

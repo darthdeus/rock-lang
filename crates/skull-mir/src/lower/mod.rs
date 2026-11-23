@@ -1621,7 +1621,6 @@ impl<'a> Builder<'a> {
             return false;
         }
         self.value_binds.insert(raw(name), value);
-        self.f.value_lets += 1;
         true
     }
 

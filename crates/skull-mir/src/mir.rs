@@ -920,10 +920,6 @@ pub struct MirFunc {
     pub params: Vec<Idx<Cell>>,
     /// Backends with typed parameters cannot use the Lua/JS nil sentinel.
     pub materialized_default_guards: bone_core::prelude::FxHashSet<Idx<Inst>>,
-    /// The inliner still charges a splice for a callee's, so the cell budget
-    /// bounds the same expansion.
-    pub value_lets: usize,
-    pub value_leaves: usize,
     pub abi_plan: Option<crate::lower::BackendFnAbiPlanHandle>,
     pub abi_representation: Option<crate::lower::FunctionRepPlan>,
     pub statics: Vec<StaticCell>,
@@ -1033,8 +1029,6 @@ impl MirFunc {
             rep_arena: None,
             params: Vec::new(),
             materialized_default_guards: Default::default(),
-            value_lets: 0,
-            value_leaves: 0,
             abi_plan: None,
             abi_representation: None,
             statics: Vec::new(),

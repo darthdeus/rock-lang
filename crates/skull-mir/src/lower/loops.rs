@@ -1258,8 +1258,6 @@ impl<'a> Builder<'a> {
         leaves: &[Idx<Inst>],
         shape: ValueShape,
     ) {
-        self.f.value_lets += leaves.len();
-        self.f.value_leaves += leaves.len();
         let values = leaves.iter().copied().map(GroupLeaf::Value).collect();
         self.group_binds.insert(raw(binding), (values, shape));
     }
