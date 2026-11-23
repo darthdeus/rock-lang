@@ -421,10 +421,14 @@ impl BoneWorkspace {
     }
 
     fn stick_root(path: &str) -> Option<PathBuf> {
+        if cfg!(all(target_family = "wasm", target_os = "unknown")) {
+            return None;
+        }
         let canon = PathBuf::from(canonicalize_lenient(&editor_path(path)));
         let mut cur = canon.parent();
         while let Some(dir) = cur {
-            if dir.join("stick.toml").exists() {
+            // The fallible loader reports inspection errors at this boundary.
+            if dir.join("stick.toml").try_exists().unwrap_or(true) {
                 return Some(dir.to_path_buf());
             }
             cur = dir.parent();
@@ -3437,6 +3441,37 @@ mod tests {
 mod action_policy_tests {
     use super::BoneWorkspace;
     use bone_lints::{ACTION_CALLERS, LintOptions};
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_nested_manifest_is_reported_and_reloaded_after_repair() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path();
+        let nested = parent.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(parent.join("stick.toml"), "[package]\nname = \"parent\"\n").unwrap();
+        let manifest = nested.join("stick.toml");
+        std::os::unix::fs::symlink("stick.toml", &manifest).unwrap();
+        let file = nested.join("main.rock");
+        let source = "fn main() {}";
+        std::fs::write(&file, source).unwrap();
+        let file = file.to_str().unwrap();
+
+        let mut workspace = BoneWorkspace::new();
+        workspace.update(file, source.into());
+        let lint = workspace.lint_diagnostics(file);
+        assert_eq!(lint.len(), 1, "{lint:?}");
+        assert!(
+            lint[0].message.contains("Failed to inspect stick.toml"),
+            "{lint:?}"
+        );
+        assert!(lint[0].message.contains("nested/stick.toml"), "{lint:?}");
+
+        std::fs::remove_file(&manifest).unwrap();
+        std::fs::write(&manifest, "[package]\nname = \"nested\"\n").unwrap();
+        workspace.update(file, source.into());
+        assert!(workspace.lint_diagnostics(file).is_empty());
+    }
 
     #[test]
     fn project_action_policy_reaches_loaded_and_incremental_lint_caches() {
