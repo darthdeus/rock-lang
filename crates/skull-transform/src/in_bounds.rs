@@ -17,6 +17,7 @@ use std::cell::{Cell as LocalCell, RefCell};
 use std::ops::Deref;
 
 use rustc_hash::{FxHashMap, FxHashSet as HashSet};
+use smallvec::{SmallVec, smallvec};
 
 use bone_core::hir::FnBackend;
 use bone_core::workspace::Workspace;
@@ -409,7 +410,7 @@ fn edge_facts<'a>(
 
 /// What a fact is about: the value an instruction produced, or a place.
 /// Interned per body, so facts copy, compare and hash keys as integers.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 struct Key(u32);
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -619,8 +620,8 @@ fn place_of(func: &Body<'_>, id: Idx<Inst>) -> Option<Key> {
 
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 struct Facts {
-    /// A value equals a current place or an arithmetic operand snapshot.
-    same: HashSet<(Idx<Inst>, Key)>,
+    /// Value ties grouped by instruction so a query visits only that value's places.
+    same: SmallVec<[(Idx<Inst>, Key); 4]>,
     nonneg: HashSet<Key>,
     /// `(k, v)`: the integer at `k` is at most the live length of `v`.
     le_len: HashSet<(Key, Key)>,
@@ -640,7 +641,7 @@ impl Facts {
             .retain(|k| other.private_tables.contains(k));
         self.whole.retain(|k| other.whole.contains(k));
         self.ordered.retain(|k| other.ordered.contains(k));
-        self.same.retain(|k| other.same.contains(k));
+        self.same.retain(|k| other.same.binary_search(k).is_ok());
         self.nonneg.retain(|k| other.nonneg.contains(k));
         self.le_len.retain(|k| other.le_len.contains(k));
         self.lt.retain(|k| other.lt.contains(k));
@@ -684,7 +685,8 @@ impl Facts {
         let found = {
             let keys = func.keys.borrow();
             let has = |k: &Key| keys[k.0 as usize].mentions.meets(mask);
-            self.same.iter().any(|(v, p)| *v == id || has(p))
+            !self.ties(id).is_empty()
+                || self.same.iter().any(|(_, p)| has(p))
                 || self.private_tables.iter().any(|(k, _)| has(k))
                 || self.whole.iter().any(has)
                 || self.nonneg.iter().any(has)
@@ -743,10 +745,23 @@ impl Facts {
         self.forget(func, Mentions::kinds(GLOBAL | FIELD | ELEM), through_memory);
     }
 
+    fn ties(&self, id: Idx<Inst>) -> &[(Idx<Inst>, Key)] {
+        let start = self.same.partition_point(|&(value, _)| value < id);
+        let rest = &self.same[start..];
+        &rest[..rest.partition_point(|&(value, _)| value == id)]
+    }
+
+    fn tie(&mut self, value: Idx<Inst>, key: Key) {
+        let row = (value, key);
+        if let Err(at) = self.same.binary_search(&row) {
+            self.same.insert(at, row);
+        }
+    }
+
     /// The value `id` and every place known to hold it.
-    fn keys_of(&self, func: &Body<'_>, id: Idx<Inst>) -> Vec<Key> {
-        let mut keys = vec![value_key(func, id)];
-        keys.extend(self.same.iter().filter(|(v, _)| *v == id).map(|&(_, p)| p));
+    fn keys_of(&self, func: &Body<'_>, id: Idx<Inst>) -> SmallVec<[Key; 4]> {
+        let mut keys = smallvec![value_key(func, id)];
+        keys.extend(self.ties(id).iter().map(|&(_, key)| key));
         keys
     }
 
@@ -755,7 +770,7 @@ impl Facts {
             && !func.cells[cell].borrowed
         {
             let cell = func.key(KeyData::Cell(cell));
-            if self.same.contains(&(id, cell)) {
+            if self.same.binary_search(&(id, cell)).is_ok() {
                 return cell;
             }
         }
@@ -906,8 +921,9 @@ impl Facts {
 
     fn ordered_fact(&mut self, func: &Body<'_>, a: Idx<Inst>, b: Idx<Inst>, strict: bool) {
         let lengths = self.le_len_of(func, b);
+        let right = self.keys_of(func, b);
         for ka in self.keys_of(func, a) {
-            for kb in self.keys_of(func, b) {
+            for &kb in &right {
                 self.ordered.insert((ka, kb, strict));
             }
             if matches!(func.data(ka), KeyData::Scale(..)) {
@@ -918,10 +934,10 @@ impl Facts {
         }
     }
 
-    fn aliases(&self, func: &Body<'_>, key: &Key) -> Vec<Key> {
-        let mut keys = vec![*key];
+    fn aliases(&self, func: &Body<'_>, key: &Key) -> SmallVec<[Key; 4]> {
+        let mut keys = smallvec![*key];
         if let KeyData::Value(id) = func.data(*key) {
-            keys.extend(self.same.iter().filter(|(v, _)| *v == id).map(|&(_, p)| p));
+            keys.extend(self.ties(id).iter().map(|&(_, key)| key));
         }
         keys
     }
@@ -986,7 +1002,9 @@ impl Facts {
             value_key(func, lane),
         ));
         let scale = func.key(KeyData::Scale(value_key(func, row), stride));
-        if !self.same.contains(&(index, sum)) || !self.same.contains(&(product, scale)) {
+        if self.same.binary_search(&(index, sum)).is_err()
+            || self.same.binary_search(&(product, scale)).is_err()
+        {
             return false;
         }
         if !self.whole_value(func, row)
@@ -1292,7 +1310,7 @@ fn step(facts: &mut Facts, func: &Body<'_>, ctx: &Ctx<'_>, id: Idx<Inst>, may_re
         if ctx.relevant[raw(id)]
             && let Some(place) = place_of(func, id)
         {
-            facts.same.insert((id, place));
+            facts.tie(id, place);
         }
     }
     if ctx.relevant[raw(id)]
@@ -1304,7 +1322,7 @@ fn step(facts: &mut Facts, func: &Body<'_>, ctx: &Ctx<'_>, id: Idx<Inst>, may_re
             facts.product_operand(func, *a),
             facts.product_operand(func, *b),
         );
-        facts.same.insert((id, func.key(product)));
+        facts.tie(id, func.key(product));
     }
     if ctx.affine && inst.produces_value() && ctx.relevant[raw(id)] {
         let whole = match inst {
@@ -1319,11 +1337,11 @@ fn step(facts: &mut Facts, func: &Body<'_>, ctx: &Ctx<'_>, id: Idx<Inst>, may_re
         }
         if let Some((value, scale)) = constant_scale(func, id) {
             let scaled = func.key(KeyData::Scale(value_key(func, value), scale));
-            facts.same.insert((id, scaled));
+            facts.tie(id, scaled);
         }
         if let Inst::IntAdd(a, b) = inst {
             let sum = func.key(KeyData::Sum(value_key(func, *a), value_key(func, *b)));
-            facts.same.insert((id, sum));
+            facts.tie(id, sum);
         }
     }
     let (private_push, private_record_read) = facts.track_private_tables(func, ctx, id);
@@ -1436,7 +1454,7 @@ fn step(facts: &mut Facts, func: &Body<'_>, ctx: &Ctx<'_>, id: Idx<Inst>, may_re
                 facts.lt.insert((k, v));
             }
             if ctx.relevant[raw(*value)] {
-                facts.same.insert((*value, k));
+                facts.tie(*value, k);
             }
         }
         Inst::StoreGlobal { name, .. } => facts.forget(func, Mentions::kinds(GLOBAL), |k| {
