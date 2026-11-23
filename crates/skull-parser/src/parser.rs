@@ -60,8 +60,7 @@ struct HoleFrame {
     text: String,
     /// `map[k]` is the file offset of `text[k]`, with a trailing end entry.
     map: Vec<usize>,
-    line: usize,
-    column: usize,
+    start: Pos,
 }
 
 #[derive(Clone, Copy)]
@@ -92,10 +91,6 @@ impl Pos {
 
 const STATIC_PATTERN_ERROR: &str =
     "a `static` takes a plain name, not a pattern: give it one name and destructure from it";
-
-fn identity_map(base: usize, len: usize) -> Vec<usize> {
-    (base..=base + len).collect()
-}
 
 /// `{{` / `}}` stand for a single literal brace. The tokenizer keeps them
 /// doubled (its content is what non-interpolation consumers read); collapsing
@@ -2776,8 +2771,8 @@ impl<'a> Parser<'a> {
                 Some(hole.map.as_slice()),
                 Pos {
                     at: *local,
-                    line: hole.line,
-                    column: hole.column,
+                    line: hole.start.line,
+                    column: hole.start.column,
                 },
             )
         } else {
@@ -2820,6 +2815,7 @@ impl<'a> Parser<'a> {
                     let cook = |at: (usize, usize)| {
                         let mut p = pos;
                         p.advance(text, at.0);
+                        p.at = map.map_or(at.0, |m| m[at.0] - base);
                         let (text, local) = scan.hole_source(text, at);
                         HoleFrame {
                             text,
@@ -2827,14 +2823,13 @@ impl<'a> Parser<'a> {
                                 .into_iter()
                                 .map(|o| map.map_or(base + o, |m| m[o]))
                                 .collect(),
-                            line: p.line,
-                            column: p.column,
+                            start: p,
                         }
                     };
                     let expr = cook(*expr);
                     let spec = spec.map(cook);
                     let e = self.in_hole_frame(expr, |p, f| {
-                        p.parse_interp_subexpr(&f.text, file, &f.map, f.line, f.column)
+                        p.parse_interp_subexpr(&f.text, file, &f.map, f.start.line, f.start.column)
                     })?;
                     let spec = match spec {
                         None => None,
@@ -2964,9 +2959,11 @@ impl<'a> Parser<'a> {
             .unwrap_or(format_str.len());
         chars.next(); // `{`
         let src = take_balanced_brace_body(chars, format_str)?;
-        let map = identity_map(frame.map[0] + brace_byte + 1, src.len());
-        let value =
-            self.parse_interp_subexpr(&src, file, &map, frame.line, frame.column + brace_idx + 1)?;
+        let start = brace_byte + 1;
+        let map = &frame.map[start..=start + src.len()];
+        let mut pos = frame.start;
+        pos.advance(self.source, map[0] - self.source_base);
+        let value = self.parse_interp_subexpr(&src, file, map, pos.line, pos.column)?;
         Ok((None, Some(value)))
     }
 

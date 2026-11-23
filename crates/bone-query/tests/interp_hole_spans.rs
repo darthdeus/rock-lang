@@ -19,3 +19,13 @@ fn hole_with_escaped_quotes_resolves_its_identifiers() {
         assert_eq!(def, Some(line), "{case}");
     }
 }
+
+#[test]
+fn dynamic_format_width_after_an_escape_keeps_its_source_span() {
+    let src = "fn main() {\n    let digits = 4\n    print(\"{12:\\u{0023}{digits}x}\")\n}\n";
+    let bone = workspace(src);
+    let found = bone
+        .definition(PATH, pos(src, "digits}", 5))
+        .expect("width expression reaches its binding");
+    assert_eq!(found.range.start, pos(src, "digits =", 0));
+}
