@@ -2081,6 +2081,9 @@ impl<'a> Builder<'a> {
                     self.pack(g)?
                 }
                 // An embed or nobox field's leaves live on the parent under dotted keys.
+                None if let Some(shape) = embed_plan.as_ref().and_then(|p| p.flat_shape()) => {
+                    self.materialize_flat(bv, field, &shape)
+                }
                 None if embed.is_some() => {
                     let cname = embed
                         .map(|(child, _)| child)

@@ -350,3 +350,19 @@ fn field_read_coroutine() -> bool {
 fn mixed_enum_field_read_across_await_clears_previous_payload() {
     assert(field_read_coroutine())
 }
+
+nobox value NavId { a: int, b: int }
+enum NavRef { Player(NavId), Mob(NavId) }
+struct NavHolder { id: int, name: string = "", live: NavRef? = null }
+
+fn nav_live(holder: NavHolder?) -> NavRef? { return holder?.live }
+
+@test fn safe_navigation_reads_a_flat_enum_field() {
+    let holder = NavHolder { id: 1, live: NavRef::Mob(NavId { a: 3, b: 4 }) }
+    match nav_live(holder) ?? NavRef::Player(NavId { a: 0, b: 0 }) {
+        NavRef::Mob(id) => assert_eq(id.a + id.b, 7)
+        NavRef::Player(_) => assert(false)
+    }
+    assert(nav_live(NavHolder { id: 2 }) == null)
+    assert(nav_live(null) == null)
+}
