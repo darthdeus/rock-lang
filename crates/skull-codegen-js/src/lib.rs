@@ -811,7 +811,8 @@ function __rock_inspect_value(v, indent, path, visited, precision) {
   if (vt === "string") return "\"" + v + "\"";
   if (vt === "number") {
     if (precision >= 0 && v !== Math.floor(v)) return __c_f(v, precision);
-    return lua_tostring(v);
+    // An int that arithmetic left at -0 prints as 0, as on luajit.
+    return lua_tostring(v + 0);
   }
   if (vt === "boolean") return lua_tostring(v);
   // A raw fn value renders as Lua's `tostring(function)` form (`function: ..`);
@@ -936,6 +937,7 @@ function inspect(obj, cycle_detect, precision) {
     if (ot === "string") return "\"" + obj + "\"";
     if (ot === "function") return "function: builtin";
     if (ot === "number" && precision >= 0 && obj !== Math.floor(obj)) return __c_f(obj, precision);
+    if (ot === "number") return lua_tostring(obj + 0);
     return lua_tostring(obj);
   }
   var visited = cycle_detect ? new Map() : null;

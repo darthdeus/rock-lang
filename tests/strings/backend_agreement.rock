@@ -33,8 +33,31 @@ fn test_float_interpolation_large_and_small() {
     assert_eq("{same_float(1e20)}", "1e+20")
 }
 
+struct SignedZeroBox { n: int }
+value SignedZeroValue { n: int, s: string }
+enum SignedZeroEnum { Held(int), Empty }
+
+// Lua and JS numbers are doubles, so int arithmetic can produce -0; every
+// int-to-text route prints it as `0`.
 @test
 fn test_int_zero_has_no_sign() {
-    assert_eq("{same_int(0) * same_int(-3)}", "0")
-    assert_eq(tostring(same_int(0) * same_int(-3)), "0")
+    let product = same_int(0) * same_int(-3)
+    let negated = -same_int(0)
+    let maybe: int? = negated
+    for z in [product, negated] {
+        assert_eq("{z}", "0")
+        assert_eq(tostring(z), "0")
+        assert_eq(z.to_string(), "0")
+        assert_eq("x" + z.to_string(), "x0")
+        assert_eq(inspect(z), "0")
+        assert_eq(inspect([z]), "Vec {{ 0 }}")
+        assert_eq("{SignedZeroBox { n: z }}", "SignedZeroBox {{ n = 0 }}")
+        assert_eq("{SignedZeroValue { n: z, s: "s" }}", "SignedZeroValue {{ n: 0, s: \"s\" }}")
+        assert_eq("{SignedZeroEnum::Held(z)}", "SignedZeroEnum::Held(0)")
+        assert_eq("{(z, z)}", "{{ 0, 0 }}")
+        assert_eq(json_encode(json_int(z)), "0")
+        assert_eq(json_record_write(JsonRecordCodec {}, SignedZeroBox { n: z }), "{{\"n\":0}}")
+        assert_eq(json_encode(json_record_encode(JsonRecordCodec {}, SignedZeroBox { n: z })), "{{\"n\":0}}")
+    }
+    assert_eq("{maybe}", "0")
 }

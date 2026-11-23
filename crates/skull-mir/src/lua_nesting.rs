@@ -31,6 +31,9 @@ pub enum LuaDisplayPart {
         value: String,
         parts: Vec<LuaDisplayPart>,
     },
+    /// The scalar read `value` as text; `lua` prints a zero that arithmetic
+    /// left at -0 as `0`.
+    Leaf { value: String, lua: String },
     /// The enum `name` rebuilt from the leaves under `v["<prefix>.<leaf>"]`;
     /// `lua` is its Lua spelling.
     Enum {
@@ -44,6 +47,15 @@ impl LuaDisplayPart {
     /// `text` is spelled verbatim between quotes.
     pub fn literal(text: &str) -> Self {
         LuaDisplayPart::Expr(format!("\"{text}\""))
+    }
+
+    pub fn leaf(value: &str) -> Self {
+        LuaDisplayPart::Leaf {
+            value: value.to_string(),
+            lua: format!(
+                "((type({value}) == \"number\" and {value} == 0) and \"0\" or tostring({value}))"
+            ),
+        }
     }
 }
 
@@ -69,7 +81,9 @@ fn operand_count(parts: &[LuaDisplayPart]) -> usize {
     parts
         .iter()
         .map(|p| match p {
-            LuaDisplayPart::Expr(_) | LuaDisplayPart::Enum { .. } => 1,
+            LuaDisplayPart::Expr(_) | LuaDisplayPart::Leaf { .. } | LuaDisplayPart::Enum { .. } => {
+                1
+            }
             LuaDisplayPart::UnlessNil { parts, .. } => 1 + operand_count(parts),
         })
         .sum()
@@ -81,7 +95,9 @@ fn write_expr(out: &mut String, parts: &[LuaDisplayPart]) {
             out.push_str(" .. ");
         }
         match part {
-            LuaDisplayPart::Expr(e) | LuaDisplayPart::Enum { lua: e, .. } => out.push_str(e),
+            LuaDisplayPart::Expr(e)
+            | LuaDisplayPart::Leaf { lua: e, .. }
+            | LuaDisplayPart::Enum { lua: e, .. } => out.push_str(e),
             LuaDisplayPart::UnlessNil { value, parts } => {
                 let _ = write!(out, "({value} == nil and \"nil\" or (");
                 write_expr(out, parts);
@@ -126,7 +142,9 @@ impl<'a> Appender<'a> {
     fn append(&mut self, parts: &'a [LuaDisplayPart], indent: &str) {
         for part in parts {
             match part {
-                LuaDisplayPart::Expr(e) | LuaDisplayPart::Enum { lua: e, .. } => {
+                LuaDisplayPart::Expr(e)
+                | LuaDisplayPart::Leaf { lua: e, .. }
+                | LuaDisplayPart::Enum { lua: e, .. } => {
                     if self.run.len() == DISPLAY_CONCAT_RUN {
                         self.flush(indent);
                     }

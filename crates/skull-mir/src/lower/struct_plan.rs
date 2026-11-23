@@ -378,7 +378,7 @@ impl GcTableField {
     /// An inline child renders as its own box would.
     pub fn lua_display_parts(&self, ws: &Workspace) -> Vec<LuaDisplayPart> {
         match &self.inline {
-            None => vec![LuaDisplayPart::Expr(format!("tostring(v.{})", self.name))],
+            None => vec![LuaDisplayPart::leaf(&format!("v.{}", self.name))],
             Some(sub) => lua_display_inline(ws, sub, self.name.as_str()),
         }
     }
@@ -427,7 +427,7 @@ pub(super) fn lua_display_fields(
             let key = format!("{prefix}{fname}");
             let value = match fs {
                 super::FieldShape::Prim => {
-                    vec![LuaDisplayPart::Expr(format!("tostring(v[\"{key}\"])"))]
+                    vec![LuaDisplayPart::leaf(&format!("v[\"{key}\"]"))]
                 }
                 super::FieldShape::Nested(sub) => lua_display_inline(ws, sub, &key),
             };

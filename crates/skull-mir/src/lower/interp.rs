@@ -68,10 +68,10 @@ impl<'a> Builder<'a> {
         &mut self,
         expr: Idx<Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let route = self
-            .dispatch()
-            .structural_route(expr)
-            .ok_or_else(|| self.gap_here("structural hole lost its route"))?;
+        let Some(route) = self.dispatch().structural_route(expr) else {
+            let v = self.lower_expr(expr)?;
+            return self.stringify(expr, v);
+        };
         let repr = self.lower_expr_repr(expr)?.into_value();
         match repr {
             ValueRepr::Scalar(v) if self.expr_is_nullable(expr) => {
@@ -194,6 +194,12 @@ impl<'a> Builder<'a> {
     ) -> Result<Idx<Inst>, CompilerError> {
         match route {
             StringifyRoute::ToString => Ok(self.emit_cur(Inst::ToString(v))),
+            // -0 + 0 is 0, and neither backend folds `x + 0` for numbers.
+            StringifyRoute::IntText => {
+                let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
+                let normalized = self.emit_cur(Inst::IntAdd(v, zero));
+                Ok(self.emit_cur(Inst::ToString(normalized)))
+            }
             StringifyRoute::Verbatim => Ok(v),
             StringifyRoute::FormatFloat => {
                 self.dispatched_call("__rock_format_float", path, vec![v])

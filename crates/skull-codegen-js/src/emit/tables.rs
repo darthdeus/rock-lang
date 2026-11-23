@@ -51,7 +51,7 @@ pub(super) fn emit_tostring_ty(
         return Ok(String::new());
     };
     let arena = registry.arena();
-    let leaf = |key: &str| vec![LuaDisplayPart::Expr(format!("tostring(v[\"{key}\"])"))];
+    let leaf = |key: &str| vec![LuaDisplayPart::leaf(&format!("v[\"{key}\"]"))];
     let mut out = String::new();
     for (&name, &representation) in registry.value_plans() {
         let plan = arena.try_get(representation).ok_or_else(|| {
@@ -108,17 +108,13 @@ pub(super) fn emit_tostring_ty(
 }
 
 /// The JS spelling of a display body shared with the luajit `__tostring` emitter; anything but
-/// string literals and `tostring(v.<key>)` reads is rejected.
+/// string literals and box reads is rejected.
 fn js_display_expr(
     ws: &Workspace,
     parts: &[skull_mir::lua_nesting::LuaDisplayPart],
 ) -> Result<String, CompilerError> {
     use skull_mir::lua_nesting::LuaDisplayPart;
 
-    let read = |e: &str| -> Option<String> {
-        let inner = e.strip_prefix("tostring(")?.strip_suffix(')')?;
-        is_js_box_read(inner).then(|| format!("lua_tostring({inner})"))
-    };
     let mut terms = Vec::with_capacity(parts.len());
     for part in parts {
         terms.push(match part {
@@ -130,11 +126,15 @@ fn js_display_expr(
             {
                 e.clone()
             }
-            LuaDisplayPart::Expr(e) => read(e).ok_or_else(|| {
-                err(format!(
+            // `-0 === 0`, so the read prints as `0`.
+            LuaDisplayPart::Leaf { value, .. } if is_js_box_read(value) => {
+                format!("lua_tostring({value} === 0 ? 0 : {value})")
+            }
+            LuaDisplayPart::Expr(e) | LuaDisplayPart::Leaf { value: e, .. } => {
+                return Err(err(format!(
                     "JS subset: display operand `{e}` has no JS spelling"
-                ))
-            })?,
+                )));
+            }
             LuaDisplayPart::UnlessNil { value, parts } if is_js_box_read(value) => format!(
                 "({value} == null ? \"nil\" : ({}))",
                 js_display_expr(ws, parts)?
@@ -253,7 +253,8 @@ pub(super) fn emit_inspect_cdata_enums(ws: &Workspace) -> String {
                 for (i, (label, slot)) in slots.iter().enumerate() {
                     let sep = if i == 0 { "" } else { ", " };
                     parts.push(js_string_lit(&format!("{sep}{label} = ")));
-                    parts.push(format!("lua_tostring(t[{}])", js_string_lit(slot)));
+                    let read = format!("t[{}]", js_string_lit(slot));
+                    parts.push(format!("lua_tostring({read} === 0 ? 0 : {read})"));
                 }
                 parts.push(js_string_lit(" }"));
                 parts.join(" + ")

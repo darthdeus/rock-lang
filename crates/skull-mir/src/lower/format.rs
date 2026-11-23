@@ -182,7 +182,10 @@ fn format_tree_in(
     visiting: &mut Vec<Ustr>,
 ) -> Result<FmtNode, String> {
     Ok(match ty {
-        MonoTy::Int | MonoTy::Uint | MonoTy::Bool => FmtNode::Leaf {
+        MonoTy::Int => FmtNode::Leaf {
+            route: StringifyRoute::IntText,
+        },
+        MonoTy::Uint | MonoTy::Bool => FmtNode::Leaf {
             route: StringifyRoute::ToString,
         },
         MonoTy::Float => FmtNode::Leaf {

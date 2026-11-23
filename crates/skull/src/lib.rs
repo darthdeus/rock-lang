@@ -1386,7 +1386,7 @@ fn enum_variant_display(
         let vn = var.name;
         let shown = display_name(name.as_str());
         let open = format!("{shown}::{vn} {{ ");
-        let read = |s: EnumSlot| vec![LuaDisplayPart::Expr(format!("tostring({})", slot(s)))];
+        let read = |s: EnumSlot| vec![LuaDisplayPart::leaf(&slot(s))];
         let parts = match &var.payload {
             VariantPayload::Tuple(tys) if !tys.is_empty() => display_record(
                 &open,
@@ -1494,7 +1494,7 @@ fn value_struct_metatypes(
                     s.fields.iter().map(|f| {
                         (
                             format!("{}: ", f.name),
-                            vec![LuaDisplayPart::Expr(format!("tostring(v.{})", f.name))],
+                            vec![LuaDisplayPart::leaf(&format!("v.{}", f.name))],
                         )
                     }),
                     " }",

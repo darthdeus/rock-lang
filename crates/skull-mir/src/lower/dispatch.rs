@@ -29,6 +29,8 @@ pub struct DispatchCtx<'a> {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum StringifyRoute {
     ToString,
+    /// An int that arithmetic left at -0 still prints as `0`.
+    IntText,
     /// A string hole is already its own text.
     Verbatim,
     /// A string inside a structural rendering, quoted and escaped as a Rock literal.
@@ -318,7 +320,8 @@ impl<'a> DispatchCtx<'a> {
             return StringifyRoute::Unsupported;
         };
         match ty.peel_nullable().0 {
-            MonoTy::Int | MonoTy::Uint | MonoTy::Bool => StringifyRoute::ToString,
+            MonoTy::Int => StringifyRoute::IntText,
+            MonoTy::Uint | MonoTy::Bool => StringifyRoute::ToString,
             MonoTy::String => StringifyRoute::Verbatim,
             MonoTy::Float => StringifyRoute::FormatFloat,
             MonoTy::Tuple(_)
@@ -344,6 +347,12 @@ impl<'a> DispatchCtx<'a> {
             }
             _ => StringifyRoute::Unsupported,
         }
+    }
+
+    /// The backend's own rendering of an int can be `-0`.
+    fn int_route(&self, expr: Idx<Expr>) -> Option<StringifyRoute> {
+        let ty = self.expr_mono(expr)?;
+        matches!(ty.peel_nullable().0, MonoTy::Int).then_some(StringifyRoute::IntText)
     }
 
     pub(crate) fn structural_route(&self, expr: Idx<Expr>) -> Option<StringifyRoute> {
@@ -390,6 +399,9 @@ impl<'a> DispatchCtx<'a> {
                 if self.body.spread_args.contains(&arg) {
                     return None;
                 }
+                if let Some(route) = self.int_route(arg) {
+                    return Some((arg, route));
+                }
                 let ty = self.expr_mono(arg)?;
                 let name = ty.peel_nullable().0.nominal()?;
                 let leaf_table = super::shape::planned_value(self.ws, name)
@@ -435,7 +447,10 @@ impl<'a> DispatchCtx<'a> {
         if !takes_any || (name.as_str() == "tostring" && !def.is_extern) {
             return None;
         }
-        Some((arg, self.structural_route(arg)?))
+        Some((
+            arg,
+            self.structural_route(arg).or_else(|| self.int_route(arg))?,
+        ))
     }
 
     pub(crate) fn is_composite_expr(&self, e: Idx<Expr>) -> bool {

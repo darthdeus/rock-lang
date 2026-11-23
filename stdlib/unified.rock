@@ -2082,7 +2082,8 @@ const EPSILON: float = 0.0000001
             if v < 1e-100 and v > -1e-100 then v = v * 0 end
             return string.format("%." .. precision .. "f", v)
         end
-        return tostring(v)
+        -- An int that arithmetic left at -0 prints as 0.
+        return tostring(v + 0)
     elseif vt ~= "table" then
         return tostring(v)
     end
@@ -2371,6 +2372,8 @@ const EPSILON: float = 0.0000001
         elseif obj_type == "number" and precision >= 0 and obj ~= math.floor(obj) then
             if obj < 1e-100 and obj > -1e-100 then obj = obj * 0 end
             return string.format("%." .. precision .. "f", obj)
+        elseif obj_type == "number" then
+            return tostring(obj + 0)
         else
             return tostring(obj)
         end
