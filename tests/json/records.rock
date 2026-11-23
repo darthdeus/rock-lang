@@ -875,3 +875,66 @@ fn json_record_native_enums_value_maps_and_record_payloads() {
     assert(json_record_decode(JsonRecordCodec {}, json_decode("[\"Slide\",{{\"dx\":1}}]").unwrap(), value.step) == null)
     assert(json_record_decode(JsonRecordCodec {}, json_decode("[\"Struck\",{{\"damage\":1}}]").unwrap(), struck) == null)
 }
+
+struct SparsePane { open: bool, x: float, title: string }
+value SparseWindow { open: bool, x: float }
+struct SparseConfig {
+    volume: float,
+    level: int,
+    pane: SparsePane,
+    window: SparseWindow,
+    note: string? = null,
+    @json_default
+    retries: int = 3,
+}
+
+fn sparse_base() -> SparseConfig {
+    return SparseConfig { volume: 0.5, level: 2, pane: SparsePane { open: true, x: 4.0, title: "base" },
+        window: SparseWindow { open: false, x: 8.0 } }
+}
+
+@test
+fn json_record_diff_writes_only_changed_fields_and_roundtrips() {
+    let codec = JsonRecordCodec {}
+    let base = sparse_base()
+    assert_eq(json_encode(json_record_encode_diff(codec, base, sparse_base())), "{{}}")
+    let edited = sparse_base()
+    edited.level = 5
+    edited.pane.x = 9.5
+    edited.note = "hi"
+    edited.window.x = 1.5
+    let wire = json_record_encode_diff(codec, edited, base)
+    assert_eq(json_encode(wire), "{{\"level\":5,\"note\":\"hi\",\"pane\":{{\"x\":9.5}},\"window\":{{\"x\":1.5}}}}")
+    let back = json_record_decode_onto(JsonRecordCodec { lenient_fields: true }, wire, base).unwrap()
+    assert_eq(back.level, 5)
+    assert_eq(back.pane.x, 9.5)
+    assert_eq(back.pane.title, "base")
+    assert_eq(back.window.x, 1.5)
+    assert_eq(back.window.open, false)
+    assert_eq(back.note ?? "", "hi")
+}
+
+@test
+fn json_record_lenient_fields_keep_defaults_for_bad_values() {
+    let base = sparse_base()
+    let lenient = JsonRecordCodec { lenient_fields: true }
+    let text = "{{\"volume\":\"loud\",\"level\":3.9,\"pane\":{{\"open\":7,\"x\":2,\"extra\":1}},\"window\":{{\"open\":\"no\",\"x\":3}},\"note\":4,\"unknown\":[]}}"
+    let got = json_record_decode_onto(lenient, json_decode(text).unwrap(), base).unwrap()
+    assert_eq(got.volume, 0.5)
+    assert_eq(got.level, 3)
+    assert_eq(got.pane.open, true)
+    assert_eq(got.pane.x, 2.0)
+    assert_eq(got.pane.title, "base")
+    assert(got.note == null)
+    assert_eq(got.window.open, false)
+    assert_eq(got.window.x, 3.0)
+    let section = json_record_decode_onto(lenient, json_decode("{{\"pane\":5,\"level\":\"x\"}}").unwrap(), base).unwrap()
+    assert_eq(section.pane.x, 4.0)
+    assert_eq(section.level, 2)
+    let negative = json_record_decode_onto(lenient, json_decode("{{\"level\":-1.5}}").unwrap(), base).unwrap()
+    assert_eq(negative.level, -2)
+    let strict = JsonRecordCodec {}
+    assert(json_record_decode_onto(strict, json_decode(text).unwrap(), base) == null)
+    let declared = json_record_decode<SparseConfig>(lenient, json_decode("{{\"volume\":1,\"level\":2,\"pane\":{{\"open\":true,\"x\":1,\"title\":\"t\"}},\"window\":{{\"open\":true,\"x\":1}},\"note\":null,\"retries\":\"many\"}}").unwrap()).unwrap()
+    assert_eq(declared.retries, 3)
+}

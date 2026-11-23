@@ -1220,6 +1220,10 @@ fn json_reader_is_object(reader: JsonReader) -> bool {
 
 @lua_named struct JsonRecordCodec {
     reject_unknown_fields: bool = false,
+    // Decoding onto a prototype or declared defaults keeps a field's default
+    // when its value cannot be decoded, and numbers round down to integers,
+    // instead of failing the record.
+    lenient_fields: bool = false,
     on_error: fn(JsonRecordError)? = null,
     adapters: [JsonRecordAdapter] = [],
     encode_float: fn(float) -> JsonValue = json_float,
@@ -1792,7 +1796,10 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     end
     if kind == 'int' or kind == 'uint' then
         local n = value
-        if reading then n = (input_tag == 'Int' or input_tag == 'Float') and input_payload or nil end
+        if reading then
+            n = (input_tag == 'Int' or input_tag == 'Float') and input_payload or nil
+            if codec.lenient and n == n and type(n) == 'number' then n = math.floor(n) end
+        end
         if type(n) ~= 'number' or not __json_record_finite(n) or n ~= math.floor(n)
             or (kind == 'uint' and n < 0) then return false, __json_record_failure(shape, value, index, codec) end
         if reading then return true, n end
@@ -2145,6 +2152,10 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
                             first = false
                         end
                         ok, decoded = __json_record_visit(codec, child, item, reading, seen, depth + 1, fallback)
+                        if not ok and reading and codec.lenient then
+                            if defaults ~= nil then ok, decoded = true, __json_record_copy_default(fallback)
+                            elseif field.json_default then ok, decoded = true, _G[field.json_default]() end
+                        end
                     end
                     if not ok then
                         if not reading then error('json record invalid field ' .. name .. '.' .. field.name, 0) end
@@ -2175,6 +2186,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     field_names: Map<string, Map<string, bool>>?,
     encode_float: fn(float) -> JsonValue,
     decode_float: fn(JsonValue) -> float?,
+    lenient: bool = false,
     src: string? = null,
     source: __JsonRecordSource? = null,
     parse_raw: (fn(string) -> JsonValue?)? = null,
@@ -2249,6 +2261,7 @@ fn __json_record_adapter_map(codec: JsonRecordCodec) -> Map<string, JsonRecordAd
         field_names: if reading && codec.reject_unknown_fields { map_new() } else { null },
         encode_float: codec.encode_float,
         decode_float: codec.decode_float,
+        lenient: reading && codec.lenient_fields,
     }
 }
 
@@ -2284,10 +2297,10 @@ inline(lua) fn __json_record_encode<T>(name: string, codec: JsonRecordCodec, val
 // Raw input is parsed with parse_raw, so a document holding json_raw text
 // decodes like the same document parsed from its encoding.
 inline(lua) fn __json_record_decode<T>(name: string, codec: JsonRecordCodec, value: JsonValue,
-    parse_raw: fn(string) -> JsonValue?) -> T? = """
+    parse_raw: fn(string) -> JsonValue?, defaults: any?) -> T? = """
     local context = __json_record_context(codec, true)
     context.parse_raw = parse_raw
-    local ok, result = __json_record_visit(context, { k = 'nom', name = name }, value, true, nil, 0)
+    local ok, result = __json_record_visit(context, { k = 'nom', name = name }, value, true, nil, 0, defaults)
     if ok then return result end
     if codec.on_error then codec.on_error(result) end
     return nil
@@ -2325,12 +2338,38 @@ fn json_record_encode<T>(codec: JsonRecordCodec, value: T) -> JsonValue {
     return __json_record_encode(__json_record_type(value), codec, materialize(value))
 }
 
+// Only what differs from `base`: a record field equal to its base is omitted,
+// and a nested record is kept only when one of its fields differs. Every other
+// value is compared whole. An unchanged value encodes as `{}`.
+fn json_record_encode_diff<T>(codec: JsonRecordCodec, value: T, base: T) -> JsonValue {
+    let changed = json_diff(json_record_encode(codec, value), json_record_encode(codec, base))
+    return changed ?? json_object(map_new())
+}
+
+fn json_diff(value: JsonValue, base: JsonValue) -> JsonValue? {
+    let fields = json_as_object(value) ?? return if json_encode(value) == json_encode(base) { null } else { value }
+    let baseline = json_as_object(base) ?? return value
+    let out: Map<string, JsonValue> = map_new()
+    for (key, field) in fields {
+        let was = baseline.get(key) ?? { out[key] = field; continue }
+        if let changed = json_diff(field, was) { out[key] = changed }
+    }
+    if out.is_empty() { return null }
+    return json_object(out)
+}
+
 fn json_record_decode<T>(codec: JsonRecordCodec, value: JsonValue, prototype: T) -> T? {
-    return __json_record_decode<T>(__json_record_type(prototype), codec, value, json_decode)
+    return __json_record_decode<T>(__json_record_type(prototype), codec, value, json_decode, null)
+}
+
+// Fields the value omits take their value from `base` (and, with
+// lenient_fields, so do fields that cannot be decoded); `base` is not changed.
+fn json_record_decode_onto<T>(codec: JsonRecordCodec, value: JsonValue, base: T) -> T? {
+    return __json_record_decode<T>(__json_record_type(base), codec, value, json_decode, materialize(base))
 }
 
 fn json_record_decode<T>(codec: JsonRecordCodec, value: JsonValue) -> T? {
-    return __json_record_decode<T>(__json_record_type(phantom<T>()), codec, value, json_decode)
+    return __json_record_decode<T>(__json_record_type(phantom<T>()), codec, value, json_decode, null)
 }
 
 // Decodes straight from a reader's source text, without materializing a

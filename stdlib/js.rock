@@ -771,6 +771,7 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
     }
     if (kind === "int" || kind === "uint") {
         var n = reading && (tagged(value, "Int") || tagged(value, "Float")) ? value[0] : value;
+        if (reading && codec.lenient && typeof n === "number") n = Math.floor(n);
         if (typeof n !== "number" || !Number.isFinite(n) || n !== Math.floor(n)
             || (kind === "uint" && n < 0)) return fail(shape, value);
         return reading ? n : node("Int", n);
@@ -1033,6 +1034,10 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
             } else {
                 if (child.k === "any") throw new Error("json record field `" + field.name + "` of struct `" + name + "` has no JSON shape (a generic parameter, any or a function type); use a codec adapter");
                 r = __json_record_js_visit(codec, child, item, reading, seen, depth + 1, fallback);
+                if (reading && codec.lenient && failed(r)) {
+                    if (defaulted) r = __json_record_copy_default(fallback);
+                    else if (field.json_default) r = field.json_default();
+                }
             }
             if (failed(r)) {
                 if (!reading) throw new Error("json record invalid field " + name + "." + field.name);
@@ -1057,7 +1062,7 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
         adapters[adapter.name] = adapter;
     }
     return { types: types, adapters: adapters, encode_float: codec.encode_float, decode_float: codec.decode_float,
-        reject_unknown_fields: codec.reject_unknown_fields, field_names: Object.create(null) };
+        lenient: codec.lenient_fields, reject_unknown_fields: codec.reject_unknown_fields, field_names: Object.create(null) };
 """
 
 @nomangle inline(js) fn __json_record_js_decode(codec: any, context: any, name: string, value: any, defaults: any) -> any = """
@@ -1075,10 +1080,10 @@ inline(js) fn __json_record_encode<T>(name: string, codec: JsonRecordCodec, valu
 """
 
 inline(js) fn __json_record_decode<T>(name: string, codec: JsonRecordCodec, value: JsonValue,
-    parse_raw: fn(string) -> JsonValue?) -> T? = """
+    parse_raw: fn(string) -> JsonValue?, defaults: any?) -> T? = """
     var context = __json_record_js_context(codec, __rock_json_types);
     context.parse_raw = parse_raw;
-    return __json_record_js_decode(codec, context, name, value, null);
+    return __json_record_js_decode(codec, context, name, value, defaults);
 """
 
 inline(js) fn __json_record_lua_backend() -> bool = "return false;"
