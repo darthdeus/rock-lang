@@ -103,3 +103,15 @@ fn nested_nobox_leaf_write_through_a_struct_field() {
     assert_eq(motion_sum(owner), 23)
     assert_eq(prior.cell, Cell { x: 3, y: 5 })
 }
+value Owner { name: string, id: string }
+nobox value Anchor { x: int, owner: Owner, done: bool }
+struct Retry { anchor: Anchor, time: float }
+fn inspect<T>(retry: Retry, ignored: T) -> string {
+    let owner = retry.anchor.owner
+    if owner.name == "hi" { return owner.id }
+    return "wrong"
+}
+@test fn nested_box() {
+    let retry = Retry { anchor: Anchor { x: 1, owner: Owner { name: "hi", id: "ok" }, done: false }, time: 1.0 }
+    assert(inspect(retry, 1) == "ok")
+}
