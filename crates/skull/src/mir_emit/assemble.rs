@@ -288,10 +288,70 @@ fn collect_needed_foreign(
         calls
     });
     let always = always_emitted_calls.iter().copied().filter(foreign);
-    always
-        .chain(found.into_iter().flatten())
-        .map(shared)
-        .collect()
+    let mut needed: FxHashSet<FuncRef> = always.chain(found.into_iter().flatten()).collect();
+    let mut pending: Vec<FuncRef> = needed.iter().copied().collect();
+    while let Some(caller) = pending.pop() {
+        for helper in named_lua_helpers(ws, caller) {
+            if needed.insert(helper) {
+                pending.push(helper);
+            }
+        }
+    }
+    needed.into_iter().map(shared).collect()
+}
+
+/// A `@lua_helper` is not an emission root: it is emitted when an emitted
+/// inline(lua) body of its own module names it.
+fn named_lua_helpers(ws: &Workspace, caller: FuncRef) -> impl Iterator<Item = FuncRef> + '_ {
+    let module = ws.module(caller.module);
+    let text = match module.functions[caller.func].inline_body {
+        Some((bone_semantic::hir::FnBackend::Lua, text)) => text.as_str(),
+        _ => "",
+    };
+    lua_bare_names(text)
+        .filter_map(|name| {
+            ustr::existing_ustr(name).and_then(|name| module.functions_by_name.get(&name))
+        })
+        .flatten()
+        .filter(|&&(_, func)| {
+            let helper = &module.functions[func];
+            helper.generics.is_empty()
+                && helper
+                    .annotations
+                    .iter()
+                    .any(|a| a.is_builtin("lua_helper"))
+        })
+        .map(move |&(_, func)| FuncRef {
+            module: caller.module,
+            func,
+        })
+}
+
+/// Identifiers in Lua text that are not field or method names. Names inside
+/// strings and comments count too, which can only keep an extra helper.
+fn lua_bare_names(text: &str) -> impl Iterator<Item = &str> {
+    let bytes = text.as_bytes();
+    let mut at = 0;
+    std::iter::from_fn(move || {
+        while at < bytes.len() {
+            let start = at;
+            if bytes[at].is_ascii_alphabetic() || bytes[at] == b'_' {
+                while at < bytes.len() && (bytes[at].is_ascii_alphanumeric() || bytes[at] == b'_') {
+                    at += 1;
+                }
+                if start == 0 || !matches!(bytes[start - 1], b'.' | b':') {
+                    return Some(&text[start..at]);
+                }
+            } else if bytes[at].is_ascii_digit() {
+                while at < bytes.len() && bytes[at].is_ascii_alphanumeric() {
+                    at += 1;
+                }
+            } else {
+                at += 1;
+            }
+        }
+        None
+    })
 }
 
 fn source_functions(

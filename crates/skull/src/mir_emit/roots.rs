@@ -39,7 +39,10 @@ pub(crate) fn is_emission_root(
 /// MIR call edge: `@nomangle` (other inline(lua) bodies, compiler codegen and
 /// string-keyed dispatch), extern bindings and decorated functions.
 fn is_global_emission_root(f: &bone_semantic::hir::Function, decorators: &DecoratorTable) -> bool {
-    if f.json_field_for.is_some() || f.annotations.iter().any(|a| a.is_builtin("nomangle")) {
+    let named = |name| f.annotations.iter().any(|a| a.is_builtin(name));
+    let lua_helper = named("lua_helper")
+        && matches!(f.inline_body, Some((bone_semantic::hir::FnBackend::Lua, _)));
+    if f.json_field_for.is_some() || (named("nomangle") && !lua_helper) {
         return true;
     }
     if f.is_extern {

@@ -66,6 +66,7 @@ mod int_float_alias;
 mod line_directives;
 mod loop_bytecode;
 mod loop_registers;
+mod lua_helpers;
 mod modules_lifecycle;
 mod modules_state_identity;
 mod modules_type_emission;

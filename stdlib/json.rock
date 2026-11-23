@@ -1248,20 +1248,20 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     }
 }
 
-@nomangle inline(lua) fn __json_record_node(tag: string, item: any, row: bool = false) -> JsonValue = """
+@nomangle @lua_helper inline(lua) fn __json_record_node(tag: string, item: any, row: bool = false) -> JsonValue = """
     if row then return item or false, tag end
     if tag == 'Null' then return __rock_enum_unit('JsonValue', 'Null') end
     return setmetatable({ __variant = tag, item }, __rock_box_mts.JsonValue)
 """
 
-@nomangle inline(lua) fn __json_record_vec(items: any, count: int) -> any = """
+@nomangle @lua_helper inline(lua) fn __json_record_vec(items: any, count: int) -> any = """
     items[0] = count
     return setmetatable(items, __rock_box_mts.Vec)
 """
-@nomangle inline(lua) fn __json_record_json_vec(data: any, count: int) -> any = """
+@nomangle @lua_helper inline(lua) fn __json_record_json_vec(data: any, count: int) -> any = """
     return { _data = data, len = count, ['@vec'] = __rock_vec_header('strided', 'JsonValue', 2) }
 """
-@nomangle inline(lua) fn __json_record_label(codec: any, tag: any, items: any) -> string? = """
+@nomangle @lua_helper inline(lua) fn __json_record_label(codec: any, tag: any, items: any) -> string? = """
     if tag ~= 'Array' or items.len == 0 then return nil end
     if codec.src then
         if __json_record_source_kind(codec.src, items[1]) == 'Str' then return (__json_record_source_text(codec, items[1])) end
@@ -1274,7 +1274,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
 // Decoding reads a JsonValue, a JSON array row, or, when the context carries
 // `src`, the offset of a value in validated JSON text; arrays of offsets hold
 // their elements. All three report the same JsonValue tags and payloads.
-@nomangle inline(lua) fn __json_record_source_body(codec: any, at: int) -> any = """
+@nomangle @lua_helper inline(lua) fn __json_record_source_body(codec: any, at: int) -> any = """
     local b = string.byte(codec.src, at + 1)
     if b == 34 then return (__json_record_source_text(codec, at)) end
     if b == 91 then return __json_record_source_items(codec.src, at) end
@@ -1283,13 +1283,13 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     return nil
 """
 
-@nomangle inline(lua) fn __json_record_input_value(codec: any, value: any, index: int?) -> any = """
+@nomangle @lua_helper inline(lua) fn __json_record_input_value(codec: any, value: any, index: int?) -> any = """
     if codec.src then return value and codec.source.value_at(codec.src, value) end
     if index then return __rock_json_vec_at(value, index) end
     return value
 """
 
-@nomangle inline(lua) fn __json_record_source_kind(src: string, at: int) -> any = """
+@nomangle @lua_helper inline(lua) fn __json_record_source_kind(src: string, at: int) -> any = """
     local b = string.byte(src, at + 1)
     if b == 34 then return 'Str' end
     if b == 91 then return 'Array' end
@@ -1302,13 +1302,13 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
 """
 
 // 0 ends a number, 1 continues it, 2 continues it and makes it a float.
-@nomangle inline(lua) fn __json_record_number_byte(b: int?) -> int = """
+@nomangle @lua_helper inline(lua) fn __json_record_number_byte(b: int?) -> int = """
     if b == 46 or b == 101 or b == 69 then return 2 end
     if not b or b < 43 or b > 57 or b == 44 or b == 47 then return 0 end
     return 1
 """
 
-@nomangle inline(lua) fn __json_record_source_number_tail(src: string, i: int, is_float: bool) -> any = """
+@nomangle @lua_helper inline(lua) fn __json_record_source_number_tail(src: string, i: int, is_float: bool) -> any = """
     while true do
         local c = __json_record_number_byte(string.byte(src, i + 1))
         if c == 0 then return i, is_float end
@@ -1319,7 +1319,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
 
 // Unrolled so that short numbers, the common case, do not start a loop inside
 // the visitor's trace; a looping scan here gets the caller blacklisted.
-@nomangle inline(lua) fn __json_record_source_number_end(src: string, at: int) -> any = """
+@nomangle @lua_helper inline(lua) fn __json_record_source_number_end(src: string, at: int) -> any = """
     local _, b2, b3, b4, b5, b6, b7, b8 = string.byte(src, at + 1, at + 8)
     local c = __json_record_number_byte(b2)
     if c == 0 then return at + 1, false end
@@ -1333,7 +1333,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     return __json_record_source_number_tail(src, at + 8, f)
 """
 
-@nomangle inline(lua) fn __json_record_source_number(codec: any, at: int) -> any = """
+@nomangle @lua_helper inline(lua) fn __json_record_source_number(codec: any, at: int) -> any = """
     local src = codec.src
     local stop, is_float = __json_record_source_number_end(src, at)
     if is_float then return codec.source.float_at(src, at, stop) end
@@ -1342,13 +1342,13 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
 
 // The text was validated when the reader was built, so indexing only finds
 // value boundaries. Strings jump to their closing quote with a plain find.
-@nomangle inline(lua) fn __json_record_source_quote(src: string, at: int) -> int = """
+@nomangle @lua_helper inline(lua) fn __json_record_source_quote(src: string, at: int) -> int = """
     local q = string.find(src, '"', at + 2, true)
     if string.byte(src, q - 1) ~= 92 then return q end
     return __json_record_source_escaped_quote(src, q)
 """
 
-@nomangle inline(lua) fn __json_record_source_escaped_quote(src: string, q: int) -> int = """
+@nomangle @lua_helper inline(lua) fn __json_record_source_escaped_quote(src: string, q: int) -> int = """
     while true do
         local slash = q - 1
         while string.byte(src, slash) == 92 do slash = slash - 1 end
@@ -1357,7 +1357,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     end
 """
 
-@nomangle inline(lua) fn __json_record_source_skip(src: string, at: int) -> int = """
+@nomangle @lua_helper inline(lua) fn __json_record_source_skip(src: string, at: int) -> int = """
     local byte = string.byte
     local i = at + 1
     local b = byte(src, i)
@@ -1382,7 +1382,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     end
 """
 
-@nomangle inline(lua) fn __json_record_source_ws(src: string, at: int) -> int = """
+@nomangle @lua_helper inline(lua) fn __json_record_source_ws(src: string, at: int) -> int = """
     local byte = string.byte
     local b = byte(src, at + 1)
     while b == 32 or b == 10 or b == 13 or b == 9 do
@@ -1392,7 +1392,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     return at
 """
 
-@nomangle inline(lua) fn __json_record_source_items(src: string, at: int) -> any = """
+@nomangle @lua_helper inline(lua) fn __json_record_source_items(src: string, at: int) -> any = """
     local byte = string.byte
     local items, n = {}, 0
     local pos = __json_record_source_ws(src, at + 1)
@@ -1409,7 +1409,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     return items
 """
 
-@nomangle inline(lua) fn __json_record_source_fields(codec: any, at: int) -> any = """
+@nomangle @lua_helper inline(lua) fn __json_record_source_fields(codec: any, at: int) -> any = """
     local src = codec.src
     local byte = string.byte
     local fields = {}
@@ -1425,7 +1425,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     end
 """
 
-@nomangle inline(lua) fn __json_record_source_text(codec: any, at: int) -> any = """
+@nomangle @lua_helper inline(lua) fn __json_record_source_text(codec: any, at: int) -> any = """
     local src = codec.src
     local close = __json_record_source_quote(src, at)
     for i = at + 2, close - 1 do
@@ -1434,12 +1434,12 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     return string.sub(src, at + 2, close - 1), close
 """
 
-@nomangle inline(lua) fn __json_record_finite(n: float) -> bool = "return n == n and n ~= math.huge and n ~= -math.huge"
+@nomangle @lua_helper inline(lua) fn __json_record_finite(n: float) -> bool = "return n == n and n ~= math.huge and n ~= -math.huge"
 
 // Reads a native value stored as leaves: in `source` by path (through `slots`),
 // in strided data at `base` plus the path's offset, or in columns at row `base`.
 // `into` receives the leaves instead of a new value.
-@nomangle inline(lua) fn __json_record_native_get(source: any, name: string, prefix: string, slots: any? = null,
+@nomangle @lua_helper inline(lua) fn __json_record_native_get(source: any, name: string, prefix: string, slots: any? = null,
     into: any? = null, base: int? = null) -> any = """
     local result = into or _G[name .. '_ct']()
     for _, field in ipairs(_G.__ROCK_TYPE_TABLE[name].fields) do
@@ -1456,7 +1456,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     return result
 """
 
-@nomangle inline(lua) fn __json_record_native_put(target: any, value: any, name: string, prefix: string, slots: any? = null) = """
+@nomangle @lua_helper inline(lua) fn __json_record_native_put(target: any, value: any, name: string, prefix: string, slots: any? = null) = """
     for _, field in ipairs(_G.__ROCK_TYPE_TABLE[name].fields) do
         local path = prefix .. field.name
         local child = _G.__ROCK_TYPE_TABLE[field.type]
@@ -1471,7 +1471,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
 // Native values reach adapters and omit predicates only as leaves, so they
 // are always reused. A reused table comes back empty, with the pool its nested
 // values are reused from. Decoding contexts have no scratch and box afresh.
-@nomangle inline(lua) fn __json_record_scratch(codec: any?, name: string, depth: int) -> any = """
+@nomangle @lua_helper inline(lua) fn __json_record_scratch(codec: any?, name: string, depth: int) -> any = """
     local scratch = codec and codec.scratch
     if not scratch then return nil end
     local native = _G.__ROCK_TYPE_TABLE[name].kind == 'c_struct'
@@ -1498,7 +1498,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     return value, entry[2]
 """
 
-@nomangle inline(lua) fn __json_record_field_get(source: any, field: any, slots: any, codec: any? = null, depth: int = 0) -> any = """
+@nomangle @lua_helper inline(lua) fn __json_record_field_get(source: any, field: any, slots: any, codec: any? = null, depth: int = 0) -> any = """
     local key = field.name
     if field.flat then
         local tag_key = field.flat[1]
@@ -1531,7 +1531,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     return value
 """
 
-@nomangle inline(lua) fn __json_record_field_put(target: any, field: any, value: any, slots: any) = """
+@nomangle @lua_helper inline(lua) fn __json_record_field_put(target: any, field: any, value: any, slots: any) = """
     local key = field.name
     if field.flat then
         if value == nil then return end
@@ -1558,7 +1558,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     else target[slots and slots[key] or key] = value end
 """
 
-@nomangle inline(lua) fn __json_record_payload_get(value: any, shape: any, index: int, codec: any? = null, depth: int = 0) -> any = """
+@nomangle @lua_helper inline(lua) fn __json_record_payload_get(value: any, shape: any, index: int, codec: any? = null, depth: int = 0) -> any = """
     local slot = shape.slot or index
     local leaves = shape.leaves
     if not leaves then return value[slot] end
@@ -1595,7 +1595,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     return nested and __json_record_row_object(result, shape.name, pool) or result
 """
 
-@nomangle inline(lua) fn __json_record_payload_put(target: any, shape: any, index: int, value: any) = """
+@nomangle @lua_helper inline(lua) fn __json_record_payload_put(target: any, shape: any, index: int, value: any) = """
     local slot = shape.slot or index
     local leaves = shape.leaves
     if not leaves then target[slot] = value; return end
@@ -1630,7 +1630,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
 
 // Builds a row's nested value tables from its flat leaves; with a pool, each
 // nested table is reused and emptied first.
-@nomangle inline(lua) fn __json_record_row_object(row: any, name: string, pool: any? = null) -> any = """
+@nomangle @lua_helper inline(lua) fn __json_record_row_object(row: any, name: string, pool: any? = null) -> any = """
     for _, field in ipairs(_G.__ROCK_TYPE_TABLE[name].fields) do
         local child = _G.__ROCK_TYPE_TABLE[field.type]
         if field.embed and field.nullable and row[field.name] == false then row[field.name] = nil end
@@ -1657,7 +1657,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     return row
 """
 
-@nomangle inline(lua) fn __json_record_row_leaf(value: any, path: string) -> any = """
+@nomangle @lua_helper inline(lua) fn __json_record_row_leaf(value: any, path: string) -> any = """
     if type(value) == 'table' and value[path] ~= nil then return value[path] end
     local dot = path:find('.', 1, true)
     if dot then
@@ -1674,7 +1674,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     return nil
 """
 
-@nomangle inline(lua) fn __json_record_failure(shape: any, value: any, index: int? = null, codec: any? = null) -> any = """
+@nomangle @lua_helper inline(lua) fn __json_record_failure(shape: any, value: any, index: int? = null, codec: any? = null) -> any = """
     if index then value = __rock_json_vec_at(value, index) end
     local source = value ~= nil and codec and codec.src
     local actual = value == nil and 'missing' or source and __json_record_source_kind(source, value)
@@ -1686,7 +1686,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
         actual = actual }, __rock_box_mts.JsonRecordError)
 """
 
-@nomangle inline(lua) fn __json_record_error_at(failure: any, key: any) -> any = """
+@nomangle @lua_helper inline(lua) fn __json_record_error_at(failure: any, key: any) -> any = """
     local part = tostring(key):gsub('~', '~0'):gsub('/', '~1')
     failure.path = '/' .. part .. failure.path
     return failure
@@ -1696,7 +1696,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
 
 // Pieces are joined every 512 so the piece table stays small; the joined
 // chunks add up to the output size.
-@nomangle inline(lua) fn __json_record_put(codec: any, text: string) = """
+@nomangle @lua_helper inline(lua) fn __json_record_put(codec: any, text: string) = """
     local n, out = codec.n + 1, codec.out
     out[n] = text
     if n == 512 then
@@ -1709,7 +1709,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
 """
 
 // Fields in the order json_encode writes object keys.
-@nomangle inline(lua) fn __json_record_write_fields(codec: any, decl: any) -> any = """
+@nomangle @lua_helper inline(lua) fn __json_record_write_fields(codec: any, decl: any) -> any = """
     local fields = decl.json_write_fields
     if fields then return fields end
     fields = {}
@@ -1725,7 +1725,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     return fields
 """
 
-@nomangle inline(lua) fn __json_record_visit(codec: any, shape: any,
+@nomangle @lua_helper inline(lua) fn __json_record_visit(codec: any, shape: any,
     value: any, reading: bool, seen: any, depth: int, defaults: any,
     row: bool = false, index: int? = null) -> any = """
     if depth > 128 then
@@ -2141,7 +2141,7 @@ fn json_record_source_string(src: string, at: int) -> string {
 
 // The lookup is kept on the codec and reused while its adapters are the same
 // objects, so a codec encoding many small records builds it once.
-@nomangle inline(lua) fn __json_record_adapters(codec: JsonRecordCodec) -> Map<string, JsonRecordAdapter>? = """
+@nomangle @lua_helper inline(lua) fn __json_record_adapters(codec: JsonRecordCodec) -> Map<string, JsonRecordAdapter>? = """
     local adapters = codec.adapters
     local count = adapters[0]
     if count == 0 then return nil end
@@ -2186,7 +2186,7 @@ fn __json_record_adapter_map(codec: JsonRecordCodec) -> Map<string, JsonRecordAd
 // Encoding reuses one context per codec, so encoding many small records does
 // not rebuild it. A context still busy (a nested call, or one left by an
 // error) is replaced rather than shared.
-@nomangle inline(lua) fn __json_record_encoder(codec: JsonRecordCodec, name: string) -> any = """
+@nomangle @lua_helper inline(lua) fn __json_record_encoder(codec: JsonRecordCodec, name: string) -> any = """
     local context = rawget(codec, '__json_encoder')
     if context == nil or context.busy or context.encode_float ~= codec.encode_float then
         context = __json_record_context(codec, false)
