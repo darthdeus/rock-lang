@@ -48,22 +48,22 @@ fn test_enum_print_output() {
     }
 }
 
-enum Result<T, E> {
+enum Outcome<T, E> {
     Ok(T),
     Err(E),
 }
 
 @test
 fn test_deeply_nested_match() {
-    let inner_result: Result<int, string> = Result::Ok(42)
-    let outer: Result<Result<int, string>, string> = Result::Ok(inner_result)
+    let inner_result: Outcome<int, string> = Outcome::Ok(42)
+    let outer: Outcome<Outcome<int, string>, string> = Outcome::Ok(inner_result)
 
     let value = match outer {
-        Result::Ok(inner) => match inner {
-            Result::Ok(n) => n,
-            Result::Err(e) => 0,
+        Outcome::Ok(inner) => match inner {
+            Outcome::Ok(n) => n,
+            Outcome::Err(e) => 0,
         },
-        Result::Err(e) => -1,
+        Outcome::Err(e) => -1,
     }
 
     assert_eq(value, 42)
@@ -94,10 +94,10 @@ fn test_generic_enum_inference() {
 // lowering has to plan the variant and the match from the nominal enum name.
 @test(output="42")
 fn test_enum_with_unconstrained_type_param() {
-    let result = Result::Ok(42)
+    let result = Outcome::Ok(42)
     match result {
-        Result::Ok(value) => print(value),
-        Result::Err(_) => print("error"),
+        Outcome::Ok(value) => print(value),
+        Outcome::Err(_) => print("error"),
     }
 }
 

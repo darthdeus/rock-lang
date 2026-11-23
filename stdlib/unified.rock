@@ -1335,6 +1335,39 @@ fn expect<T>(@unwraps value: T?, message: string) -> T {
     return phantom()
 }
 
+// `T?` says a value is absent; a `Result` says an operation failed and why.
+enum Result<T, E = string> {
+    Ok(T),
+    Err(E),
+}
+
+@noalloc @inline fn Result<T, E>.unwrap(result) -> T {
+    match result {
+        Result::Ok(value) => { return value }
+        Result::Err(error) => { __unwrap_failed("unwrap() called on Err: {error}") }
+    }
+    return phantom()
+}
+
+@noalloc @inline fn Result<T, E>.expect(result, message: string) -> T {
+    match result {
+        Result::Ok(value) => { return value }
+        Result::Err(error) => { __unwrap_failed("expect() failed: {message}: {error}") }
+    }
+    return phantom()
+}
+
+@noalloc @inline fn Result<T, E>.is_ok(result) -> bool {
+    return match result {
+        Result::Ok(_) => true,
+        Result::Err(_) => false,
+    }
+}
+
+@noalloc @inline fn Result<T, E>.is_err(result) -> bool {
+    return !result.is_ok()
+}
+
 // Concrete overloads, not generic: an unconstrained `min<T>` shape-matches
 // every two-arg call and ties with specialized overloads like `Vec2.min`.
 @intrinsic @pure fn max(a: int, b: int) -> int {

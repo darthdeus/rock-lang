@@ -30,27 +30,27 @@ enum Step {
     Wait,
 }
 
-enum Result {
+enum ProbeResult {
     Probe(Step, Location?, int),
     Required(Step, Location, int),
     Named { where_at: Location?, trailing: int },
     NamedRequired { where_at: Location, trailing: int },
 }
 
-fn make_result<T>(step: Step, pad: Location?, _witness: T) -> Result {
-    return Result::Probe(step, pad, 9)
+fn make_result<T>(step: Step, pad: Location?, _witness: T) -> ProbeResult {
+    return ProbeResult::Probe(step, pad, 9)
 }
 
-fn score(result: Result) -> int {
+fn score(result: ProbeResult) -> int {
     return match result {
-        Result::Probe(Step::Wait, null, trailing) => trailing,
-        Result::Probe(Step::Move(at), pad, trailing) =>
+        ProbeResult::Probe(Step::Wait, null, trailing) => trailing,
+        ProbeResult::Probe(Step::Move(at), pad, trailing) =>
             if pad?.enabled == false { at.space.value + (pad?.space?.value ?? 0) + trailing }
             else { -1 },
-        Result::Probe(_, _, _) => -2,
-        Result::Required(_, Location { space: ZoneKey { value }, .. }, trailing) => value + trailing,
-        Result::Named { where_at, trailing } => (where_at?.space?.value ?? 0) + trailing,
-        Result::NamedRequired { where_at, trailing } => where_at.space.value + trailing,
+        ProbeResult::Probe(_, _, _) => -2,
+        ProbeResult::Required(_, Location { space: ZoneKey { value }, .. }, trailing) => value + trailing,
+        ProbeResult::Named { where_at, trailing } => (where_at?.space?.value ?? 0) + trailing,
+        ProbeResult::NamedRequired { where_at, trailing } => where_at.space.value + trailing,
     }
 }
 
@@ -60,14 +60,14 @@ fn score(result: Result) -> int {
     let absent = make_result(Step::Wait, null, 0)
     assert_eq(score(present), 23)
     assert_eq(score(absent), 9)
-    assert(present == Result::Probe(Step::Move(at), at, 9))
-    assert(absent == Result::Probe(Step::Wait, null, 9))
-    assert(present != Result::Probe(Step::Move(at), null, 9))
-    assert_eq(score(Result::Required(Step::Wait, at, 5)), 12)
-    assert_eq(score(Result::Named { where_at: at, trailing: 5 }), 12)
-    assert_eq(score(Result::Named { where_at: null, trailing: 5 }), 5)
-    assert_eq(score(Result::NamedRequired { where_at: at, trailing: 5 }), 12)
-    assert_eq(tostring(present), "Result::Probe(Step::Move(Location {{ space: ZoneKey {{ value: 7 }}, enabled: false }}), Location {{ space: ZoneKey {{ value: 7 }}, enabled: false }}, 9)")
+    assert(present == ProbeResult::Probe(Step::Move(at), at, 9))
+    assert(absent == ProbeResult::Probe(Step::Wait, null, 9))
+    assert(present != ProbeResult::Probe(Step::Move(at), null, 9))
+    assert_eq(score(ProbeResult::Required(Step::Wait, at, 5)), 12)
+    assert_eq(score(ProbeResult::Named { where_at: at, trailing: 5 }), 12)
+    assert_eq(score(ProbeResult::Named { where_at: null, trailing: 5 }), 5)
+    assert_eq(score(ProbeResult::NamedRequired { where_at: at, trailing: 5 }), 12)
+    assert_eq(tostring(present), "ProbeResult::Probe(Step::Move(Location {{ space: ZoneKey {{ value: 7 }}, enabled: false }}), Location {{ space: ZoneKey {{ value: 7 }}, enabled: false }}, 9)")
 }
 
 @test fn inspect_shows_payload_fields_and_absence() {
@@ -76,7 +76,7 @@ fn score(result: Result) -> int {
     assert_eq(inspect(present), "Receipt::Probe {{\n  [1] = 1,\n  [2].x = 0,\n  [2].y = 8\n}}")
     assert_eq(inspect(absent), "Receipt::Probe {{ [1] = 1, [2] = nil }}")
     let at = Location { space: ZoneKey { value: 7 }, enabled: false }
-    let named = Result::Named { where_at: at, trailing: 9 }
+    let named = ProbeResult::Named { where_at: at, trailing: 9 }
     assert(inspect(named).contains("where_at.space.value = 7"))
     assert(inspect(named).contains("where_at.enabled = false"))
 }

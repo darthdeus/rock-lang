@@ -1,6 +1,7 @@
 // Names that collide or look reserved: runtime marker field neighbours, a
-// user `Result` struct shadowing the stdlib one, and a struct sharing its name
-// with an enum tuple variant.
+// generic struct with nullable fields, and a struct sharing its name with an
+// enum tuple variant. A standalone file cannot reuse a stdlib type name such
+// as `Result`: both would emit under the same symbol.
 
 // Neighbours of the three runtime marker field names remain legal.
 struct RefFields { __inner: int, __pred: int, _fn: int }
@@ -23,14 +24,14 @@ fn reserved_field_name_neighbours() {
     }
 }
 
-struct Result<T, E> {
+struct Outcome<T, E> {
     ok: T?
     err: E?
 }
 
 @test(output = "Ok: 456")
 fn test_different_result() {
-    let r: Result<int, string> = Result{ ok: 456, err: null };
+    let r: Outcome<int, string> = Outcome{ ok: 456, err: null };
     if r.ok != null {
         print("Ok: {r.ok}");
     }

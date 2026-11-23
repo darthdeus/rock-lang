@@ -719,7 +719,8 @@ fn check_call_arguments(
                 declared_is_bounded_generic(gamma, declared, &bounded_vars),
                 span,
             )
-            .ok_or_else(rejected)?;
+            .ok_or_else(rejected)?
+                + usize::from(is_redundant_unwrap(gamma, function, 0, receiver, span));
         } else {
             coerce(gamma, receiver, expected, span)?;
             reject_redundant_unwrap(gamma, function, name, 0, receiver, span)?;
@@ -799,6 +800,7 @@ fn check_call_arguments(
                     span,
                 )
                 .ok_or_else(rejected)?
+                    + usize::from(is_redundant_unwrap(gamma, function, index, actual, span))
             };
             continue;
         }
@@ -1618,6 +1620,23 @@ fn reject_iterable_fn_value_result(
     Ok(())
 }
 
+/// In overload scoring this costs one, so a non-null argument's own overload,
+/// such as `Result.unwrap`, outranks the nullable `unwrap` it would tie with,
+/// while a lone `@unwraps` candidate still wins and reports the redundancy.
+fn is_redundant_unwrap(
+    gamma: &mut Gamma,
+    function: &Function,
+    param_index: usize,
+    arg_ty: TyId,
+    span: Span,
+) -> bool {
+    function
+        .param_decls
+        .get(param_index)
+        .is_some_and(|p| p.annotations.iter().any(|a| a.is_builtin("unwraps")))
+        && redundant_optional_on(gamma, arg_ty, span)
+}
+
 /// An `@unwraps` parameter strips the nullable off its argument, so passing a
 /// value already known to be non-null is redundant -- rejected like `x ?? d`.
 fn reject_redundant_unwrap(
@@ -1628,11 +1647,7 @@ fn reject_redundant_unwrap(
     arg_ty: TyId,
     span: Span,
 ) -> Result<(), CompilerError> {
-    let unwraps = function
-        .param_decls
-        .get(param_index)
-        .is_some_and(|p| p.annotations.iter().any(|a| a.is_builtin("unwraps")));
-    if unwraps && redundant_optional_on(gamma, arg_ty, span) {
+    if is_redundant_unwrap(gamma, function, param_index, arg_ty, span) {
         comp_error!(
             span,
             "argument of `{}` is not nullable -- the `{}` is redundant",

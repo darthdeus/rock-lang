@@ -81,11 +81,11 @@ fn stdlib_cast_still_threads_repr() {
 
 nobox value Source { x: int, y: int }
 
-nobox value Result { total: int }
+nobox value Summed { total: int }
 
-fn cast(value: Source) -> Result { return Result { total: value.x + value.y } }
+fn cast(value: Source) -> Summed { return Summed { total: value.x + value.y } }
 
-fn consume(value: Result) -> int { return value.total }
+fn consume(value: Summed) -> int { return value.total }
 
 @test(output = "18")
 fn user_cast_after_a_column_read_keeps_its_result_representation() {

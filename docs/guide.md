@@ -311,6 +311,43 @@ fn main() {
 }
 ```
 
+## Results
+
+`T?` means a value is absent, and that is fine: a lookup that finds
+nothing is not an error. When an operation fails and the caller should
+know why, return `Result<T, E>` instead: `Result::Ok(value)` or
+`Result::Err(reason)`. `Result<T>` is `Result<T, string>`. Handle it
+with `match` like any enum; `unwrap()` and `expect("why")` abort with
+the reason on `Err`, and `is_ok()` and `is_err()` test it. There is
+no `?` operator. Returning a `Result` of a number, string, handle or
+reference does not allocate; a value struct or an enum with a payload
+inside it is boxed, unlike in `T?`.
+
+```rock
+// `T?` says a value is absent. A `Result` says an operation failed and
+// carries the reason; `Result<T>` is `Result<T, string>`.
+fn parse_port(text: string) -> Result<int> {
+    let n = parse_int(text) ?? return Result::Err("not a number: {text}")
+    if n < 1 || n > 65535 {
+        return Result::Err("out of range: {n}")
+    }
+    return Result::Ok(n)
+}
+
+fn main() {
+    match parse_port("8080") {
+        Result::Ok(port) => print(port), // 8080
+        Result::Err(reason) => print(reason),
+    }
+    match parse_port("http") {
+        Result::Ok(port) => print(port),
+        Result::Err(reason) => print(reason), // not a number: http
+    }
+    print(parse_port("70000").is_err()) // true
+    print(parse_port("22").unwrap()) // 22
+}
+```
+
 ## Tuples
 
 Tuples group a fixed mix of values of different types, handy for

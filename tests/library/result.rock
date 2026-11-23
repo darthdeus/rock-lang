@@ -1,0 +1,97 @@
+// `Result<T, E = string>`: a failure that carries a reason, where `T?` only
+// says "absent". The Ok path stays allocation-free for scalar and handle
+// payloads, which `@noalloc` pins. A payload enum or value struct inside the
+// generic payload slot is still boxed, so `open` is not `@noalloc`.
+
+newtype Handle(int)
+
+enum Why {
+    Missing,
+    Bad(int),
+}
+
+@noalloc
+fn halve(n: int) -> Result<int> {
+    if n % 2 != 0 { return Result::Err("odd") }
+    return Result::Ok(n ./ 2)
+}
+
+fn open(id: int) -> Result<Handle, Why> {
+    if id == 0 { return Result::Err(Why::Missing) }
+    if id < 0 { return Result::Err(Why::Bad(id)) }
+    return Result::Ok(Handle(id))
+}
+
+@noalloc
+fn handle(id: int) -> Result<Handle> {
+    if id <= 0 { return Result::Err("no handle") }
+    return Result::Ok(Handle(id))
+}
+
+fn save(ok: bool) -> Result<()> {
+    if !ok { return Result::Err("disk full") }
+    return Result::Ok(())
+}
+
+@noalloc
+fn sum_halves(n: int) -> int {
+    let total = 0
+    for i in 0..n {
+        total += halve(i * 2).unwrap()
+        if halve(i).is_ok() { total += 1 }
+        if halve(i).is_err() { total += 100 }
+        total += handle(i + 1).expect("positive ids open").0
+    }
+    return total
+}
+
+fn describe(r: Result<Handle, Why>) -> string {
+    return match r {
+        Result::Ok(h) => "ok {h.0}",
+        Result::Err(Why::Missing) => "missing",
+        Result::Err(Why::Bad(id)) => "bad {id}",
+    }
+}
+
+@test(output = "ok 3\nmissing\nbad -4\n7\nodd\nsaved\ndisk full")
+fn result_constructs_and_matches() {
+    print(describe(open(3)))
+    print(describe(open(0)))
+    print(describe(open(-4)))
+    print(halve(14).unwrap())
+    match halve(3) {
+        Result::Ok(v) => print(v),
+        Result::Err(reason) => print(reason),
+    }
+    let saved = save(true)
+    if let Result::Ok(_) = saved { print("saved") }
+    let Result::Err(reason) = save(false) else { return }
+    print(reason)
+}
+
+@test
+fn result_helpers_on_the_ok_path() {
+    // i in 0..4: halves 0+1+2+3, one odd-even split each way, ids 1..4.
+    assert_eq(sum_halves(4), 6 + 2 + 200 + 10)
+    assert(save(true).is_ok())
+    assert(save(false).is_err())
+}
+
+@nomangle inline(lua) fn failure_message(f: fn()) -> string = """
+    local ok, err = pcall(f)
+    if ok then return "no failure" end
+    return tostring(err)
+"""
+
+@nomangle inline(js) fn failure_message(f: fn()) -> string = """
+    try { __rock_call(f); return "no failure"; } catch (e) { return String(e && e.message !== undefined ? e.message : e); }
+"""
+
+@test
+fn unwrap_and_expect_report_the_reason() {
+    let unwrapped = failure_message(() => { let _ = halve(3).unwrap() })
+    assert(unwrapped.contains("unwrap() called on Err: odd"), unwrapped)
+    let expected = failure_message(() => { let _ = open(-2).expect("ids must be positive") })
+    assert(expected.contains("expect() failed: ids must be positive: Why::Bad(-2)"), expected)
+    assert_eq(failure_message(() => { let _ = halve(4).unwrap() }), "no failure")
+}

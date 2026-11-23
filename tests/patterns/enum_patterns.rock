@@ -7,7 +7,7 @@ enum Option<T> {
     Some(T),
 }
 
-enum Result<T, E> {
+enum Fallible<T, E> {
     Ok(T),
     Err(E),
 }
@@ -50,17 +50,17 @@ fn test_literal_patterns() {
 
 @test
 fn test_nested_enum_patterns() {
-    let cases: [(Result<Option<int>, string>, int)] = [
-        (Result::Ok(Option::Some(42)), 42),
-        (Result::Ok(Option::None), 0),
-        (Result::Err("failure"), -1),
+    let cases: [(Fallible<Option<int>, string>, int)] = [
+        (Fallible::Ok(Option::Some(42)), 42),
+        (Fallible::Ok(Option::None), 0),
+        (Fallible::Err("failure"), -1),
     ]
 
     for (result, expected) in cases {
         let value = match result {
-            Result::Ok(Option::Some(n)) => n,
-            Result::Ok(Option::None) => 0,
-            Result::Err(e) => -1,
+            Fallible::Ok(Option::Some(n)) => n,
+            Fallible::Ok(Option::None) => 0,
+            Fallible::Err(e) => -1,
         }
         assert_eq(value, expected)
     }
