@@ -30,11 +30,3 @@ impl ResolvedBoundTree {
         self.next.get(&generic_idx)
     }
 }
-
-/// The tree is a function of the instantiation, not of the caller; the
-/// agreement check on the demand map enforces that.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SpecDemand {
-    pub inst: Instance,
-    pub tree: ResolvedBoundTree,
-}

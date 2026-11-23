@@ -242,11 +242,11 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
             &mut findings,
             collect_spec_bound_calls(ws, mf, &mut demands),
         );
-        for demand in demands {
-            if st.graph.has_bound_tree_disagreement(&demand.inst) {
-                findings.push(demand.inst.bound_clash_error(ws, self.scx.interner()));
+        for instance in demands {
+            if st.graph.has_bound_tree_disagreement(&instance) {
+                findings.push(instance.bound_clash_error(ws, self.scx.interner()));
             } else {
-                queue_standalone(st, ws, demand.inst, &mut findings);
+                queue_standalone(st, ws, instance, &mut findings);
             }
         }
         collect(&mut findings, schedule_residual_calls(self.ws, mf, st));

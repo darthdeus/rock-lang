@@ -124,7 +124,7 @@ pub(super) struct UnitOut {
     pub(super) pending_init: Option<(Ustr, Ustr, String)>,
     // Reachability roots: these bodies are always emitted.
     pub(super) calls: Vec<FuncRef>,
-    pub(super) specs: Vec<skull_mir::bound::SpecDemand>,
+    pub(super) specs: Vec<Instance>,
     pub(super) code_artifact: skull_mir::code_identity::BodyCodeArtifact,
     pub(super) global_names: Vec<Ustr>,
     // A unit has no chunk to carry these, and most production embeds are in

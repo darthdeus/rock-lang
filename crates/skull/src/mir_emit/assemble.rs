@@ -59,7 +59,7 @@ struct Assembly {
     times: PhaseTimes,
     t_scaffold: Duration,
     attribution: AttributionAccumulator,
-    needed_specs: Vec<skull_mir::bound::SpecDemand>,
+    needed_specs: Vec<Instance>,
     rejections: Rejections,
     unit_facts: Vec<(Ustr, Vec<Ustr>, Vec<Ustr>)>,
     all_statics: Vec<skull_mir::mir::StaticCell>,
@@ -694,7 +694,7 @@ struct UnitFacts {
     times: PhaseTimes,
     reads: UnitComptimeReads,
     rejections: Vec<CompilerError>,
-    specs: Vec<skull_mir::bound::SpecDemand>,
+    specs: Vec<Instance>,
     attribution: Vec<UnitAttribution>,
 }
 
@@ -795,7 +795,7 @@ pub(super) struct EarlyAssembly {
 }
 
 impl EarlyAssembly {
-    pub(super) fn demands(&self) -> &[skull_mir::bound::SpecDemand] {
+    pub(super) fn demands(&self) -> &[Instance] {
         &self.units.facts.specs
     }
 }
@@ -935,7 +935,7 @@ pub(super) fn assemble(
         let mut facts: Vec<(Ustr, &Chunk)> = Vec::new();
         asm.push_function_definitions(ws, cache, &needed_foreign, &mut order, &mut facts);
         let declared = order.emitted.len();
-        let mut demands: Vec<&skull_mir::bound::SpecDemand> = unit_demands
+        let mut demands: Vec<&Instance> = unit_demands
             .iter()
             .chain(order.emitted.iter().flat_map(|&chunk| chunk.specs.iter()))
             .collect();

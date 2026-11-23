@@ -510,22 +510,21 @@ impl SkullEmitCache {
                 }
             };
             let mut valid = true;
-            for demand in &chunk.specs {
-                if self.graph.concreteness(&demand.inst)
-                    == crate::instance_graph::Concreteness::Missing
+            for instance in &chunk.specs {
+                if self.graph.concreteness(instance) == crate::instance_graph::Concreteness::Missing
                 {
                     errs.push(CompilerError::new_with_label(
                         f.name_span,
                         format!(
                             "graph omitted added specialization `{}` demanded by `{}`",
-                            demand.inst.symbol(ws, self.scx.interner()),
+                            instance.symbol(ws, self.scx.interner()),
                             body.symbol(ws, self.scx.interner())
                         ),
                     ));
                     valid = false;
                     continue;
                 }
-                pending.push(demand.inst.clone());
+                pending.push(instance.clone());
             }
             if valid {
                 built.push((body, chunk));

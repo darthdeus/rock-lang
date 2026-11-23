@@ -24,7 +24,7 @@ pub(super) struct Chunk {
     // The callees still called after inlining: the reachability edges.
     pub(super) calls: Vec<FuncRef>,
     // Deduplicated program-wide: each specialization is defined exactly once.
-    pub(super) specs: Vec<skull_mir::bound::SpecDemand>,
+    pub(super) specs: Vec<Instance>,
     pub(super) code_artifact: skull_mir::code_identity::BodyCodeArtifact,
     // Bound after every definition, so each captured callee is already final.
     pub(super) binds: Vec<skull_codegen_lua::CalleeBindingPlan>,

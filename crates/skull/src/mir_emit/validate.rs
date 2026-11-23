@@ -126,7 +126,7 @@ impl BodyRejection {
 pub(super) fn validate_emitted_body(
     ws: &Workspace,
     mf: &MirFunc,
-    specs: &mut Vec<skull_mir::bound::SpecDemand>,
+    specs: &mut Vec<Instance>,
 ) -> Result<(), BodyRejection> {
     let mut acc = BodyRejection::default();
     // A demand the body cannot state self-contained is a rejection, not a dropped
@@ -161,7 +161,7 @@ pub(super) fn check_unit_spec_bindings(
     name: &str,
     mf: &MirFunc,
     span: bone_semantic::prelude::Span,
-    out_specs: &mut Vec<skull_mir::bound::SpecDemand>,
+    out_specs: &mut Vec<Instance>,
 ) -> Result<(), CompilerError> {
     match validate_emitted_body(ws, mf, out_specs) {
         Ok(()) => Ok(()),

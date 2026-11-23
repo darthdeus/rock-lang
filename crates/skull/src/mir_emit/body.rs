@@ -467,7 +467,7 @@ pub fn is_generic(f: &bone_semantic::hir::Function) -> bool {
 pub(super) fn order_specialized_callees<'c>(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
-    pending: &mut Vec<&'c skull_mir::bound::SpecDemand>,
+    pending: &mut Vec<&'c Instance>,
     cached: &'c FxHashMap<Instance, Result<Chunk, CompilerError>>,
     live: &'c FxHashMap<Instance, Chunk>,
     rejected: &[(String, CompilerError)],
@@ -480,8 +480,7 @@ pub(super) fn order_specialized_callees<'c>(
     let mut errs: Vec<(String, CompilerError)> = rejected.to_vec();
     let rejected_names: FxHashSet<&str> = rejected.iter().map(|(n, _)| n.as_str()).collect();
     // LIFO demand order preserves the ordering of specialized definitions.
-    while let Some(demand) = pending.pop() {
-        let body = &demand.inst;
+    while let Some(body) = pending.pop() {
         if !done.insert(body) {
             continue;
         }

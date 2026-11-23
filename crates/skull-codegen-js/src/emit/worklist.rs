@@ -375,7 +375,7 @@ pub(super) fn register_statics(
 pub(super) fn collect_spec_bound_calls(
     ws: &Workspace,
     mf: &MirFunc,
-    out: &mut Vec<skull_mir::bound::SpecDemand>,
+    out: &mut Vec<Instance>,
 ) -> Result<(), CompilerError> {
     skull_mir::reach::spec_bound_calls(ws, mf, out)?;
     for nf in &mf.nested_fns {

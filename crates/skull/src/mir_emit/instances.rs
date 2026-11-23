@@ -82,13 +82,9 @@ impl<'a> SpecQueue<'a> {
         }
     }
 
-    pub(super) fn admit_all(
-        &self,
-        demands: &[skull_mir::bound::SpecDemand],
-        jobs: &mut Vec<Instance>,
-    ) {
-        for d in demands {
-            self.admit(d.inst.clone(), jobs);
+    pub(super) fn admit_all(&self, demands: &[Instance], jobs: &mut Vec<Instance>) {
+        for instance in demands {
+            self.admit(instance.clone(), jobs);
         }
     }
 
@@ -218,7 +214,7 @@ pub(super) fn view_driven_specialized_chunks(
     cg: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,
     cache: &SkullEmitCache,
-    initial: &[skull_mir::bound::SpecDemand],
+    initial: &[Instance],
 ) -> SpecChunks {
     let mut queue = SpecQueue::new(ws, scx, &cache.graph, Some(&cache.chunks));
     queue.attribution = cache.attribution;

@@ -1,3 +1,4 @@
+use crate::instance::Instance;
 use crate::mir::{Block, FuncRef, Inst, MirFunc};
 use bone_core::prelude::CompilerError;
 use comfy_la_arena::Idx;
@@ -357,10 +358,8 @@ pub fn call_targets(mf: &MirFunc) -> Vec<FuncRef> {
 pub fn spec_bound_calls(
     ws: &bone_core::workspace::Workspace,
     mf: &MirFunc,
-    out: &mut Vec<crate::bound::SpecDemand>,
+    out: &mut Vec<Instance>,
 ) -> Result<(), CompilerError> {
-    let empty = bone_core::prelude::BoundTree::default();
-    let empty_resolved = crate::bound::ResolvedBoundTree::default();
     for bid in emitted_blocks(mf) {
         for &iid in &mf.blocks[bid].insts {
             let Some(inst) = mf.spec_bindings.get(&iid) else {
@@ -382,22 +381,17 @@ pub fn spec_bound_calls(
                     mf.name,
                 )));
             }
-            // An already-resolved tree from a standalone substitution wins: this body's
-            // arena cannot state a tree from another instantiation.
-            let raw = mf.bound_trees.get(&iid).unwrap_or(&empty);
-            let tree = match mf.resolved_bound_trees.get(&iid) {
-                Some(t) => t.clone(),
-                None if !raw.is_empty() => {
-                    return Err(CompilerError::new_no_location(
-                        "concrete specialized call has no resolved bound plan".to_string(),
-                    ));
-                }
-                None => empty_resolved.clone(),
-            };
-            out.push(crate::bound::SpecDemand {
-                inst: inst.clone(),
-                tree,
-            });
+            if !mf.resolved_bound_trees.contains_key(&iid)
+                && mf
+                    .bound_trees
+                    .get(&iid)
+                    .is_some_and(|tree| !tree.is_empty())
+            {
+                return Err(CompilerError::new_no_location(
+                    "concrete specialized call has no resolved bound plan".to_string(),
+                ));
+            }
+            out.push(inst.clone());
         }
     }
     Ok(())
