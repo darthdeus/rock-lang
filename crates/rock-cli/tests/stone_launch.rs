@@ -719,6 +719,89 @@ fn main() {
     run("perf", Some("throw"));
 }
 
+#[test]
+fn world_text_stays_visible_with_jit() {
+    let output = tempfile::tempdir().unwrap();
+    let game = write_project(
+        &output.path().join("game"),
+        "scene-labels",
+        STONE_GAME,
+        &[(
+            "main.rock",
+            r#"
+use stone::*;
+use stone_core::*;
+
+@init
+fn init_camera() {
+    camera.center = v(0, 0)
+    camera.visible_world_width = 32
+    ENGINE.use_bloom = false
+}
+
+@draw
+fn draw_world() {
+    draw_text("WORLD SHAPES", v(-13, 6.3), 0.65, WHITE)
+    let captions = ["rectangle", "outline", "circle", "circle outline", "line", "polygon"]
+    for i in 0..captions.len() {
+        let x = -12.0 + float(i) * 5.0
+        draw_circle(v(x, 4.5), 0.9, BLUE)
+        draw_text(captions[i], v(x, 2.9), 0.45, WHITE, TextAlign::Center)
+    }
+}
+
+@late_draw
+fn draw_header() {
+    screen.text("Drawing labels", v(20, 15), 28.0, WHITE)
+}
+
+fn main() {
+    stone_run_game(GameConfig { title: "Scene labels", width: 1280, height: 720,
+        clear_color: color(0.06, 0.07, 0.1) })
+}
+"#,
+        )],
+    );
+    let screenshot = output.path().join("frame.png");
+    let result = rock_in(output.path())
+        .arg("frame")
+        .arg(game)
+        .args(["-n", "60", "--output"])
+        .arg(output.path())
+        .env("ROCK_DIR", repo_root())
+        .env("STONE_SCREENSHOT_PATH", &screenshot)
+        .env(
+            "ROCK_FRAME_TIMEOUT_SECS",
+            test_utils::HANG_BACKSTOP.as_secs().to_string(),
+        )
+        .env_remove("STONE_NO_JIT")
+        .env_remove("STONE_FRAME_DELAY_MS")
+        .env_remove("STONE_WINDOW")
+        .env_remove("ROCK_PACKAGES_DIR")
+        .env_remove("ROCK_STDLIB_DIR")
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{}", text(&result));
+
+    let (width, height, rgba) = rock_cli::image_snapshot::decode_png_rgba8(&screenshot).unwrap();
+    // Crop the WORLD SHAPES heading, away from the screen header and circles.
+    let x0 = (112 * width / 1280) as usize;
+    let x1 = (450 * width / 1280) as usize;
+    let y0 = (99 * height / 720) as usize;
+    let y1 = (149 * height / 720) as usize;
+    let bright = rgba
+        .chunks_exact(width as usize * 4)
+        .skip(y0)
+        .take(y1 - y0)
+        .flat_map(|row| row[x0 * 4..x1 * 4].chunks_exact(4))
+        .filter(|pixel| pixel[..3].iter().all(|channel| *channel >= 100))
+        .count();
+    assert!(
+        bright > (x1 - x0) * (y1 - y0) / 100,
+        "WORLD SHAPES heading is missing ({bright} bright pixels)"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn overlapping_frames_execute_their_own_compiled_program() {
