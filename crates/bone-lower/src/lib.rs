@@ -236,7 +236,11 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
     }
 
     fn take_body(&mut self) -> Body {
-        std::mem::take(&mut self.body)
+        let mut body = std::mem::take(&mut self.body);
+        if self.workspace.skip_session_facts {
+            body.scope_arena = Default::default();
+        }
+        body
     }
 
     pub fn flush_scope_probes(&mut self) {

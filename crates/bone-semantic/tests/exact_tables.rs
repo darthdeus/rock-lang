@@ -24,7 +24,11 @@ fn stored_bodies_and_inferences_hold_no_spare_capacity() {
     assert!(!module.bodies.is_empty());
     for body in module.bodies.values() {
         assert_eq!(body.expr_arena.capacity(), body.expr_arena.len());
-        assert_eq!(body.scope_arena.capacity(), body.scope_arena.len());
+        assert_eq!(
+            body.scope_arena.capacity(),
+            0,
+            "batch lowering keeps no scopes"
+        );
     }
     let (_, inference) = ws
         .inferences_iter()
