@@ -12,8 +12,8 @@ use bone_core::suspension::{
 use bone_core::workspace::{BodyInference, BoundNext};
 
 use crate::hir::{
-    BinOp, BindingInfo, BindingKind, Body, BuiltinTy, Expr, Function, Module, Pattern, Statement,
-    TypeCtor, TypeExpr, VarId, VariantPayload,
+    BinOp, BindingInfo, BindingKind, Body, BuiltinTy, Callee, Expr, Function, Module, Pattern,
+    Statement, TypeCtor, TypeExpr, VarId, VariantPayload,
 };
 use crate::prelude::*;
 
@@ -39,6 +39,7 @@ const MAX_KEY_LEN: usize = 256;
 
 type FnKey = (ModuleId, Idx<Function>);
 type BodyKey = (ModuleId, BodyOwner);
+type Region = (BodyKey, Option<Idx<Expr>>);
 
 fn function_body((module, function): FnKey) -> BodyKey {
     (module, BodyOwner::Function(function))
@@ -114,15 +115,21 @@ impl CollectionOrigin {
 
 #[derive(Default)]
 struct CollectionSources {
-    values: FxHashMap<Idx<BindingInfo>, Vec<Idx<Expr>>>,
-    stored: FxHashMap<Idx<BindingInfo>, Vec<(Idx<Expr>, Idx<Expr>)>>,
     escaped: FxHashMap<Idx<BindingInfo>, usize>,
-    points: Option<ArenaMap<Idx<Expr>, usize>>,
+    points: ArenaMap<Idx<Expr>, usize>,
 }
 
-impl CollectionSources {
-    fn point(&self, expr: Idx<Expr>) -> Option<usize> {
-        self.points.as_ref()?.get(expr).copied()
+fn binding_initializer(body: &Body, stmt: &Statement) -> Option<(Idx<BindingInfo>, Idx<Expr>)> {
+    let Statement::Let { pattern, value, .. } = *stmt else {
+        return None;
+    };
+    Some((body.pattern_single_bind(pattern)?, value))
+}
+
+fn binding_assignment(body: &Body, target: Idx<Expr>) -> Option<Idx<BindingInfo>> {
+    match body.expr_arena[target] {
+        Expr::Var(binding) => Some(binding),
+        _ => None,
     }
 }
 
@@ -154,7 +161,7 @@ struct Arg {
 }
 
 struct Edge {
-    callee: BodyKey,
+    callee: Region,
     /// The callee's generics, as keys in the caller.
     generics: Vec<String>,
     /// Indexed by the callee's parameter.
@@ -170,6 +177,7 @@ struct Root {
 enum Operation {
     Call(Option<Edge>),
     Implicit(Option<Edge>),
+    Direct(EffectOn),
     HostAccess(CollectionOrigin),
 }
 
@@ -181,25 +189,42 @@ struct FnFacts {
 }
 
 impl FnFacts {
-    fn callees(&self) -> impl Iterator<Item = BodyKey> {
-        self.operations.iter().filter_map(|(_, op)| match op {
+    fn operations_in<'a>(
+        &'a self,
+        members: Option<&'a FxHashSet<Idx<Expr>>>,
+    ) -> impl Iterator<Item = &'a (SuspensionPoint, Operation)> {
+        self.operations.iter().filter(move |(point, _)| {
+            let (Expression(expr) | IteratorNext(expr)) = point;
+            members.is_none_or(|members| members.contains(expr))
+        })
+    }
+
+    fn callees<'a>(
+        &'a self,
+        members: Option<&'a FxHashSet<Idx<Expr>>>,
+    ) -> impl Iterator<Item = Region> + 'a {
+        self.operations_in(members).filter_map(|(_, op)| match op {
             Operation::Call(Some(edge)) | Operation::Implicit(Some(edge)) => Some(edge.callee),
             _ => None,
         })
     }
 }
 
+fn stdlib_cast(ws: &Workspace, (mid, fid): FnKey) -> bool {
+    let module = ws.module(mid);
+    is_stdlib_module_file(module.file.as_str())
+        && matches!(module.functions[fid].name.as_str(), "cast" | "transmute")
+}
+
 #[derive(Default)]
 struct HostRecords {
     types: FxHashSet<Ustr>,
     host_boundary: bool,
-    escaping_calls: FxHashSet<FnKey>,
+    escaping_calls: RefCell<FxHashMap<FnKey, bool>>,
 }
 
 impl HostRecords {
     fn collect(ws: &Workspace) -> Self {
-        let mut records = Self::default();
-        let mut pending = Vec::new();
         let user_modules = || {
             ws.modules
                 .iter()
@@ -210,31 +235,21 @@ impl HostRecords {
                 m.functions
                     .iter()
                     .filter(|(_, f)| Self::has_host_boundary(f))
-                    .map(|(f, _)| (m.id, f))
+                    .map(|(id, _)| (m.id, id))
             })
             .collect();
+        let mut records = Self::default();
         if host_entry_points.is_empty() {
             return records;
         }
         records.host_boundary = true;
-        let mut callers: FxHashMap<FnKey, Vec<FnKey>> = FxHashMap::default();
-        for module in &ws.modules {
-            let trusted = is_stdlib_module_file(module.file.as_str());
-            if !trusted {
-                // Host entry points can reach the Lua global directory by name.
-                for global in module.globals.values() {
-                    records.add(ws, None, global.ty, &mut pending);
-                }
+        let mut pending = Vec::new();
+        for module in user_modules() {
+            // Raw host code can reach the global directory by name.
+            for global in module.globals.values() {
+                records.add(ws, None, global.ty, &mut pending);
             }
             for (id, function) in module.functions.iter() {
-                let opaque = function.inline_body.is_some() || function.is_extern;
-                let stores_alias = function.param_decls.len() > 1
-                    && function.annotations.iter().any(|a| {
-                        a.is_builtin(RELOCATES_ANNOTATION) || a.is_builtin("writes_elems")
-                    });
-                if opaque && (!trusted || stores_alias) {
-                    records.escaping_calls.insert((module.id, id));
-                }
                 if host_entry_points.contains(&(module.id, id)) {
                     for ty in function
                         .param_decls
@@ -253,60 +268,23 @@ impl HostRecords {
                 let Some(body) = module.bodies.get(&owner) else {
                     continue;
                 };
-                if let BodyOwner::Function(id) = owner
-                    && body.expr_arena.values().any(|expr| {
-                        matches!(*expr, Expr::Assign { target, value }
-                            if !matches!(body.expr_arena[target], Expr::Var(_))
-                                && bi.expr_types.get(value).is_some_and(|&ty| {
-                                    records.carries_collection(ws, bi, ty)
-                                        || matches!(ws.resolve_ty(Some(bi), ty), Some((_, TypeExpr::Generic(..))))
-                                }))
-                    })
-                {
-                    records.escaping_calls.insert((module.id, id));
+                for &(_, ty) in &bi.any_erasures {
+                    records.add(ws, Some(bi), ty, &mut pending);
                 }
-                if !trusted {
-                    for &(_, ty) in &bi.any_erasures {
-                        records.add(ws, Some(bi), ty, &mut pending);
-                    }
-                }
-                for (&site, &(mid, fid)) in &bi.resolved_overload_calls {
-                    let callee_module = ws.module(mid);
-                    let callee = &callee_module.functions[fid];
-                    let stdlib = is_stdlib_module_file(callee_module.file.as_str());
-                    if let BodyOwner::Function(caller) = owner {
-                        callers
-                            .entry((mid, fid))
-                            .or_default()
-                            .push((module.id, caller));
-                    }
-                    let foreign = host_entry_points.contains(&(mid, fid));
-                    let cast = stdlib && matches!(callee.name.as_str(), "cast" | "transmute");
-                    if trusted || (!foreign && !cast) {
+                for (&site, &target) in &bi.resolved_overload_calls {
+                    if !host_entry_points.contains(&target) && !stdlib_cast(ws, target) {
                         continue;
-                    }
-                    if let Some(&ty) = bi.expr_types.get(site) {
-                        records.add(ws, Some(bi), ty, &mut pending);
                     }
                     let (receiver, args) = match body.expr_arena[site] {
                         Expr::Call { args, .. } => (None, args),
                         Expr::SafeNavCall { receiver, args, .. } => (Some(receiver), args),
-                        _ => continue,
+                        _ => (None, IdxRange::new_empty()),
                     };
-                    for arg in receiver.into_iter().chain(args) {
-                        if let Some(&ty) = bi.expr_types.get(arg) {
+                    for expr in std::iter::once(site).chain(receiver).chain(args) {
+                        if let Some(&ty) = bi.expr_types.get(expr) {
                             records.add(ws, Some(bi), ty, &mut pending);
                         }
                     }
-                }
-            }
-        }
-        // An opaque call or an aggregate store can retain a supplied alias.
-        let mut escaping_calls: Vec<_> = records.escaping_calls.iter().copied().collect();
-        while let Some(callee) = escaping_calls.pop() {
-            for &caller in callers.get(&callee).into_iter().flatten() {
-                if records.escaping_calls.insert(caller) {
-                    escaping_calls.push(caller);
                 }
             }
         }
@@ -334,6 +312,64 @@ impl HostRecords {
             }
         }
         records
+    }
+
+    /// Reuse resolved calls to ask if an argument can reach a foreign call
+    /// or an aggregate store. A failed search proves that every node it
+    /// visited is closed, including nodes in recursive cycles.
+    fn escapes(&self, ws: &Workspace, root: FnKey) -> bool {
+        let mut cache = self.escaping_calls.borrow_mut();
+        let mut seen = FxHashSet::default();
+        let mut pending = vec![root];
+        while let Some(key) = pending.pop() {
+            if let Some(&escapes) = cache.get(&key) {
+                if escapes {
+                    cache.insert(root, true);
+                    return true;
+                }
+            } else if seen.insert(key) {
+                let module = ws.module(key.0);
+                let function = &module.functions[key.1];
+                let opaque = function.inline_body.is_some() || function.is_extern;
+                let retains = !is_stdlib_module_file(module.file.as_str())
+                    || (function.param_decls.len() > 1
+                        && function.annotations.iter().any(|a| {
+                            a.is_builtin(RELOCATES_ANNOTATION) || a.is_builtin("writes_elems")
+                        }));
+                if opaque && retains {
+                    cache.insert(key, true);
+                    cache.insert(root, true);
+                    return true;
+                }
+                if let Some((_, body, bi)) = inferred_body(ws, key) {
+                    if body.expr_arena.iter().any(|(id, expr)| match *expr {
+                        Expr::Assign { target, value } => {
+                            !matches!(body.expr_arena[target], Expr::Var(_))
+                                && bi.expr_types.get(value).is_some_and(|&ty| {
+                                    self.carries_collection(ws, bi, ty)
+                                        || matches!(
+                                            ws.resolve_ty(Some(bi), ty),
+                                            Some((_, TypeExpr::Generic(..)))
+                                        )
+                                })
+                        }
+                        Expr::Call {
+                            callee: Callee::Local(_) | Callee::Value(_),
+                            ..
+                        }
+                        | Expr::SafeNavCall { .. } => !bi.resolved_overload_calls.contains_key(&id),
+                        _ => false,
+                    }) {
+                        cache.insert(key, true);
+                        cache.insert(root, true);
+                        return true;
+                    }
+                    pending.extend(bi.resolved_overload_calls.values().copied());
+                }
+            }
+        }
+        cache.extend(seen.into_iter().map(|key| (key, false)));
+        false
     }
 
     fn has_host_boundary(function: &Function) -> bool {
@@ -395,10 +431,11 @@ struct BodyCtx<'a> {
     generics: Vec<VarId>,
     params: FxHashMap<Idx<BindingInfo>, u16>,
     fresh_locals: FxHashSet<Idx<BindingInfo>>,
-    ref_values: FxHashMap<Idx<BindingInfo>, Vec<Idx<Expr>>>,
+    values: FxHashMap<Idx<BindingInfo>, Vec<Idx<Expr>>>,
     arena_remove: Option<Span>,
     arena_storage: bool,
     collection_sources: Option<CollectionSources>,
+    host_records: Option<&'a HostRecords>,
     root_cache: std::cell::RefCell<FxHashMap<Idx<BindingInfo>, Vec<Root>>>,
     return_origins: &'a ReturnOrigins,
 }
@@ -410,6 +447,7 @@ impl<'a> BodyCtx<'a> {
         body: &'a Body,
         bi: &'a BodyInference,
         return_origins: &'a ReturnOrigins,
+        host_records: Option<&'a HostRecords>,
     ) -> Self {
         let generics = function
             .into_iter()
@@ -432,9 +470,10 @@ impl<'a> BodyCtx<'a> {
             generics,
             params,
             fresh_locals: FxHashSet::default(),
-            ref_values: FxHashMap::default(),
+            values: FxHashMap::default(),
             root_cache: Default::default(),
             collection_sources: None,
+            host_records,
             arena_storage: function.is_some_and(|f| {
                 bone_core::modules::stdlib_file_name(f.span.file.as_str()) == Some("arena.rock")
             }),
@@ -450,6 +489,9 @@ impl<'a> BodyCtx<'a> {
                 .map(|f| f.span),
         };
         ctx.fresh_locals = ctx.collect_fresh_locals();
+        if let Some(host_records) = host_records {
+            ctx.collection_sources = Some(ctx.collect_collection_sources(host_records));
+        }
         ctx
     }
 
@@ -457,45 +499,59 @@ impl<'a> BodyCtx<'a> {
     fn collect_fresh_locals(&mut self) -> FxHashSet<Idx<BindingInfo>> {
         let mut fresh = FxHashSet::default();
         let mut stale = FxHashSet::default();
-        for (_, statement) in self.body.statement_arena.iter() {
-            if let Statement::Let { pattern, value, .. } = *statement {
-                if let Some(name) = self.body.pattern_single_bind(pattern) {
-                    self.record_ref(name, value);
-                    if self.body.binding_arena[name].kind == BindingKind::Let
-                        && self.is_new_collection(value)
-                    {
-                        fresh.insert(name);
-                    } else {
-                        stale.insert(name);
-                    }
-                }
+        for (name, value) in self
+            .body
+            .statement_arena
+            .values()
+            .filter_map(|stmt| binding_initializer(self.body, stmt))
+        {
+            self.record_value(name, value);
+            if self.body.binding_arena[name].kind == BindingKind::Let
+                && self.is_new_collection(value)
+            {
+                fresh.insert(name);
+            } else {
+                stale.insert(name);
             }
         }
-        for (_, expr) in self.body.expr_arena.iter() {
-            match *expr {
-                Expr::Assign { target, value } => {
-                    if let Expr::Var(binding) = self.body.expr_arena[target] {
-                        if !self.is_new_collection(value) {
-                            stale.insert(binding);
-                        }
-                        self.record_ref(binding, value);
-                    }
+        for expr in self.body.expr_arena.values() {
+            if let Expr::Assign { target, value } = *expr
+                && let Some(binding) = binding_assignment(self.body, target)
+            {
+                if !self.is_new_collection(value) {
+                    stale.insert(binding);
                 }
-                _ => {}
+                self.record_value(binding, value);
             }
         }
         fresh.retain(|b| !stale.contains(b));
         fresh
     }
 
-    fn record_ref(&mut self, binding: Idx<BindingInfo>, value: Idx<Expr>) {
-        if self
-            .bi
-            .binding_types
-            .get(binding)
-            .is_some_and(|&ty| ref_target(self.ws, self.bi, ty).is_some())
+    fn record_value(&mut self, binding: Idx<BindingInfo>, value: Idx<Expr>) {
+        if self.bi.binding_types.get(binding).is_some_and(|&ty| {
+            ref_target(self.ws, self.bi, ty).is_some()
+                || self
+                    .host_records
+                    .is_some_and(|host| host.carries_collection(self.ws, self.bi, ty))
+        }) {
+            self.values.entry(binding).or_default().push(value);
+        }
+    }
+
+    fn ref_values(&self, binding: Idx<BindingInfo>) -> Option<&Vec<Idx<Expr>>> {
+        let values = self.values.get(&binding)?;
+        // Contexts with host analysis also record non-reference aliases.
+        if self.host_records.is_none()
+            || self
+                .bi
+                .binding_types
+                .get(binding)
+                .is_some_and(|&ty| ref_target(self.ws, self.bi, ty).is_some())
         {
-            self.ref_values.entry(binding).or_default().push(value);
+            Some(values)
+        } else {
+            None
         }
     }
 
@@ -554,7 +610,7 @@ impl<'a> BodyCtx<'a> {
         self.ref_params(expr, &mut ref_params, &mut FxHashSet::default());
         Arg {
             expr,
-            collection_origin: self.collection_origin(expr, at),
+            collection_origin: self.origin(expr, at),
             ref_params,
             fresh,
             param,
@@ -612,7 +668,7 @@ impl<'a> BodyCtx<'a> {
                 if let Some(&param) = self.params.get(&binding) {
                     out.insert(param);
                 }
-                for &value in self.ref_values.get(&binding).into_iter().flatten() {
+                for &value in self.ref_values(binding).into_iter().flatten() {
                     self.ref_params(value, out, seen);
                 }
             }
@@ -623,15 +679,6 @@ impl<'a> BodyCtx<'a> {
             }
             _ => self.for_each_value_carrier(e, &mut |child| self.ref_params(child, out, seen)),
         }
-    }
-
-    fn write(&self, effect: &mut Effect, target: Idx<Expr>, at: Span) {
-        let (fresh, param) = self.place_binding(target);
-        let target = fresh
-            .map(Local)
-            .or_else(|| param.map(Param))
-            .or_else(|| self.element_key(target).map(Element));
-        effect.add(target.unwrap_or(Unknown), at);
     }
 
     fn call_args(&self, call: Idx<Expr>) -> impl Iterator<Item = Idx<Expr>> {
@@ -667,20 +714,19 @@ impl<'a> BodyCtx<'a> {
         bound
     }
 
-    fn collection_origin(&self, expr: Idx<Expr>, at: Idx<Expr>) -> CollectionOrigin {
-        let Some(sources) = &self.collection_sources else {
+    fn origin(&self, expr: Idx<Expr>, at: Idx<Expr>) -> CollectionOrigin {
+        let (Some(host), Some(sources)) = (self.host_records, &self.collection_sources) else {
             return CollectionOrigin::Rock;
         };
-        if !self
-            .ty(expr)
-            .is_some_and(|ty| collection_or_any(self.ws, Some(self.bi), ty))
-        {
+        if !self.ty(expr).is_some_and(|ty| {
+            collection_or_any(self.ws, Some(self.bi), ty) || host.may_callback(self.ws, self.bi, ty)
+        }) {
             return CollectionOrigin::Rock;
         }
         self.collection_origin_inner(
             expr,
             sources,
-            sources.point(at).unwrap_or(usize::MAX),
+            sources.points.get(at).copied().unwrap_or(usize::MAX),
             &mut FxHashSet::default(),
         )
     }
@@ -706,23 +752,22 @@ impl<'a> BodyCtx<'a> {
                     return Host;
                 }
                 let param = self.params.get(&binding).copied().map(Param);
-                match sources.values.get(&binding) {
+                match self.values.get(&binding) {
                     Some(values) => values.iter().fold(param.unwrap_or(Rock), |origin, &value| {
                         origin.merge(self.collection_origin_inner(value, sources, at, seen))
                     }),
                     None => param.unwrap_or(Host),
                 }
             }
-            Expr::Array(_) | Expr::Null => Rock,
+            Expr::Array(_) | Expr::StructLiteral { .. } | Expr::Null => Rock,
             Expr::Call { .. } | Expr::SafeNavCall { .. } => {
                 if self.is_new_collection(expr) {
                     return Rock;
                 }
-                if self.resolved(expr).is_some_and(|(mid, fid)| {
-                    let module = self.ws.module(mid);
-                    is_stdlib_module_file(module.file.as_str())
-                        && matches!(module.functions[fid].name.as_str(), "cast" | "transmute")
-                }) && let Some(arg) = self.call_args(expr).next()
+                if self
+                    .resolved(expr)
+                    .is_some_and(|key| stdlib_cast(self.ws, key))
+                    && let Some(arg) = self.call_args(expr).next()
                 {
                     return self.collection_origin_inner(arg, sources, at, seen);
                 }
@@ -746,69 +791,89 @@ impl<'a> BodyCtx<'a> {
 
     fn collect_collection_sources(&self, host: &HostRecords) -> CollectionSources {
         let mut sources = CollectionSources::default();
-        let mut record = |binding, value| {
-            if self
-                .bi
-                .binding_types
-                .get(binding)
-                .is_some_and(|&ty| host.carries_collection(self.ws, self.bi, ty))
-            {
-                sources.values.entry(binding).or_default().push(value);
-            }
-        };
-        for statement in self.body.statement_arena.values() {
-            if let Statement::Let { pattern, value, .. } = *statement
-                && let Some(binding) = self.body.pattern_single_bind(pattern)
-            {
-                record(binding, value);
-            }
-        }
+        let carries = |ty| host.carries_collection(self.ws, self.bi, ty);
         let mut sinks = Vec::new();
+        let mut stores = FxHashMap::<_, Vec<_>>::default();
         for (site, expr) in self.body.expr_arena.iter() {
-            let Expr::Assign { target, value } = *expr else {
-                continue;
-            };
-            if let Expr::Var(binding) = self.body.expr_arena[target] {
-                record(binding, value);
-            } else if self
-                .ty(value)
-                .is_some_and(|ty| host.carries_collection(self.ws, self.bi, ty))
-            {
-                match storage_root(self.body, target) {
-                    Expr::Var(binding) => {
-                        sources
-                            .stored
-                            .entry(binding)
-                            .or_default()
-                            .push((site, value));
-                    }
-                    _ => sinks.push((site, value)),
-                }
-            }
-        }
-        for (call, expr) in self.body.expr_arena.iter() {
-            if !matches!(expr, Expr::Call { .. } | Expr::SafeNavCall { .. })
-                || self
-                    .resolved(call)
-                    .is_some_and(|key| !host.escaping_calls.contains(&key))
-            {
-                continue;
-            }
-            for arg in self.call_args(call) {
-                if self
-                    .ty(arg)
-                    .is_some_and(|ty| host.carries_collection(self.ws, self.bi, ty))
+            match *expr {
+                Expr::Assign { target, value }
+                    if binding_assignment(self.body, target).is_none()
+                        && self.ty(value).is_some_and(carries) =>
                 {
-                    sinks.push((call, arg));
+                    if let Expr::Var(binding) = storage_root(self.body, target) {
+                        stores.entry(binding).or_default().push((site, value));
+                    } else {
+                        sinks.push((site, value));
+                    }
                 }
+                Expr::Call { .. } | Expr::SafeNavCall { .. } => {
+                    let mut args = self
+                        .call_args(site)
+                        .filter(|&arg| self.ty(arg).is_some_and(carries))
+                        .peekable();
+                    if args.peek().is_some()
+                        && self
+                            .resolved(site)
+                            .is_none_or(|key| host.escapes(self.ws, key))
+                    {
+                        sinks.extend(args.map(|arg| (site, arg)));
+                    }
+                }
+                _ => {}
             }
         }
-        if !sinks.is_empty() {
-            sources.points = Some(self.statement_points());
+        if sinks.is_empty() {
+            return sources;
         }
-        for (site, value) in sinks {
-            let at = sources.point(site).unwrap_or_default();
-            self.escape_collection(value, &mut sources, at, &mut FxHashMap::default());
+        sources.points = self.statement_points();
+        let point = |site| sources.points.get(site).copied().unwrap_or_default();
+        let mut pending: Vec<_> = sinks
+            .into_iter()
+            .map(|(site, value)| (value, point(site)))
+            .collect();
+        let mut seen = FxHashMap::default();
+        while let Some((expr, at)) = pending.pop() {
+            if seen.get(&expr).is_some_and(|&previous| previous <= at) {
+                continue;
+            }
+            seen.insert(expr, at);
+            match self.body.expr_arena[expr] {
+                Expr::Var(binding) => {
+                    let first = sources.escaped.entry(binding).or_insert(at);
+                    *first = (*first).min(at);
+                    pending.extend(
+                        self.values
+                            .get(&binding)
+                            .into_iter()
+                            .flatten()
+                            .map(|&value| (value, at)),
+                    );
+                    pending.extend(
+                        stores
+                            .get(&binding)
+                            .into_iter()
+                            .flatten()
+                            .map(|&(site, value)| (value, at.max(point(site)))),
+                    );
+                }
+                Expr::Lambda { body, .. } => {
+                    pending.push((body, at));
+                    self.body
+                        .walk_descendants(HirChild::Expr(body), &mut |child| {
+                            if let HirChild::Expr(child) = child
+                                && matches!(self.body.expr_arena[child], Expr::Var(_))
+                            {
+                                pending.push((child, at));
+                            }
+                            true
+                        });
+                }
+                _ => self.body.for_each_child(HirChild::Expr(expr), |child| {
+                    if let HirChild::Expr(child) = child {
+                        pending.push((child, at));
+                    }
+                }),
+            }
         }
         sources
     }
@@ -859,136 +924,76 @@ impl<'a> BodyCtx<'a> {
         points
     }
 
-    fn escape_collection(
-        &self,
-        expr: Idx<Expr>,
-        sources: &mut CollectionSources,
-        at: usize,
-        seen: &mut FxHashMap<Idx<Expr>, usize>,
-    ) {
-        if seen.get(&expr).is_some_and(|&previous| previous <= at) {
-            return;
-        }
-        seen.insert(expr, at);
-        if let Expr::Var(binding) = self.body.expr_arena[expr] {
-            let first = sources.escaped.entry(binding).or_insert(at);
-            *first = (*first).min(at);
-            if let Some(values) = sources.values.get(&binding).cloned() {
-                for value in values {
-                    self.escape_collection(value, sources, at, seen);
-                }
-            }
-            if let Some(stored) = sources.stored.get(&binding).cloned() {
-                for (site, value) in stored {
-                    let at = at.max(sources.point(site).unwrap_or_default());
-                    self.escape_collection(value, sources, at, seen);
-                }
-            }
-        } else if let Expr::Lambda { body, .. } = self.body.expr_arena[expr] {
-            self.escape_collection(body, sources, at, seen);
-            self.body
-                .walk_descendants(HirChild::Expr(body), &mut |child| {
-                    if let HirChild::Expr(child) = child
-                        && matches!(self.body.expr_arena[child], Expr::Var(_))
-                    {
-                        self.escape_collection(child, sources, at, seen);
-                    }
-                    true
-                });
-        } else {
-            self.body.for_each_child(HirChild::Expr(expr), |child| {
-                if let HirChild::Expr(child) = child {
-                    self.escape_collection(child, sources, at, seen);
-                }
-            });
-        }
-    }
-
-    fn facts(mut self, host_records: &HostRecords) -> FnFacts {
-        if host_records.host_boundary {
-            self.collection_sources = Some(self.collect_collection_sources(host_records));
-        }
+    fn facts(self, host_records: &HostRecords) -> FnFacts {
         let mut direct = Effect::default();
         if let Some(at) = self.arena_remove {
             direct.add(Param(0), at);
         }
         let mut operations = Vec::new();
-        let private_records = self.private_records(host_records);
-        let may_callback = |base| {
+        let host_access = |base| {
             self.ty(base)
                 .is_some_and(|ty| host_records.may_callback(self.ws, self.bi, ty))
-                && !matches!(self.body.expr_arena[base], Expr::StructLiteral { .. })
-                && !private_records.contains(&base)
         };
         for (id, expr) in self.body.expr_arena.iter() {
-            match expr {
-                Expr::Call { .. } | Expr::SafeNavCall { .. } => {
-                    operations.push((Expression(id), Operation::Call(self.call_edge(id))));
-                    if host_records.host_boundary
-                        && let Some(base) = self.raw_table_receiver(id)
-                        && !private_records.contains(&base)
-                    {
-                        let origin = if may_callback(base) {
-                            CollectionOrigin::Host
-                        } else {
-                            self.collection_origin(base, id)
-                        };
-                        if origin != CollectionOrigin::Rock {
-                            operations.push((Expression(id), Operation::HostAccess(origin)));
-                        }
-                    }
-                }
+            let call = match *expr {
+                Expr::Call { .. } | Expr::SafeNavCall { .. } => Some(self.call_edge(id)),
                 Expr::CompoundAssign { .. } if self.resolved(id).is_some() => {
-                    operations.push((Expression(id), Operation::Call(self.call_edge(id))));
+                    Some(self.call_edge(id))
+                }
+                _ => None,
+            };
+            let origin = |base| self.origin(base, id);
+            let host = match *expr {
+                Expr::Call { .. } | Expr::SafeNavCall { .. } => {
+                    self.raw_table_receiver(id)
+                        .map_or(CollectionOrigin::Rock, |base| {
+                            if host_access(base) {
+                                origin(base)
+                            } else {
+                                origin(base)
+                            }
+                        })
                 }
                 Expr::Index { base, .. }
-                    if self
-                        .collection_ctor(*base)
-                        .is_some_and(|ctor| matches!(ctor, TypeCtor::Array | TypeCtor::Map)) =>
+                    if matches!(
+                        self.collection_ctor(base),
+                        Some(TypeCtor::Array | TypeCtor::Map)
+                    ) =>
                 {
-                    let origin = self.collection_origin(*base, id);
-                    if origin != CollectionOrigin::Rock {
-                        operations.push((Expression(id), Operation::HostAccess(origin)));
-                    }
+                    origin(base)
                 }
                 Expr::FieldAccess { base, field } | Expr::SafeNav { base, field }
                     if field.as_str() == "len"
-                        && self.collection_ctor(*base) == Some(TypeCtor::Array) =>
+                        && self.collection_ctor(base) == Some(TypeCtor::Array) =>
                 {
-                    let origin = self.collection_origin(*base, id);
-                    if origin != CollectionOrigin::Rock {
-                        operations.push((Expression(id), Operation::HostAccess(origin)));
-                    }
+                    origin(base)
                 }
-                Expr::Assign { .. } => self.assign_write(id, &mut direct),
                 Expr::FieldAccess { base, .. }
                 | Expr::SafeNav { base, .. }
                 | Expr::Spread(base)
-                    if may_callback(*base) =>
+                    if host_access(base) =>
                 {
-                    operations.push((
-                        Expression(id),
-                        Operation::HostAccess(CollectionOrigin::Host),
-                    ));
+                    origin(base)
                 }
-                Expr::StructLiteral { bases, fields, .. } => {
-                    if bases.into_iter().any(may_callback) {
-                        operations.push((
-                            Expression(id),
-                            Operation::HostAccess(CollectionOrigin::Host),
-                        ));
-                    }
-                    if let Some(edge) = self.default_fields(id, *fields) {
-                        operations.push((Expression(id), Operation::Implicit(Some(edge))));
-                    }
-                }
+                Expr::StructLiteral { bases, .. } => bases
+                    .into_iter()
+                    .filter(|&base| host_access(base))
+                    .fold(CollectionOrigin::Rock, |seen, base| {
+                        seen.merge(origin(base))
+                    }),
+                _ => CollectionOrigin::Rock,
+            };
+            if let Some(edge) = call {
+                operations.push((Expression(id), Operation::Call(edge)));
+            }
+            if host != CollectionOrigin::Rock {
+                operations.push((Expression(id), Operation::HostAccess(host)));
+            }
+            let pattern = match *expr {
                 Expr::IfLet { pattern, value, .. }
-                    if self.pattern_may_callback(host_records, *pattern) =>
+                    if self.pattern_may_callback(host_records, pattern) =>
                 {
-                    operations.push((
-                        Expression(*value),
-                        Operation::HostAccess(CollectionOrigin::Host),
-                    ));
+                    Some(value)
                 }
                 Expr::Match {
                     scrutinee, arms, ..
@@ -996,11 +1001,27 @@ impl<'a> BodyCtx<'a> {
                     self.pattern_may_callback(host_records, self.body.match_arm_arena[arm].pattern)
                 }) =>
                 {
-                    operations.push((
-                        Expression(*scrutinee),
-                        Operation::HostAccess(CollectionOrigin::Host),
-                    ));
+                    Some(scrutinee)
                 }
+                _ => None,
+            };
+            if let Some(value) = pattern {
+                operations.push((
+                    Expression(value),
+                    Operation::HostAccess(CollectionOrigin::Host),
+                ));
+            }
+            match *expr {
+                Expr::Assign { .. } => {
+                    if let Some(target) = self.assigned_collection(id) {
+                        operations.push((Expression(id), Operation::Direct(target)));
+                    }
+                }
+                Expr::StructLiteral { fields, bases, .. } if bases.is_empty() => operations.extend(
+                    self.default_fields(id, fields)
+                        .into_iter()
+                        .map(|edge| (Expression(id), Operation::Implicit(Some(edge)))),
+                ),
                 _ => {}
             }
         }
@@ -1057,7 +1078,15 @@ impl<'a> BodyCtx<'a> {
         &self,
         literal: Idx<Expr>,
         fields: IdxRange<crate::hir::StructLitField>,
-    ) -> Option<Edge> {
+    ) -> Vec<Edge> {
+        self.field_defaults(literal, fields).unwrap_or_default()
+    }
+
+    fn field_defaults(
+        &self,
+        literal: Idx<Expr>,
+        fields: IdxRange<crate::hir::StructLitField>,
+    ) -> Option<Vec<Edge>> {
         let (
             ty,
             TypeExpr::App {
@@ -1072,21 +1101,26 @@ impl<'a> BodyCtx<'a> {
         let owner = BodyOwner::StructDefaults(id.def);
         let module = self.ws.module(id.module);
         let defaults = module.bodies.get(&owner)?;
-        if defaults.field_defaults.keys().all(|name| {
-            fields
-                .into_iter()
-                .any(|field| self.body.struct_lit_field_arena[field].name == *name)
-        }) {
-            return None;
-        }
-        Some(Edge {
-            callee: (id.module, owner),
-            generics: params
-                .into_iter()
-                .map(|param| self.key(ty.with_idx(param)))
+        let generics: Vec<_> = params
+            .into_iter()
+            .map(|param| self.key(ty.with_idx(param)))
+            .collect();
+        Some(
+            defaults
+                .field_defaults
+                .iter()
+                .filter(|(name, _)| {
+                    !fields
+                        .into_iter()
+                        .any(|field| self.body.struct_lit_field_arena[field].name == **name)
+                })
+                .map(|(_, &root)| Edge {
+                    callee: ((id.module, owner), Some(root)),
+                    generics: generics.clone(),
+                    args: Vec::new(),
+                })
                 .collect(),
-            args: Vec::new(),
-        })
+        )
     }
 
     fn pattern_may_callback(&self, host_records: &HostRecords, pattern: Idx<Pattern>) -> bool {
@@ -1126,55 +1160,6 @@ impl<'a> BodyCtx<'a> {
         .flatten()
     }
 
-    fn private_records(&self, host_records: &HostRecords) -> FxHashSet<Idx<Expr>> {
-        if !host_records.host_boundary {
-            return FxHashSet::default();
-        }
-        let projected: FxHashSet<_> = self
-            .body
-            .expr_arena
-            .iter()
-            .filter_map(|(id, expr)| match *expr {
-                Expr::Call { .. } | Expr::SafeNavCall { .. } => self.raw_table_receiver(id),
-                Expr::FieldAccess { base, .. } | Expr::SafeNav { base, .. }
-                    if matches!(self.body.expr_arena[base], Expr::Var(_))
-                        && self
-                            .ty(base)
-                            .is_some_and(|ty| host_records.may_callback(self.ws, self.bi, ty)) =>
-                {
-                    Some(base)
-                }
-                _ => None,
-            })
-            .collect();
-        if projected.is_empty() {
-            return projected;
-        }
-        let mut private: FxHashSet<_> = self
-            .body
-            .statement_arena
-            .values()
-            .filter_map(|stmt| {
-                if let Statement::Let { pattern, value, .. } = *stmt
-                    && matches!(self.body.expr_arena[value], Expr::StructLiteral { .. })
-                {
-                    return self.body.pattern_single_bind(pattern);
-                }
-                None
-            })
-            .collect();
-        for (id, expr) in self.body.expr_arena.iter() {
-            if let Expr::Var(binding) = *expr
-                && !projected.contains(&id)
-            {
-                private.remove(&binding);
-            }
-        }
-        projected.into_iter().filter(|&id| {
-            matches!(self.body.expr_arena[id], Expr::Var(binding) if private.contains(&binding))
-        }).collect()
-    }
-
     fn unary_witness(
         &self,
         callee: FnKey,
@@ -1195,7 +1180,7 @@ impl<'a> BodyCtx<'a> {
             })
             .collect();
         Edge {
-            callee: function_body(callee),
+            callee: (function_body(callee), None),
             generics,
             // A missing receiver here is the iterator returned by a preceding iter call.
             args: receiver
@@ -1205,23 +1190,28 @@ impl<'a> BodyCtx<'a> {
     }
 
     /// Map index assignment inserts; a Vec `len` write resizes.
-    fn assign_write(&self, e: Idx<Expr>, effect: &mut Effect) {
+    fn assigned_collection(&self, e: Idx<Expr>) -> Option<EffectOn> {
         let Expr::Assign { target, .. } = self.body.expr_arena[e] else {
-            return;
+            return None;
         };
-        let at = self.body.expr_spans[e];
-        match self.body.expr_arena[target] {
-            Expr::Index { base, .. } if self.collection_ctor(base) == Some(TypeCtor::Map) => {
-                self.write(effect, base, at)
-            }
+        let base = match self.body.expr_arena[target] {
+            Expr::Index { base, .. } if self.collection_ctor(base) == Some(TypeCtor::Map) => base,
             Expr::FieldAccess { base, field }
                 if field.as_str() == "len"
                     && self.collection_ctor(base) == Some(TypeCtor::Array) =>
             {
-                self.write(effect, base, at)
+                base
             }
-            _ => {}
-        }
+            _ => return None,
+        };
+        let (fresh, param) = self.place_binding(base);
+        Some(
+            fresh
+                .map(Local)
+                .or_else(|| param.map(Param))
+                .or_else(|| self.element_key(base).map(Element))
+                .unwrap_or(Unknown),
+        )
     }
 
     fn collection_ctor(&self, e: Idx<Expr>) -> Option<TypeCtor> {
@@ -1238,7 +1228,7 @@ impl<'a> BodyCtx<'a> {
         let callee = self.resolved(call)?;
         let function = &self.ws.module(callee.0).functions[callee.1];
         Some(Edge {
-            callee: function_body(callee),
+            callee: (function_body(callee), None),
             generics: self.generic_keys(call),
             args: self.bind_args(function, call),
         })
@@ -1263,7 +1253,7 @@ impl<'a> BodyCtx<'a> {
         // Cache only the completed query: sibling inputs of a conditional
         // alias can point into independent Arenas and must not inherit its union.
         if let Expr::Var(binding) = self.body.expr_arena[e]
-            && self.ref_values.contains_key(&binding)
+            && self.ref_values(binding).is_some()
         {
             self.root_cache
                 .borrow_mut()
@@ -1287,7 +1277,7 @@ impl<'a> BodyCtx<'a> {
                     out.extend(roots.iter().cloned());
                     return;
                 }
-                for &value in self.ref_values.get(binding).into_iter().flatten() {
+                for &value in self.ref_values(*binding).into_iter().flatten() {
                     self.element_roots_inner(value, out, seen);
                 }
             }
@@ -1718,7 +1708,7 @@ impl ReturnOrigins {
         self.active.borrow_mut().insert(key, true);
         let mut roots = Vec::new();
         if let Some((function, body, bi)) = inferred_body(ws, key) {
-            let ctx = BodyCtx::new(ws, Some(function), body, bi, self);
+            let ctx = BodyCtx::new(ws, Some(function), body, bi, self, None);
             if let Some(root) = body.root {
                 ctx.element_roots(root, &mut roots);
                 evaluated(body, root, |node| {
@@ -1765,7 +1755,8 @@ struct Program<'a> {
     relevance: Relevance,
     sites: Vec<BodyKey>,
     facts: FxHashMap<BodyKey, FnFacts>,
-    summaries: FxHashMap<BodyKey, Effect>,
+    regions: FxHashMap<Region, Option<FxHashSet<Idx<Expr>>>>,
+    summaries: FxHashMap<Region, Effect>,
     return_origins: ReturnOrigins,
     host_records: HostRecords,
 }
@@ -1805,6 +1796,7 @@ impl<'a> Program<'a> {
             relevance: Relevance::default(),
             sites: Vec::new(),
             facts: FxHashMap::default(),
+            regions: FxHashMap::default(),
             summaries: FxHashMap::default(),
             return_origins: ReturnOrigins::default(),
             host_records: HostRecords::default(),
@@ -1842,12 +1834,12 @@ impl<'a> Program<'a> {
             let Some((function, body, bi)) = inferred_site(ws, (mid, owner)) else {
                 continue;
             };
-            let ctx = BodyCtx::new(ws, function, body, bi, &program.return_origins);
+            let ctx = BodyCtx::new(ws, function, body, bi, &program.return_origins, None);
             let mut roots = Vec::new();
             for &arg in bi.ref_call_args.values().flatten() {
                 ctx.element_roots(arg, &mut roots);
             }
-            for values in ctx.ref_values.values() {
+            for values in ctx.values.values() {
                 for &value in values {
                     ctx.element_roots(value, &mut roots);
                 }
@@ -1877,7 +1869,7 @@ impl<'a> Program<'a> {
             }
             program.sites.push((mid, owner));
         }
-        let mut pending = program.sites.clone();
+        let mut pending: Vec<_> = program.sites.iter().map(|&key| (key, None)).collect();
         if program
             .relevance
             .keys
@@ -1886,24 +1878,46 @@ impl<'a> Program<'a> {
         {
             program.host_records = HostRecords::collect(ws);
         }
-        while let Some(key) = pending.pop() {
-            if program.facts.contains_key(&key) {
+        while let Some((key, root)) = pending.pop() {
+            if program.regions.contains_key(&(key, root)) {
                 continue;
             }
             let Some((function, body, bi)) = inferred_site(ws, key) else {
                 continue;
             };
-            let facts = BodyCtx::new(ws, function, body, bi, &program.return_origins)
-                .facts(&program.host_records);
-            pending.extend(facts.callees());
-            program.facts.insert(key, facts);
+            let facts = program.facts.entry(key).or_insert_with(|| {
+                BodyCtx::new(
+                    ws,
+                    function,
+                    body,
+                    bi,
+                    &program.return_origins,
+                    program
+                        .host_records
+                        .host_boundary
+                        .then_some(&program.host_records),
+                )
+                .facts(&program.host_records)
+            });
+            let members = root.map(|root| {
+                let mut members = FxHashSet::default();
+                evaluated(body, root, |child| {
+                    if let HirChild::Expr(expr) = child {
+                        members.insert(expr);
+                    }
+                });
+                members
+            });
+            pending.extend(facts.callees(members.as_ref()));
+            program.regions.insert((key, root), members);
         }
         program.solve();
         program
     }
 
-    fn summary(&self, key: BodyKey) -> Effect {
-        let mut effect = match self.summaries.get(&key) {
+    fn summary(&self, region: Region) -> Effect {
+        let (key, _) = region;
+        let mut effect = match self.summaries.get(&region) {
             Some(summary) => summary.clone(),
             None => match key.1 {
                 BodyOwner::Function(id) if !self.facts.contains_key(&key) => {
@@ -1943,6 +1957,11 @@ impl<'a> Program<'a> {
                 effect.add(Unknown, at);
                 effect
             }
+            Operation::Direct(target) => {
+                let mut effect = Effect::default();
+                effect.add(target.clone(), at);
+                effect
+            }
             Operation::HostAccess(origin) => {
                 let mut effect = Effect::default();
                 effect.add_host_access(*origin, at);
@@ -1955,20 +1974,21 @@ impl<'a> Program<'a> {
 
     /// Summaries only grow, and keys are bounded, so the worklist drains.
     fn solve(&mut self) {
-        let mut callers: FxHashMap<BodyKey, Vec<BodyKey>> = FxHashMap::default();
-        for (&caller, facts) in &self.facts {
-            for callee in facts.callees() {
+        let mut callers: FxHashMap<Region, Vec<Region>> = FxHashMap::default();
+        for (&caller, members) in &self.regions {
+            for callee in self.facts[&caller.0].callees(members.as_ref()) {
                 callers.entry(callee).or_default().push(caller);
             }
         }
-        let mut pending: Vec<_> = self.facts.keys().copied().collect();
+        let mut pending: Vec<_> = self.regions.keys().copied().collect();
         let mut queued: FxHashSet<_> = pending.iter().copied().collect();
         while let Some(key) = pending.pop() {
             queued.remove(&key);
-            let body = &self.ws.module(key.0).bodies[&key.1];
-            let facts = &self.facts[&key];
+            let ((module, owner), _) = key;
+            let body = &self.ws.module(module).bodies[&owner];
+            let facts = &self.facts[&key.0];
             let mut effect = facts.direct.clone();
-            for (point, op) in &facts.operations {
+            for (point, op) in facts.operations_in(self.regions[&key].as_ref()) {
                 effect.union(&self.operation_effect(body, *point, op));
             }
             effect.0.retain(|target, _| !matches!(target, Local(_)));
@@ -1993,7 +2013,7 @@ impl<'a> Program<'a> {
         let Some((function, body, bi)) = inferred_site(self.ws, (mid, owner)) else {
             return Vec::new();
         };
-        let ctx = BodyCtx::new(self.ws, function, body, bi, &self.return_origins);
+        let ctx = BodyCtx::new(self.ws, function, body, bi, &self.return_origins, None);
         let facts = &self.facts[&(mid, owner)];
         let mut effects = EffectsAt::default();
         for &(point, ref op) in &facts.operations {
@@ -2005,7 +2025,7 @@ impl<'a> Program<'a> {
         let mut errors = Vec::new();
         let mut borrowed = FxHashMap::default();
         let mut active_values = FxHashSet::default();
-        for (&binding, values) in &ctx.ref_values {
+        for (&binding, values) in &ctx.values {
             let mut roots = Vec::new();
             for &value in values {
                 let start = roots.len();
@@ -2138,10 +2158,7 @@ impl<'a> Program<'a> {
             }
             evaluated(ctx.body, arg, |node| {
                 let point = match node {
-                    HirChild::Expr(id) => {
-                        ctx.assign_write(id, &mut effect);
-                        Expression(id)
-                    }
+                    HirChild::Expr(id) => Expression(id),
                     HirChild::Statement(stmt) => match ctx.body.statement_arena[stmt] {
                         Statement::For { iter, .. } => IteratorNext(iter),
                         _ => return,

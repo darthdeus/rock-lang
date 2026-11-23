@@ -568,6 +568,10 @@ global PROBE: int = {
         "{HOST}fn probe() {{ let host = Host {{ flag: 0 }}; let r: ref BorrowCell = CELLS.borrow(HELD).unwrap(); let _ = host.flag; r.n = 99 }}"
     );
     assert_eq!(arena_borrow_errors(&plain), Vec::<String>::new());
+    let forwarded = format!(
+        "{HOST}fn read_host(host: Host) -> int {{ host.flag }} fn probe() {{ let host = Host {{ flag: 0 }}; let r: ref BorrowCell = CELLS.borrow(HELD).unwrap(); let _ = read_host(host); r.n = 99 }}"
+    );
+    assert_eq!(arena_borrow_errors(&forwarded), Vec::<String>::new());
 }
 
 #[test]
@@ -705,6 +709,8 @@ fn arena_borrow_checks_preserve_separate_storage_and_fresh_reborrows() {
         "fn stable(owner: ref BorrowRow) -> ref BorrowCell { return owner.cell }\nfn probe() { let owner = BorrowRow { cell: BorrowCell { n: 0 } }; let r: ref BorrowCell = stable(owner); opaque(); r.n = 1 }",
         "global HELD: Entity<BorrowRow> = ROWS.insert(BorrowRow { cell: BorrowCell { n: 0 } })\nfn stable() -> ref BorrowCell { return ROWS.borrow(HELD).unwrap().cell }\nfn probe() { let r: ref BorrowCell = stable(); ROWS.remove(HELD); opaque(); r.n = 1 }",
         "global HELD: Entity<BorrowCell> = CELLS.insert(BorrowCell { n: 0 })\nfn stable(owner: ref BorrowRow) -> ref BorrowCell { fn unused() -> int { return CELLS.borrow(HELD).unwrap().n } return owner.cell }\nfn probe() { let owner = BorrowRow { cell: BorrowCell { n: 0 } }; let r: ref BorrowCell = stable(owner); opaque(); r.n = 1 }",
+        "global HELD: Entity<BorrowCell> = CELLS.insert(BorrowCell { n: 0 })\nfn retire() -> int { HELD.remove(); 0 }\nstruct Payload { harmful: int = retire(), harmless: int = 0 }\nfn probe() { let r: ref BorrowCell = CELLS.borrow(HELD).unwrap(); let _ = Payload { harmful: 0 }; r.n = 1 }",
+        "global HELD: Entity<BorrowCell> = CELLS.insert(BorrowCell { n: 0 })\nfn retire() -> int { HELD.remove(); 0 }\nstruct Payload { harmful: int = retire() }\nfn probe() { let base = Payload { harmful: 0 }; let r: ref BorrowCell = CELLS.borrow(HELD).unwrap(); let _ = Payload { ..base }; r.n = 1 }",
         "fn touch(r: ref BorrowCell, f: fn()) { r.n = 1 }\nfn probe(h: Entity<BorrowCell>) { touch(CELLS.borrow(h).unwrap(), () => invalidate(h)) }",
         "fn probe(h: Entity<BorrowCell>) { let r: ref BorrowCell = CELLS.borrow(h).unwrap(); let f = () => invalidate(h); r.n = 1 }",
         "fn probe(h: Entity<BorrowCell>) { let r: ref BorrowCell = CELLS.borrow(h).unwrap(); fn nested(k: Entity<BorrowCell>) { invalidate(k) } r.n = 1 }",
