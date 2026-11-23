@@ -21,7 +21,7 @@ pub value WorldTextRowLayout {
 // Per-frame animation readout: computed fresh on every read, never retained.
 // A value (not a struct) so the five leaves travel the scalar ABI instead of
 // materializing one table per sample on the update/draw path.
-pub value WorldTextSample {
+pub nobox value WorldTextSample {
     offset: Vec2,
     opacity: float,
     scale: float,
