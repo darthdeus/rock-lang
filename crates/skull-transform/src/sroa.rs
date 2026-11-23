@@ -233,6 +233,28 @@ fn store_inputs(func: &MirFunc) -> (Vec<bool>, Vec<Option<ustr::Ustr>>, Vec<u32>
     (disqualified, enum_hints, uses)
 }
 
+fn field_write_ancestors(func: &MirFunc) -> HashSet<Idx<Inst>> {
+    let mut projections = HashSet::default();
+    for &site in func.blocks.values().flat_map(|b| &b.insts) {
+        let (Inst::StoreField { mut base, .. }
+        | Inst::StoreIndex {
+            mut base,
+            kind: ContainerKind::Record(_),
+            ..
+        }) = func.insts[site]
+        else {
+            continue;
+        };
+        while let Some((parent, _)) = func.field_projection(base) {
+            if !projections.insert(base) {
+                break;
+            }
+            base = parent;
+        }
+    }
+    projections
+}
+
 impl Families {
     /// Candidate collection: classify every store as a ctor, an alias copy, a
     /// nil store, or a disqualifying write.
@@ -404,6 +426,7 @@ impl Families {
             ..
         } = self;
         let mut uses = LoadUses::default();
+        let field_write_ancestors = std::cell::OnceCell::new();
         let mut load_cell: HashMap<Idx<Inst>, Idx<Cell>> = HashMap::default();
         for (_, b) in func.blocks.iter() {
             for &i in &b.insts {
@@ -500,7 +523,12 @@ impl Families {
                         if !ok {
                             // A flagged (non-null value-struct) binding rebuilds at the
                             // use instead of pinning the family as an escaping aggregate.
-                            if func.cells[c].nonnull_value_struct {
+                            if func.cells[c].nonnull_value_struct
+                                && !(func.field_projection(i).is_some_and(|(base, _)| base == op)
+                                    && field_write_ancestors
+                                        .get_or_init(|| self::field_write_ancestors(func))
+                                        .contains(&i))
+                            {
                                 uses.escape_loads.push((op, c));
                             } else {
                                 disq[raw(c)] = true;

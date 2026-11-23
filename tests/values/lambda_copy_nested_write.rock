@@ -1,0 +1,15 @@
+nobox value NQ { x: float, y: float }
+value T { q: NQ, n: int }
+fn call(f: fn(T) -> T, x: T) -> T { return f(x) }
+@test(output = "5 1 / 5 1")
+fn nested_write_to_a_lambda_value_copy() {
+    let a = T { q: NQ { x: 1.0, y: 2.0 }, n: 1 }
+    let f = (x: T) => { let r = x
+        r.q.x = 5.0
+        return r }
+    let r = f(a)
+    let s = call((x: T) => { let r = x
+        r.q.x = 5.0
+        return r }, a)
+    print("{r.q.x} {a.q.x} / {s.q.x} {a.q.x}")
+}

@@ -1,0 +1,23 @@
+value R { hp: int }
+value V2 { x: float, y: float }
+value H { e: Scene<R>, n: int }
+value HE { e: Entity<R>, n: int }
+value HP { s: Scene<R>, p: V2 }
+fn go(xs: [int], fs: [float]) {
+    let k = H { e: Scene { _scene_id: xs[0] }, n: 1 }
+    k.e = Scene { _scene_id: xs[1] }
+    let j = H { e: Scene { _scene_id: xs[0] }, n: 1 }
+    j.e._scene_id = xs[1]
+    let a: Arena<R> = arena_new()
+    let h = HE { e: a.insert(R { hp: 10 }), n: 1 }
+    h.e = a.insert(R { hp: 20 })
+    let p = HP { s: Scene { _scene_id: 1 }, p: V2 { x: fs[0], y: 0.0 } }
+    p.p.x = fs[1]
+    let q = HP { s: Scene { _scene_id: 1 }, p: V2 { x: fs[0], y: 0.0 } }
+    q.p = V2 { x: fs[1], y: 0.0 }
+    let u = HP { s: Scene { _scene_id: 1 }, p: V2 { x: fs[0], y: 0.0 } }
+    u.p.x += fs[1] - fs[0]
+    print("{k.e._scene_id} {j.e._scene_id} {h.e._slot} {p.p.x} {q.p.x} {u.p.x}")
+}
+@test(output = "5 5 1 5 5 5")
+fn nested_fields_of_a_value_with_registry_handles() { go([3, 5], [3.0, 5.0]) }
