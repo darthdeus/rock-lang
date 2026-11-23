@@ -39,3 +39,49 @@ fn file_transaction_wrappers_stage_payload_before_publication() {
     assert_eq(stone_file_read(data).unwrap(), "A\u{0}Z!")
     assert_eq(stone_file_read(manifest).unwrap(), "M\u{0}Z")
 }
+
+inline(lua) fn with_text_write_fault(phase: string, write: fn() -> bool) -> (bool, bool) = """
+    local open, closed = io.open, false
+    io.open = function()
+        if phase == "open" then return nil, "open failed" end
+        return {
+            write = function()
+                if phase == "write" then return nil, "write failed" end
+                return true
+            end,
+            close = function()
+                closed = true
+                if phase == "close" then return nil, "close failed" end
+                return true
+            end,
+        }
+    end
+    local ok, result = pcall(write)
+    io.open = open
+    if not ok then error(result, 0) end
+    return result, closed
+"""
+
+fn check_text_write(phase: string, expected: [string], success: bool, closed: bool) {
+    assert_error_logs(expected, () => {
+        let (written, close_attempted) = with_text_write_fault(phase, () => io_write_file("text-write-probe", "payload"))
+        assert_eq(written, success)
+        assert_eq(close_attempted, closed)
+    })
+}
+
+@test
+fn text_write_reports_open_failure() {
+    check_text_write("open", ["[FILE] cannot open text-write-probe for writing: open failed"], false, false)
+}
+
+@test
+fn text_write_reports_write_failure_and_closes() {
+    check_text_write("write", ["[FILE] cannot write text-write-probe: write failed"], false, true)
+}
+
+@test
+fn text_write_reports_buffered_close_failure() {
+    check_text_write("", [], true, true)
+    check_text_write("close", ["[FILE] cannot close text-write-probe: close failed"], false, true)
+}

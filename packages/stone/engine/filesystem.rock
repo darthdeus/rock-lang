@@ -16,14 +16,21 @@ pub inline(lua) fn io_write_file(path: string, content: string) -> bool = """
         stone.stone_create_directory(dir)
     end
 
-    local file = io.open(path, "w")
+    local file, open_error = io.open(path, "w")
     if not file then
+        _log_once_impl(0, "FILE", "cannot open " .. path .. " for writing: " .. open_error, "io_write_file:open")
         return false
     end
 
-    file:write(content)
-    file:close()
-    return true
+    local wrote, write_error = file:write(content)
+    local closed, close_error = file:close()
+    if not wrote then
+        _log_once_impl(0, "FILE", "cannot write " .. path .. ": " .. write_error, "io_write_file:write")
+    end
+    if not closed then
+        _log_once_impl(0, "FILE", "cannot close " .. path .. ": " .. close_error, "io_write_file:close")
+    end
+    return not not (wrote and closed)
 """
 
 pub fn io_clear_directory_recursive(path: string) {
