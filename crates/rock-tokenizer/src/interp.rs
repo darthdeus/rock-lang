@@ -97,8 +97,8 @@ pub struct Scan {
 }
 
 impl Scan {
-    /// Escapes are decoded, but `map[k]` still gives the source offset of byte
-    /// `k`, with a trailing end entry.
+    /// Escapes outside nested quoted literals are decoded; `map[k]` still
+    /// gives the source offset of byte `k`, with a trailing end entry.
     pub fn hole_source(&self, src: &str, expr: (usize, usize)) -> (String, Vec<usize>) {
         let raw = &src[expr.0..expr.1];
         let mut out = String::with_capacity(raw.len());
@@ -112,6 +112,13 @@ impl Scan {
             let (ch, width) = if self.flavor.escapes() && c == '\\' {
                 let e = resolve_escape(raw, i + 1);
                 (e.ch, 1 + e.len)
+            } else if self.flavor.escapes() && matches!(c, '"' | '\'') {
+                // A nested literal with plain quotes is lexed once, by the hole lexer.
+                let end = scan_string(raw, i).end;
+                out.push_str(&raw[i..end]);
+                map.extend(expr.0 + i..expr.0 + end);
+                i = end;
+                continue;
             } else {
                 (Some(c), c.len_utf8())
             };
@@ -496,6 +503,22 @@ mod tests {
                 }],
                 "{src}"
             );
+        }
+    }
+
+    #[test]
+    fn nested_literal_escapes_are_left_for_the_hole_lexer() {
+        for (src, hole) in [
+            (r#""{f("a\\p")}""#, r#"f("a\\p")"#),
+            (r#""{f("\u{41}\n")}""#, r#"f("\u{41}\n")"#),
+            (r#""{f(\"a\\\\p\")}""#, r#"f("a\\p")"#),
+            (r#""{f(\"\u{41}\")}""#, r#"f("A")"#),
+        ] {
+            let scan = scan_string(src, 0);
+            let Piece::Hole { expr, .. } = &scan.pieces[0] else {
+                panic!("no hole in {src}");
+            };
+            assert_eq!(scan.hole_source(src, *expr).0, hole, "{src}");
         }
     }
 }

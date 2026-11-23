@@ -354,3 +354,15 @@ fn comments_inside_interpolation_holes() {
     assert_eq("""{12 # } : [ """
     :x}""", "c")
 }
+
+fn hole_id(x: string) -> string { return x }
+
+@test
+fn escapes_inside_nested_literals_decode_once() {
+    assert_eq("{hole_id("a\\p")}", "a\\p")
+    assert_eq("{hole_id("q\"q")}", "q\"q")
+    assert_eq("{hole_id("a\nb")}", "a\nb")
+    assert_eq("{hole_id("\u{41}")}", "A")
+    assert_eq("{hole_id(\"a\\\\p\")}", "a\\p")
+    assert_eq("{hole_id(\"\u{41}\")}", "A")
+}
