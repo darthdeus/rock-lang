@@ -82,7 +82,10 @@ impl<'a> Builder<'a> {
         // binding already held in leaves has no box to read.
         let place = match self.body.expr_arena[value] {
             Expr::Var(b) => !self.group_binds.contains_key(&raw(b)),
-            Expr::FieldAccess { .. } => {
+            Expr::FieldAccess { base, field } => {
+                if self.physical_field_layout(base, field)?.2.is_some() {
+                    return Ok(false);
+                }
                 let mut root = value;
                 while let Expr::FieldAccess { base, .. } = self.body.expr_arena[root] {
                     root = base;
