@@ -1255,7 +1255,7 @@ pub extern "C" fn stone_create_window_ex(
     y: c_int,
     width: c_int,
     height: c_int,
-    _display: c_int,
+    display: c_int,
     resizable: bool,
     fullscreen: c_int,
 ) -> *mut StoneWindow {
@@ -1273,6 +1273,23 @@ pub extern "C" fn stone_create_window_ex(
         return ptr::null_mut();
     }
 
+    let requested = window_placement::ResolvedGeometry {
+        size: (width, height),
+        pos: (x, y),
+        display: (display >= 0).then_some(display),
+    };
+    let Some(window) = create_window(title_str, requested, resizable, fullscreen) else {
+        return ptr::null_mut();
+    };
+    WINDOW.with(|slot| slot.borrow_mut().insert(Box::new(window)).as_mut() as *mut StoneWindow)
+}
+
+fn create_window(
+    title: &str,
+    requested: window_placement::ResolvedGeometry,
+    resizable: bool,
+    fullscreen: c_int,
+) -> Option<StoneWindow> {
     // SDL focus suppression differs by platform; X11 also needs user-time zero.
     let prevent_focus_steal = std::env::var("STONE_FOCUS_ON_SHOW").is_err();
     if prevent_focus_steal {
@@ -1286,45 +1303,28 @@ pub extern "C" fn stone_create_window_ex(
 
     sdl2::hint::set("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
 
-    // SDL's default minimizes an exclusive-fullscreen window on focus loss,
-    // leaving fullscreen first. A tiling WM such as i3 ignores the minimize,
-    // so the window stays mapped at its windowed size and never gets the
-    // restore event that would re-enter fullscreen; with focus-follows-mouse
-    // that happens whenever the cursor leaves the window.
+    // SDL leaves exclusive fullscreen to minimize on focus loss. A tiling WM
+    // such as i3 ignores that minimize and never restores fullscreen.
     sdl2::hint::set("SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS", "0");
 
-    // nix-ld's path resolves ELF dependencies but SDL's dlopen calls do not
-    // search it, so give SDL the exact GLVND libraries before video init.
     #[cfg(target_os = "linux")]
     configure_sdl_graphics_drivers();
 
-    // Stable WM_CLASS for window-manager rules (i3 `for_window [class="stone"]`);
-    // without it X11 windows inherit the binary name ("luajit-2.1.<ver>").
-    // Env var, not sdl2::hint::set (the X11 backend reads it via SDL_getenv),
-    // and it must be set before video-subsystem init -- X11_VideoInit captures
-    // the classname; by window-creation time it's already latched.
+    // SDL reads WM_CLASS from the environment at video init for X11 WM rules.
     if std::env::var_os("SDL_VIDEO_X11_WMCLASS").is_none() {
         std::env::set_var("SDL_VIDEO_X11_WMCLASS", "stone");
     }
 
-    // Initialize SDL
     let t_boot = std::time::Instant::now();
-    let sdl_context = match sdl2::init() {
-        Ok(ctx) => ctx,
-        Err(e) => {
-            ::log::error!(target: "STONE", "failed to init sdl: {}", e);
-            return ptr::null_mut();
-        }
-    };
+    let sdl_context = sdl2::init()
+        .inspect_err(|e| ::log::error!(target: "STONE", "failed to init sdl: {e}"))
+        .ok()?;
 
     let t_sdl_init = t_boot.elapsed();
-    let video = match sdl_context.video() {
-        Ok(v) => v,
-        Err(e) => {
-            ::log::error!(target: "STONE", "failed to init video: {}", e);
-            return ptr::null_mut();
-        }
-    };
+    let video = sdl_context
+        .video()
+        .inspect_err(|e| ::log::error!(target: "STONE", "failed to init video: {e}"))
+        .ok()?;
 
     #[cfg(target_os = "linux")]
     {
@@ -1335,7 +1335,7 @@ pub extern "C" fn stone_create_window_ex(
             video.current_video_driver(),
         ) {
             ::log::error!(target: "STONE", "{message}");
-            return ptr::null_mut();
+            return None;
         }
     }
 
@@ -1355,18 +1355,14 @@ pub extern "C" fn stone_create_window_ex(
     apply_gl_context_request(&gl_attr, gl_request);
 
     let headless = std::env::var("STONE_HEADLESS").is_ok();
-    let fit_enabled = window_fit_enabled(headless);
-
-    let boot_fs = if headless {
-        None
+    use sdl2::video::FullscreenType;
+    let boot_mode = if headless {
+        FullscreenType::Off
     } else {
-        match fullscreen {
-            1 => Some(sdl2::video::FullscreenType::Desktop),
-            2 => Some(sdl2::video::FullscreenType::True),
-            _ => None,
-        }
+        fullscreen_type(fullscreen)
     };
-    let born_fullscreen = boot_fs.is_some();
+    let born_fullscreen = boot_mode != FullscreenType::Off;
+    let fit_enabled = !born_fullscreen && window_fit_enabled(headless);
 
     // A tiling WM can ignore create-time position; reassert it after mapping.
     let defer_windowed_show = cfg!(target_os = "linux")
@@ -1374,141 +1370,79 @@ pub extern "C" fn stone_create_window_ex(
         && !born_fullscreen
         && std::env::var_os("STONE_IMMEDIATE_SHOW").is_none();
 
-    let base = window_placement::ResolvedGeometry {
-        size: (width, height),
-        pos: (x, y),
-        display: if _display >= 0 { Some(_display) } else { None },
-    };
     let machine = if headless {
         window_placement::MachineConfig::default()
     } else {
-        window_placement::machine_config(&window_placement::game_slug(title_str))
+        window_placement::machine_config(&window_placement::game_slug(title))
     };
-    let resolved = if headless {
-        window_placement::ResolvedGeometry {
-            size: headless_window_size(base.size),
-            ..base
-        }
-    } else if born_fullscreen {
-        let displays = gather_display_reports(&video);
-        let d = displays
-            .iter()
-            .find(|d| Some(d.index) == base.display)
-            .or_else(|| displays.first());
-        let pos = d.map(|d| (d.usable.0, d.usable.1)).unwrap_or((x, y));
-        window_placement::ResolvedGeometry {
-            size: (width, height),
-            pos,
-            display: base.display,
-        }
+    let geometry = boot_geometry(
+        &video,
+        title,
+        requested,
+        &machine,
+        headless,
+        born_fullscreen,
+    );
+    let fitted = if fit_enabled {
+        fit_before_create(&video, geometry)
     } else {
-        resolve_window_geometry(title_str, base, &machine, &video)
+        geometry
     };
-    let centered =
-        resolved.pos.0 == SDL_WINDOWPOS_CENTERED && resolved.pos.1 == SDL_WINDOWPOS_CENTERED;
-
-    let mut build_w = resolved.size.0;
-    let mut build_h = resolved.size.1;
-    let mut build_x = resolved.pos.0;
-    let mut build_y = resolved.pos.1;
-    if fit_enabled && !born_fullscreen {
-        let displays = gather_display_reports(&video);
-        let req = window_report::WindowRequest {
-            size: resolved.size,
-            pos: if centered { (0, 0) } else { resolved.pos },
-            display: resolved.display,
-        };
-        let p = window_report::resolve_window_placement(req, &displays, ZERO_BORDERS);
-        if p.size != resolved.size {
-            ::log::info!(
-                target: "STONE",
-                "window fit (pre-clamp): size {}x{} -> {}x{}",
-                resolved.size.0, resolved.size.1, p.size.0, p.size.1,
-            );
-        }
-        build_w = p.size.0;
-        build_h = p.size.1;
-        if !centered {
-            build_x = p.pos.0;
-            build_y = p.pos.1;
-        }
-    }
-
-    let mut window_builder = video.window(title_str, build_w as u32, build_h as u32);
+    let (build_x, build_y) = fitted.pos;
+    let mut window_builder = video.window(title, fitted.size.0 as u32, fitted.size.1 as u32);
     window_builder.opengl();
 
     if resizable {
         window_builder.resizable();
     }
 
-    if headless || born_fullscreen || defer_windowed_show {
+    // On X11, stamp user time before the initial map.
+    let defer_show_for_focus = cfg!(target_os = "linux") && prevent_focus_steal && !headless;
+    if headless || born_fullscreen || defer_windowed_show || defer_show_for_focus {
         window_builder.hidden();
     }
-
     // Headless snapshots use logical pixels so display scale cannot change them.
     if !headless {
         window_builder.allow_highdpi();
     }
 
-    // X11 no-focus-on-map needs the window created hidden so the
-    // user-time stamp lands before the first map (see comment above).
-    #[cfg(target_os = "linux")]
-    let defer_show_for_focus = prevent_focus_steal && !headless;
-    #[cfg(target_os = "linux")]
-    if defer_show_for_focus {
-        window_builder.hidden();
-    }
-
-    if centered {
+    if geometry.pos == (SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED) {
         window_builder.position_centered();
     } else {
         window_builder.position(build_x, build_y);
     }
 
-    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
     let t_pre_window = t_boot.elapsed();
-    let mut window = match window_builder.build() {
-        Ok(w) => w,
-        Err(e) => {
-            ::log::error!(target: "STONE", "failed to create window: {}", e);
-            return ptr::null_mut();
-        }
-    };
+    let mut window = window_builder
+        .build()
+        .inspect_err(|e| ::log::error!(target: "STONE", "failed to create window: {e}"))
+        .ok()?;
 
     #[cfg(target_os = "linux")]
     if x11_wm::install_error_handler(&window) {
         ::log::debug!(target: "STONE", "X11 error handler installed: X errors are logged and never fatal");
     }
 
-    #[cfg(target_os = "linux")]
-    if defer_show_for_focus && !born_fullscreen && !defer_windowed_show {
-        x11_focus::set_user_time_zero(&window);
-        window.show();
-    }
-
     // SDL fullscreen selects the current display, so map at the target first.
-    if born_fullscreen {
+    if born_fullscreen || (defer_show_for_focus && !defer_windowed_show) {
         #[cfg(target_os = "linux")]
         if defer_show_for_focus {
             x11_focus::set_user_time_zero(&window);
         }
         window.show();
+    }
+    if born_fullscreen {
         move_window(&mut window, build_x, build_y);
-        if let Some(mode) = boot_fs {
-            if let Err(e) = window.set_fullscreen(mode) {
-                ::log::error!(target: "STONE", "boot fullscreen (mode={}) failed: {}", fullscreen, e);
-            }
+        if let Err(e) = window.set_fullscreen(boot_mode) {
+            ::log::error!(target: "STONE", "boot fullscreen (mode={fullscreen}) failed: {e}");
         }
     }
 
     let t_window = t_boot.elapsed();
-    let gl_context = match window.gl_create_context() {
-        Ok(context) => context,
-        Err(e) => {
-            ::log::error!(target: "STONE", "failed to create GL context {:?} {}.{}: {e}", gl_request.profile, gl_request.major, gl_request.minor);
-            return ptr::null_mut();
-        }
-    };
+    let gl_context = window
+        .gl_create_context()
+        .inspect_err(|e| ::log::error!(target: "STONE", "failed to create GL context {:?} {}.{}: {e}", gl_request.profile, gl_request.major, gl_request.minor))
+        .ok()?;
 
     let t_gl_context = t_boot.elapsed();
 
@@ -1525,12 +1459,10 @@ pub extern "C" fn stone_create_window_ex(
             );
         }
     }
-    let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
-    ::log::debug!(target: "STONE",
-        "boot sdl_init={:.0}ms video={:.0}ms attrs={:.0}ms window_build={:.0}ms gl_context={:.0}ms glow_load={:.0}ms",
-        ms(t_sdl_init), ms(t_video - t_sdl_init), ms(t_pre_window - t_video),
-        ms(t_window - t_pre_window), ms(t_gl_context - t_window),
-        ms(t_boot.elapsed() - t_gl_context));
+    log_boot_timing(
+        t_boot,
+        [t_sdl_init, t_video, t_pre_window, t_window, t_gl_context],
+    );
 
     let debug_gl = DebugGl::new(gl);
 
@@ -1544,7 +1476,7 @@ pub extern "C" fn stone_create_window_ex(
         let (dw, dh) = window.drawable_size();
         if let Err(e) = canvas::create_headless_screen(&debug_gl, dw as i32, dh as i32) {
             ::log::error!(target: "STONE", "failed to create the headless screen framebuffer: {e}");
-            return ptr::null_mut();
+            return None;
         }
         ::log::info!(target: "STONE", "headless window draws into an owned {dw}x{dh} screen framebuffer");
     }
@@ -1557,46 +1489,181 @@ pub extern "C" fn stone_create_window_ex(
         );
     }
 
-    // Post-create re-fit: borders are now known (real, or modeled on macOS),
-    // so re-run the clamp against the live size/position and resize/reposition
-    // once if the pre-clamp (zero-borders) missed anything. Skipped headless /
-    // when opted out.
-    if fit_enabled && !born_fullscreen {
-        let borders = effective_borders(query_window_borders(&window));
-        let (cur_w, cur_h) = window.size();
-        let (cur_x, cur_y) = window.position();
-        let displays = gather_display_reports(&video);
-        let req = window_report::WindowRequest {
-            size: (cur_w as i32, cur_h as i32),
-            pos: (cur_x, cur_y),
-            display: resolved.display,
-        };
-        let p = window_report::resolve_window_placement(req, &displays, borders);
-        let need_resize = p.size != (cur_w as i32, cur_h as i32);
-        let need_move = p.pos != (cur_x, cur_y);
-        if need_resize {
-            if let Err(e) = window.set_size(p.size.0 as u32, p.size.1 as u32) {
-                log_once!("STONE", "post-create fit set_size failed: {}", e);
-            }
-        }
-        if need_move {
-            move_window(&mut window, p.pos.0, p.pos.1);
-        }
-        if need_resize || need_move {
-            ::log::info!(
-                target: "STONE",
-                "window fit (post-create): size {}x{} pos ({},{}) -> size {}x{} pos ({},{}) (borders t{} l{} b{} r{})",
-                cur_w, cur_h, cur_x, cur_y,
-                p.size.0, p.size.1, p.pos.0, p.pos.1,
-                borders.top, borders.left, borders.bottom, borders.right,
-            );
-        }
+    if fit_enabled {
+        fit_after_create(&video, &mut window, geometry.display);
     }
 
+    let (bounds, drawable) = report_created_window(&video, &window, requested, headless);
+    unsafe { debug_gl.viewport(0, 0, drawable.0, drawable.1) };
+
+    let event_pump = sdl_context
+        .event_pump()
+        .inspect_err(|e| ::log::error!(target: "STONE", "failed to create event pump: {e}"))
+        .ok()?;
+    let game_controller = sdl_context.game_controller()
+        .inspect_err(|e| ::log::error!(target: "STONE", "failed to initialize SDL game-controller subsystem: {e}"))
+        .ok()?;
+    let controller_manager = input::SdlControllerManager::new(game_controller);
+
+    let sdl_window_raw = window.raw() as *mut c_void;
+    let gl_context_raw = unsafe { gl_context.raw() };
+    let pending_show = defer_windowed_show.then(|| PendingShow {
+        pos: window.position(),
+        map_requested: false,
+        activate: false,
+    });
+    let initial_mode = if born_fullscreen {
+        window_placement::WindowMode::Fullscreen(fullscreen)
+    } else {
+        window_placement::WindowMode::Windowed
+    };
+
+    Some(StoneWindow {
+        _sdl_context: sdl_context,
+        _video: video,
+        window,
+        _gl_context: gl_context,
+        gl: Rc::new(debug_gl),
+        pending_show,
+        runtime_hidden: headless,
+        title: title.to_string(),
+        window_mode: Cell::new(initial_mode),
+        #[cfg(target_os = "linux")]
+        wm_fullscreen_confirmed: Cell::new(false),
+        windowed_bounds: Cell::new(bounds),
+        saved_state_on_hide: RefCell::new(None),
+        initial_hidden_boot: Cell::new(headless),
+        requested_size: requested.size,
+        requested_pos: requested.pos,
+        requested_display: requested.display,
+        config_imgui_scale: machine.imgui_scale,
+        event_pump: RefCell::new(event_pump),
+        controller_manager: RefCell::new(controller_manager),
+        sdl_window_raw,
+        gl_context_raw,
+    })
+}
+
+fn boot_geometry(
+    video: &sdl2::VideoSubsystem,
+    title: &str,
+    mut base: window_placement::ResolvedGeometry,
+    machine: &window_placement::MachineConfig,
+    headless: bool,
+    fullscreen: bool,
+) -> window_placement::ResolvedGeometry {
+    if headless {
+        base.size = headless_window_size(base.size);
+    } else if fullscreen {
+        let displays = gather_display_reports(video);
+        if let Some(display) = displays
+            .iter()
+            .find(|d| Some(d.index) == base.display)
+            .or_else(|| displays.first())
+        {
+            base.pos = (display.usable.0, display.usable.1);
+        }
+    } else {
+        return resolve_window_geometry(title, base, machine, video);
+    }
+    base
+}
+
+fn fit_window(
+    video: &sdl2::VideoSubsystem,
+    request: window_report::WindowRequest,
+    borders: window_report::Borders,
+) -> window_report::WindowPlacement {
+    window_report::resolve_window_placement(request, &gather_display_reports(video), borders)
+}
+
+fn fit_before_create(
+    video: &sdl2::VideoSubsystem,
+    geometry: window_placement::ResolvedGeometry,
+) -> window_placement::ResolvedGeometry {
+    let centered = geometry.pos == (SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+    let fitted = fit_window(
+        video,
+        window_report::WindowRequest {
+            size: geometry.size,
+            pos: if centered { (0, 0) } else { geometry.pos },
+            display: geometry.display,
+        },
+        ZERO_BORDERS,
+    );
+    if fitted.size != geometry.size {
+        ::log::info!(
+            target: "STONE",
+            "window fit (pre-clamp): size {}x{} -> {}x{}",
+            geometry.size.0, geometry.size.1, fitted.size.0, fitted.size.1,
+        );
+    }
+    window_placement::ResolvedGeometry {
+        size: fitted.size,
+        pos: if centered { geometry.pos } else { fitted.pos },
+        ..geometry
+    }
+}
+
+// Once SDL has created the window, fit its actual geometry including frame borders.
+fn fit_after_create(
+    video: &sdl2::VideoSubsystem,
+    window: &mut sdl2::video::Window,
+    display: Option<i32>,
+) {
+    let borders = effective_borders(query_window_borders(window));
+    let (cur_w, cur_h) = window.size();
+    let (cur_x, cur_y) = window.position();
+    let request = window_report::WindowRequest {
+        size: (cur_w as i32, cur_h as i32),
+        pos: (cur_x, cur_y),
+        display,
+    };
+    let fitted = fit_window(video, request, borders);
+    let need_resize = fitted.size != request.size;
+    let need_move = fitted.pos != request.pos;
+    if need_resize {
+        if let Err(e) = window.set_size(fitted.size.0 as u32, fitted.size.1 as u32) {
+            log_once!("STONE", "post-create fit set_size failed: {}", e);
+        }
+    }
+    if need_move {
+        move_window(window, fitted.pos.0, fitted.pos.1);
+    }
+    if need_resize || need_move {
+        ::log::info!(
+            target: "STONE",
+            "window fit (post-create): size {}x{} pos ({},{}) -> size {}x{} pos ({},{}) (borders t{} l{} b{} r{})",
+            cur_w, cur_h, cur_x, cur_y,
+            fitted.size.0, fitted.size.1, fitted.pos.0, fitted.pos.1,
+            borders.top, borders.left, borders.bottom, borders.right,
+        );
+    }
+}
+
+fn log_boot_timing(
+    start: std::time::Instant,
+    [sdl_init, video, pre_window, window, gl_context]: [std::time::Duration; 5],
+) {
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+    ::log::debug!(target: "STONE",
+        "boot sdl_init={:.0}ms video={:.0}ms attrs={:.0}ms window_build={:.0}ms gl_context={:.0}ms glow_load={:.0}ms",
+        ms(sdl_init), ms(video - sdl_init), ms(pre_window - video),
+        ms(window - pre_window), ms(gl_context - window), ms(start.elapsed() - gl_context));
+}
+
+fn report_created_window(
+    video: &sdl2::VideoSubsystem,
+    window: &sdl2::video::Window,
+    requested: window_placement::ResolvedGeometry,
+    headless: bool,
+) -> (window_placement::WindowedBounds, (i32, i32)) {
     let (drawable_w, drawable_h) = window.drawable_size();
-    let (win_w, win_h) = window.size();
-    let (win_x, win_y) = window.position();
-    let display_index = window.display_index().unwrap_or(-1);
+    let bounds = current_bounds(window);
+    let (win_w, win_h) = bounds.size;
+    let (win_x, win_y) = bounds.pos;
+    let display_index = bounds.display.unwrap_or(-1);
+    let drawable = (drawable_w as i32, drawable_h as i32);
     let scale = if win_w > 0 {
         drawable_w as f32 / win_w as f32
     } else {
@@ -1609,113 +1676,29 @@ pub extern "C" fn stone_create_window_ex(
     );
 
     if !headless {
-        let borders = query_window_borders(&window).unwrap_or(window_report::Borders {
-            top: 0,
-            left: 0,
-            bottom: 0,
-            right: 0,
-        });
+        let borders = query_window_borders(window).unwrap_or(ZERO_BORDERS);
         INITIAL_BORDERS.with(|c| c.set(Some(borders)));
         POST_FRAME_BORDERS_LOGGED.with(|c| c.set(false));
         let report = window_report::WindowReport {
-            displays: gather_display_reports(&video),
-            requested_size: (width, height),
-            requested_pos: (x, y),
-            actual_size: (win_w as i32, win_h as i32),
-            actual_pos: (win_x, win_y),
+            displays: gather_display_reports(video),
+            requested_size: requested.size,
+            requested_pos: requested.pos,
+            actual_size: bounds.size,
+            actual_pos: bounds.pos,
             landed_display: display_index,
-            drawable_size: (drawable_w as i32, drawable_h as i32),
+            drawable_size: drawable,
             dpi_scale: scale,
             borders,
         };
         ::log::info!(target: "STONE", "{}", report.render_human());
     }
-
-    unsafe {
-        debug_gl.viewport(0, 0, drawable_w as i32, drawable_h as i32);
-    }
-
-    let event_pump = match sdl_context.event_pump() {
-        Ok(ep) => ep,
-        Err(e) => {
-            ::log::error!(target: "STONE", "failed to create event pump: {}", e);
-            return ptr::null_mut();
-        }
-    };
-    let game_controller = match sdl_context.game_controller() {
-        Ok(subsystem) => subsystem,
-        Err(e) => {
-            ::log::error!(target: "STONE", "failed to initialize SDL game-controller subsystem: {}", e);
-            return ptr::null_mut();
-        }
-    };
-    let controller_manager = input::SdlControllerManager::new(game_controller);
-
-    let sdl_window_raw = window.raw() as *mut c_void;
-    let gl_context_raw = unsafe { gl_context.raw() };
-
-    let pending_show = if defer_windowed_show {
-        Some(PendingShow {
-            pos: window.position(),
-            map_requested: false,
-            activate: false,
-        })
-    } else {
-        None
-    };
-
-    let initial_mode = if born_fullscreen {
-        window_placement::WindowMode::Fullscreen(fullscreen)
-    } else {
-        window_placement::WindowMode::Windowed
-    };
-    let initial_windowed_bounds = window_placement::WindowedBounds {
-        pos: (win_x, win_y),
-        size: (win_w as i32, win_h as i32),
-        display: if display_index >= 0 {
-            Some(display_index)
-        } else {
-            None
+    (
+        window_placement::WindowedBounds {
+            display: bounds.display.filter(|&index| index >= 0),
+            ..bounds
         },
-    };
-
-    let stone_window = Box::new(StoneWindow {
-        _sdl_context: sdl_context,
-        _video: video,
-        window,
-        _gl_context: gl_context,
-        gl: Rc::new(debug_gl),
-        pending_show,
-        runtime_hidden: headless,
-        title: title_str.to_string(),
-        window_mode: Cell::new(initial_mode),
-        #[cfg(target_os = "linux")]
-        wm_fullscreen_confirmed: Cell::new(false),
-        windowed_bounds: Cell::new(initial_windowed_bounds),
-        saved_state_on_hide: RefCell::new(None),
-        initial_hidden_boot: Cell::new(headless),
-        requested_size: (width, height),
-        requested_pos: (x, y),
-        requested_display: if _display >= 0 { Some(_display) } else { None },
-        config_imgui_scale: machine.imgui_scale,
-        event_pump: RefCell::new(event_pump),
-        controller_manager: RefCell::new(controller_manager),
-        sdl_window_raw,
-        gl_context_raw,
-    });
-
-    let ptr = Box::into_raw(stone_window);
-
-    WINDOW.with(|w| {
-        *w.borrow_mut() = Some(unsafe { Box::from_raw(ptr) });
-    });
-
-    WINDOW.with(|w| {
-        w.borrow()
-            .as_ref()
-            .map(|b| b.as_ref() as *const StoneWindow as *mut StoneWindow)
-            .unwrap_or(ptr::null_mut())
-    })
+        drawable,
+    )
 }
 
 #[no_mangle]
