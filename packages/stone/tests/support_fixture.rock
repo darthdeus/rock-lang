@@ -65,7 +65,7 @@ fn test_tmp_dir(name: string) -> string {
 fn test_png(path: string, w: int = 4, h: int = 2) -> string {
     let data = new_image_data(w, h)
     image_data_set_pixel(data, 1, 1, 1.0, 0.5, 0.0, 1.0)
-    assert(image_data_encode(data, "png", path), "fixture {path} written")
+    image_data_encode(data, "png", path).expect("fixture {path} written")
     stone_destroy_image_data(data.0)
     return path
 }

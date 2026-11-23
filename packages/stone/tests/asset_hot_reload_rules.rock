@@ -5,13 +5,13 @@ fn image_hot_reload_redecodes_into_the_same_handle() {
     gpu_test_host()
     let path = test_tmp_dir("rock-hot-reload") + "/image.png"
     residency_owner_test_isolated(() => {
-        assert(image_data_encode(new_image_data(2, 2), "png", path), "encode the initial 2x2 png")
+        image_data_encode(new_image_data(2, 2), "png", path).expect("encode the initial 2x2 png")
         let img = load_image_asset(path)
         let handle = img.0
         assert(handle != 0, "the initial image loads")
         assert(stone_get_image_size(handle) == (2, 2), "the initial size is 2x2")
 
-        assert(image_data_encode(new_image_data(4, 4), "png", path), "encode the replacement 4x4 png")
+        image_data_encode(new_image_data(4, 4), "png", path).expect("encode the replacement 4x4 png")
         reload_changed_asset(path)
         assert_eq(img.0, handle, "the handle survives the reload")
         let (w, h) = stone_get_image_size(handle)

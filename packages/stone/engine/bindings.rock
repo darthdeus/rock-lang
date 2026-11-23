@@ -293,10 +293,14 @@ pub fn image_data_get_pixel(data: ImageData, x: int, y: int) -> (float, float, f
     return stone_image_data_get_pixel(data.0, x, y)
 }
 
-pub fn image_replace_pixels(image: Image, data: ImageData) {
-    if !stone_image_update_from_data(image.0, data.0) {
-        log_once("IMAGE", "image_replace_pixels: stone_image_update_from_data rejected (stale handle or size mismatch)", "image_replace_pixels_fail")
+pub fn image_replace_pixels(image: Image, data: ImageData) -> Result<()> {
+    if stone_image_update_from_data(image.0, data.0) { return Result::Ok(()) }
+    let (iw, ih) = stone_get_image_size(image.0)
+    let (dw, dh) = image_data_size(data.0)
+    if iw > 0 && dw > 0 && (iw != dw || ih != dh) {
+        return Result::Err("image {iw}x{ih} cannot take {dw}x{dh} pixel data")
     }
+    return Result::Err("stale image or image-data handle")
 }
 
 inline(lua) fn set_window_title(title: string) = "stone.stone_set_window_title(nil, title)"
@@ -319,17 +323,16 @@ pub fn new_image_data(width: int, height: int) -> ImageData {
     return ImageData(stone_create_image_data(width, height))
 }
 
-pub fn image_data_encode(data: ImageData, format: string, filename: string) -> bool {
+pub fn image_data_encode(data: ImageData, format: string, filename: string) -> Result<()> {
     let _ = format
-    return stone_image_data_save_png(data.0, asset_path(filename))
+    if stone_image_data_save_png(data.0, asset_path(filename)) { return Result::Ok(()) }
+    return Result::Err("cannot write PNG {filename}")
 }
 
-pub fn load_image_data(filename: string) -> ImageData? {
+pub fn load_image_data(filename: string) -> Result<ImageData> {
     let handle = stone_image_data_load_png(asset_path(filename))
-    if handle == 0 {
-        return null
-    }
-    return ImageData(handle)
+    if handle == 0 { return Result::Err("cannot decode image {filename}") }
+    return Result::Ok(ImageData(handle))
 }
 
 pub fn load_image_data_bytes(bytes: NativeBufferU8) -> ImageData? {

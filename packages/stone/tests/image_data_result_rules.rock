@@ -1,0 +1,62 @@
+use stone::*
+
+// The image-data entry points that can fail return a `Result` whose Err
+// carries the reason, rather than a bare `false`, `null` or a log line.
+
+fn image_data_result_reason(r: Result<ImageData>) -> string {
+    return match r {
+        Result::Ok(data) => {
+            stone_destroy_image_data(data.0)
+            "ok"
+        }
+        Result::Err(reason) => reason,
+    }
+}
+
+@test
+fn image_data_round_trips_through_ok() {
+    let path = test_tmp_dir("image_data_result") + "/round_trip.png"
+    let data = new_image_data(3, 2)
+    image_data_set_pixel(data, 2, 1, 0.0, 1.0, 0.0, 1.0)
+    image_data_encode(data, "png", path).expect("the PNG is written")
+    stone_destroy_image_data(data.0)
+    let loaded = load_image_data(path).unwrap()
+    defer { stone_destroy_image_data(loaded.0) }
+    assert(image_data_size(loaded.0) == (3, 2), "the decoded size matches")
+    let (_, g, _, _) = image_data_get_pixel(loaded, 2, 1)
+    assert(g > 0.99, "the decoded pixel matches")
+}
+
+@test
+fn image_data_failures_carry_the_reason() {
+    let dir = test_tmp_dir("image_data_result")
+    let missing = dir + "/missing.png"
+    assert_eq(image_data_result_reason(load_image_data(missing)), "cannot decode image {missing}")
+
+    let unwritable = dir + "/no_such_dir/out.png"
+    let data = new_image_data(1, 1)
+    defer { stone_destroy_image_data(data.0) }
+    match image_data_encode(data, "png", unwritable) {
+        Result::Ok(_) => assert(false, "a PNG under a missing directory is not written"),
+        Result::Err(reason) => assert_eq(reason, "cannot write PNG {unwritable}"),
+    }
+}
+
+@test
+fn image_replace_pixels_reports_a_size_mismatch() {
+    gpu_test_host()
+    let small = new_owned_image_data(2, 2)
+    let image = new_owned_image_from_data(small, TextureFilter::Nearest)
+    defer {
+        release_owned_image(image)
+        release_owned_image_data(small)
+    }
+    assert(image_replace_pixels(image, small).is_ok(), "matching pixel data uploads")
+    let large = new_image_data(3, 1)
+    defer { stone_destroy_image_data(large.0) }
+    let Result::Err(reason) = image_replace_pixels(image, large) else {
+        assert(false, "mismatched pixel data is refused")
+        return
+    }
+    assert_eq(reason, "image 2x2 cannot take 3x1 pixel data")
+}

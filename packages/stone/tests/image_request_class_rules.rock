@@ -17,7 +17,7 @@ fn image_class_test_fixture(large: bool = false) -> string {
         }
     }
     image_data_set_pixel(data, 1, 1, 1.0, 0.5, 0.0, 1.0)
-    assert(image_data_encode(data, "png", path), "fixture {path} written")
+    image_data_encode(data, "png", path).expect("fixture {path} written")
     stone_destroy_image_data(data.0)
     assert(stone_file_size(path) > 64 * 1024)
     return path
