@@ -89,7 +89,7 @@ fn recovered_statement_preserves_the_tree_but_stops_before_aliases() {
 fn macro_errors_are_reported_before_expansion_discards_their_source() {
     for (src, expected) in [
         (
-            "missing()\nfn main() {}\n",
+            "missing()\nfn main() { unresolved_call() }\n",
             "no macro named `missing` exists",
         ),
         (

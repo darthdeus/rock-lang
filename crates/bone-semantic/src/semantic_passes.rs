@@ -636,8 +636,12 @@ pub fn lower_and_infer(
     rock_modules: &[Ast],
 ) -> Result<Vec<ModuleId>, CompilerError> {
     let ids = lower_modules(ws, rock_modules)?;
+    infer_lowered(ws, &ids)?;
+    Ok(ids)
+}
 
-    infer_modules(ws, &ids)?;
+fn infer_lowered(ws: &mut Workspace, ids: &[ModuleId]) -> Result<(), CompilerError> {
+    infer_modules(ws, ids)?;
     let timer = Instant::now();
     crate::relocation::check_relocation(ws);
     ws.log_time("relocation", timer);
@@ -645,7 +649,7 @@ pub fn lower_and_infer(
     crate::fn_identity::check_generic_fn_eq(ws);
     ws.log_time("generic fn eq", timer);
 
-    Ok(ids)
+    Ok(())
 }
 
 fn compute_export_reachability(
@@ -920,7 +924,7 @@ pub fn semantic_pass_without_closure_gate(
     modules: &mut ModuleSet,
     aliases: &bone_core::modules::NsAliases,
 ) -> Result<Workspace, CompilerError> {
-    semantic_pass_owned(modules, aliases)
+    lower_batch(modules, aliases, false)?.infer()
 }
 
 /// Reuse the process stdlib for independent modules in repeated test builds.
@@ -928,14 +932,31 @@ pub fn semantic_pass_reusing_stdlib(
     modules: &mut ModuleSet,
     aliases: &bone_core::modules::NsAliases,
 ) -> Result<Workspace, CompilerError> {
-    crate::stdlib_base::check_users(modules, aliases)
-        .unwrap_or_else(|| semantic_pass_owned(modules, aliases))
+    lower_batch(modules, aliases, true)?.infer()
 }
 
-fn semantic_pass_owned(
+/// The lowered workspace and module IDs ready for batch inference.
+pub struct LoweredBatch {
+    pub(crate) ws: Workspace,
+    pub(crate) ids: Vec<ModuleId>,
+}
+
+impl LoweredBatch {
+    pub fn infer(mut self) -> Result<Workspace, CompilerError> {
+        infer_lowered(&mut self.ws, &self.ids)?;
+        Ok(self.ws)
+    }
+}
+
+/// Expand and lower a batch, leaving expansion diagnostics in `modules`.
+pub fn lower_batch(
     modules: &mut ModuleSet,
     aliases: &bone_core::modules::NsAliases,
-) -> Result<Workspace, CompilerError> {
+    reuse_stdlib: bool,
+) -> Result<LoweredBatch, CompilerError> {
+    if reuse_stdlib && let Some(lowered) = crate::stdlib_base::lower_users(modules, aliases) {
+        return lowered;
+    }
     let timer = Instant::now();
     let owned = modules.make_owned();
     let mut ws = Workspace {
@@ -943,7 +964,8 @@ fn semantic_pass_owned(
         ..Workspace::default()
     };
     ws.log_time("own stdlib", timer);
-    semantic_pass_into(ws, owned, aliases)
+    let ids = expand_and_lower(&mut ws, owned, aliases)?;
+    Ok(LoweredBatch { ws, ids })
 }
 
 /// [`semantic_pass`] enforcing identity storage in unpackaged files: the bone
@@ -968,15 +990,23 @@ pub fn semantic_pass_into(
 ) -> Result<Workspace, CompilerError> {
     let _span = tracing::info_span!("bone_semantic_pass").entered();
 
+    let ids = expand_and_lower(&mut ws, rock_modules, aliases)?;
+    infer_lowered(&mut ws, &ids)?;
+    Ok(ws)
+}
+
+fn expand_and_lower(
+    ws: &mut Workspace,
+    rock_modules: &mut [Ast],
+    aliases: &bone_core::modules::NsAliases,
+) -> Result<Vec<ModuleId>, CompilerError> {
     let timer = Instant::now();
     expand_and_desugar_trees(rock_modules);
     ws.log_time("macro_expand", timer);
     let timer = Instant::now();
-    build_namespaces(&mut ws, &*rock_modules, aliases)?;
+    build_namespaces(ws, rock_modules.iter(), aliases)?;
     ws.log_time("namespaces", timer);
-    lower_and_infer(&mut ws, rock_modules)?;
-
-    Ok(ws)
+    lower_modules(ws, rock_modules)
 }
 
 fn for_each_def_item<'a>(

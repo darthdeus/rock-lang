@@ -4,7 +4,7 @@ use skull_parser::stdlib::ModuleSet;
 use skull_parser::{Ast, ItemKind, collect_registry, cook_one, is_hygiene_name, macro_reach};
 
 use crate::prelude::*;
-use crate::semantic_passes::{FragmentContribution, ScopeItem};
+use crate::semantic_passes::{FragmentContribution, LoweredBatch, ScopeItem, lower_modules};
 use bone_core::modules::{DefKind, NsAliases, STD_PACKAGE_ID};
 
 /// The names through which a user file can reach the warm modules.
@@ -136,10 +136,10 @@ pub fn checked_alone(warm: &std::sync::Arc<[Ast]>) -> Option<Workspace> {
     base().map(StdlibBase::workspace)
 }
 
-pub(crate) fn check_users(
+pub(crate) fn lower_users(
     modules: &mut ModuleSet,
     aliases: &NsAliases,
-) -> Option<Result<Workspace, CompilerError>> {
+) -> Option<Result<LoweredBatch, CompilerError>> {
     if !skull_parser::stdlib::is_process_stdlib(modules.shared())
         || aliases
             .packages
@@ -180,8 +180,8 @@ pub(crate) fn check_users(
             &contributions.iter().collect::<Vec<_>>(),
             aliases,
         )?;
-        crate::semantic_passes::lower_and_infer(&mut ws, modules.rest())?;
-        Ok(ws)
+        let ids = lower_modules(&mut ws, modules.rest())?;
+        Ok(LoweredBatch { ws, ids })
     })())
 }
 

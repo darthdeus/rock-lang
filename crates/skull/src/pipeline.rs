@@ -1,5 +1,7 @@
 //! The compile pipeline: parsed modules to an emitted program.
 
+use std::borrow::BorrowMut;
+
 use bone_core::modules::NsAliases;
 use bone_semantic::inference::{ComptimeInputs, Workspace};
 use bone_semantic::prelude::{FxHashMap, FxHashSet, ModuleId};
@@ -75,38 +77,39 @@ pub fn check_test_modules(
 }
 
 fn check_modules_impl(
-    modules: &mut ModuleSet,
+    mut modules: impl BorrowMut<ModuleSet>,
     aliases: impl FnOnce(&ModuleSet) -> Result<NsAliases, CompilerError>,
     reuse_stdlib: bool,
     check_lua_interop: bool,
 ) -> Result<(Workspace, Vec<CompilerError>), Vec<CompilerError>> {
+    let parsed = modules.borrow_mut();
     let gates_timer = bone_core::prelude::Instant::now();
-    let syntax = syntax_errors(modules.iter());
+    let syntax = syntax_errors(parsed.iter());
     if !syntax.is_empty() {
         return Err(syntax);
     }
     let gates_time = gates_timer.elapsed();
     let aliases_timer = bone_core::prelude::Instant::now();
-    let aliases = aliases(modules);
+    let aliases = aliases(parsed);
     let aliases_time = aliases_timer.elapsed();
-    let macro_errors = skull_parser::check_macro_name_uniqueness(modules.iter());
+    let macro_errors = skull_parser::check_macro_name_uniqueness(parsed.iter());
     if !macro_errors.is_empty() {
         return Err(macro_errors);
     }
     let aliases = aliases.map_err(|error| vec![error])?;
-    let semantic = if reuse_stdlib {
-        semantic_pass_reusing_stdlib
-    } else {
-        semantic_pass
-    };
-    let ws = semantic(modules, &aliases);
+    let lowered = bone_semantic::semantic_passes::lower_batch(parsed, &aliases, reuse_stdlib);
     // A macro that must not expand leaves the call in place and records why; that
     // reason explains the type errors it causes, so it reports first.
-    let expanded_syntax = syntax_errors(modules.iter());
+    let expanded_syntax = syntax_errors(parsed.iter());
+    // Owning the module set lets a batch compile reclaim it before inference.
+    drop(modules);
     if !expanded_syntax.is_empty() {
         return Err(expanded_syntax);
     }
-    let mut ws = ws.map_err(|e| vec![e])?;
+    let mut ws = lowered
+        .and_then(|batch| batch.infer())
+        .and_then(apply_closure_gate)
+        .map_err(|e| vec![e])?;
     ws.phase_timings.push(("gates", gates_time));
     ws.phase_timings.push(("aliases", aliases_time));
     let timer = bone_core::prelude::Instant::now();
@@ -281,20 +284,19 @@ pub fn compile_source(
 
 /// Compile an assembled module set (stdlib included) starting at `entry`.
 pub fn compile_modules(
-    mut modules: ModuleSet,
+    modules: ModuleSet,
     entry: Ustr,
     target: EmitTarget<'_>,
     host: &mut dyn CompileHost,
 ) -> Result<Compiled, CompileFailure> {
     let reuse_stdlib = host.reuse_checked_stdlib();
     let (mut ws, body_errors) =
-        check_modules_impl(&mut modules, |m| host.aliases(m), reuse_stdlib, false)
+        check_modules_impl(modules, |m| host.aliases(m), reuse_stdlib, false)
             .map_err(|errors| CompileFailure::at(Stage::Check, errors))?;
     if !body_errors.is_empty() {
         return Err(CompileFailure::at(Stage::Check, body_errors));
     }
     host.phase(Phase::Checked(&ws));
-    crate::mir_emit::par::drop_in_background(modules);
     let (inputs, findings) = host.checked_inputs_and_lints(&ws);
     ws.comptime_inputs = inputs.map_err(|e| CompileFailure::at(Stage::Comptime, vec![e]))?;
     let entry = ws.module_ids[&entry];
