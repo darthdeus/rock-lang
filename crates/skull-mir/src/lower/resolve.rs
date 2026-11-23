@@ -1,3 +1,4 @@
+use super::control::SafeNavValue;
 use super::*;
 
 /// Whether a missing serving body is a rejection or a deferral is the caller's
@@ -526,7 +527,7 @@ impl<'a> Builder<'a> {
             // `?.` is a join; when its result splats it takes the multi-cell path, else a
             // `nobox` result has nowhere to live but the single packed cell.
             Expr::SafeNav { base, field } => match self.repr_join_slot(e)? {
-                Some(shape) => self.safe_nav_field_repr(e, base, field, shape),
+                Some(shape) => self.safe_nav_field_repr(e, base, field, Some(shape)),
                 None => Ok(ValueRepr::Scalar(self.lower_expr(e)?)),
             },
             Expr::SafeNavCall {
@@ -536,8 +537,11 @@ impl<'a> Builder<'a> {
                 ..
             } => {
                 let shape = self.repr_join_slot(e)?.unwrap_or(RepLayout::Opaque);
-                self.safe_nav_repr(receiver, shape, move |s, recv| {
+                let recv = self.lower_safe_nav_receiver(receiver)?;
+                self.safe_nav_repr(recv, Some(shape), move |s, recv| {
+                    let recv = s.safe_nav_present_value(recv)?;
                     s.safe_nav_call_value_repr(e, method, args, recv)
+                        .map(SafeNavValue::Repr)
                 })
             }
             Expr::SafeNavLet {

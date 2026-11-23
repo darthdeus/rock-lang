@@ -700,35 +700,42 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Lower the receiver once and preserve the result's per-slot representation.
     pub(crate) fn safe_nav_repr(
         &mut self,
-        receiver: Idx<Expr>,
-        shape: RepLayout,
-        value_arm: impl FnOnce(&mut Self, Idx<Inst>) -> Result<ValueBundle, CompilerError>,
+        recv: SafeNavRecv,
+        shape: Option<RepLayout>,
+        value_arm: impl FnOnce(&mut Self, SafeNavRecv) -> Result<SafeNavValue, CompilerError>,
     ) -> Result<ValueRepr, CompilerError> {
-        let recv = self.lower_safe_nav_receiver(receiver)?;
-        let is_nil = self.safe_nav_absent_cond(&recv);
+        let scalar = shape.is_none();
+        let (cond, present_test) = match &recv {
+            SafeNavRecv::Boxed(value) => (self.is_nil(*value), false),
+            SafeNavRecv::Unboxed { present, .. } if scalar => (*present, true),
+            SafeNavRecv::Unboxed { present, .. } => (self.emit_cur(Inst::Not(*present)), false),
+        };
+        let shape = shape.unwrap_or(RepLayout::Opaque);
         let result_ty = matches!(shape, RepLayout::Opaque)
             .then(|| self.current_expr_storage_ty_id())
             .flatten();
         let values = self.value_join_typed(shape, result_ty, false);
-        let nil_bb = self.f.new_block();
-        let val_bb = self.f.new_block();
-        let join = self.f.new_block();
-        self.branch_to(is_nil, nil_bb, val_bb);
+        let [nil_bb, val_bb, join] = self.optional_blocks(cond, present_test);
 
+        if scalar {
+            self.cur = nil_bb;
+            let nil = self.emit_cur(Inst::Const(Lit::Nil));
+            self.store_and_join(values.results[0], nil, join);
+        }
         self.cur = val_bb;
-        self.lower_value_arms(
-            values,
-            nil_bb,
-            join,
-            |s| {
-                let recv_v = s.safe_nav_present_value(recv)?;
-                value_arm(s, recv_v)
-            },
-            None,
-        )
+        match value_arm(self, recv)? {
+            // Field projection has already applied the copy policy for this
+            // wire slot. Only general value arms need the join's snapshot.
+            SafeNavValue::Slot(value) => {
+                self.store_and_join(values.results[0], value, join);
+                self.finish_join(values, join)
+            }
+            SafeNavValue::Repr(value) => {
+                self.lower_value_arms(values, nil_bb, join, |_| Ok(value), None)
+            }
+        }
     }
 
     /// `absent` when `cond` differs from `cond_is_presence`, else the value arm.
@@ -741,14 +748,7 @@ impl<'a> Builder<'a> {
         value_arm: impl FnOnce(&mut Self) -> Result<Idx<Inst>, CompilerError>,
     ) -> Result<Idx<Inst>, CompilerError> {
         let result = self.f.new_cell_typed(None, result_ty);
-        let nil_bb = self.f.new_block();
-        let val_bb = self.f.new_block();
-        let join = self.f.new_block();
-        if cond_is_presence {
-            self.branch_to(cond, val_bb, nil_bb);
-        } else {
-            self.branch_to(cond, nil_bb, val_bb);
-        }
+        let [nil_bb, val_bb, join] = self.optional_blocks(cond, cond_is_presence);
 
         self.cur = nil_bb;
         let n = self.emit_cur(Inst::Const(absent));
@@ -760,6 +760,16 @@ impl<'a> Builder<'a> {
 
         self.cur = join;
         Ok(self.emit_cur(Inst::Load(result)))
+    }
+
+    fn optional_blocks(&mut self, cond: Idx<Inst>, is_presence: bool) -> [Idx<Block>; 3] {
+        let blocks @ [absent, present, _] = std::array::from_fn(|_| self.f.new_block());
+        if is_presence {
+            self.branch_to(cond, present, absent);
+        } else {
+            self.branch_to(cond, absent, present);
+        }
+        blocks
     }
 
     pub(crate) fn nil_or_join(
@@ -950,4 +960,9 @@ pub(crate) struct ValueJoin {
 enum JoinArm {
     Value(ValueBundle),
     Slots(Vec<Idx<Inst>>),
+}
+
+pub(crate) enum SafeNavValue {
+    Slot(Idx<Inst>),
+    Repr(ValueBundle),
 }

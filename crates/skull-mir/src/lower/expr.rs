@@ -1,3 +1,4 @@
+use super::control::SafeNavValue;
 use super::flat_ref::{FlatProjection, FlatRefVal};
 use super::*;
 
@@ -664,21 +665,8 @@ impl<'a> Builder<'a> {
             }
 
             Expr::SafeNav { base, field } => {
-                // A boxed fallback must not evaluate the source expression again.
-                let recv = self.lower_scalar_safe_nav_receiver(e, base, field)?;
-                self.safe_nav_scalar(recv, true, |s, recv| match &recv {
-                    SafeNavRecv::Unboxed {
-                        repr: ValueRepr::Group { name, parts, .. },
-                        ..
-                    } if s.field_index(*name, field).is_some() => {
-                        let index = s.field_index(*name, field).expect("known value field");
-                        s.pack(parts[index].clone())
-                    }
-                    _ => {
-                        let bv = s.safe_nav_present_value(recv)?;
-                        s.safe_nav_field_value(e, base, bv, field)
-                    }
-                })
+                let repr = self.safe_nav_field_repr(e, base, field, None)?;
+                self.pack(repr)
             }
 
             Expr::Match { scrutinee, arms } => self.lower_match(scrutinee, arms),
@@ -1981,13 +1969,6 @@ impl<'a> Builder<'a> {
         Ok(SafeNavRecv::Boxed(self.pack(r)?))
     }
 
-    pub(crate) fn safe_nav_absent_cond(&mut self, r: &SafeNavRecv) -> Idx<Inst> {
-        match r {
-            SafeNavRecv::Boxed(v) => self.is_nil(*v),
-            SafeNavRecv::Unboxed { present, .. } => self.emit_cur(Inst::Not(*present)),
-        }
-    }
-
     /// Packing an unboxed Group is sound only here: this arm runs only when the
     /// presence tag is set.
     pub(crate) fn safe_nav_present_value(
@@ -1998,29 +1979,6 @@ impl<'a> Builder<'a> {
             SafeNavRecv::Boxed(v) => Ok(v),
             SafeNavRecv::Unboxed { repr, .. } => self.pack(repr),
         }
-    }
-
-    fn safe_nav_scalar(
-        &mut self,
-        recv: SafeNavRecv,
-        test_presence: bool,
-        value_arm: impl FnOnce(&mut Self, SafeNavRecv) -> Result<Idx<Inst>, CompilerError>,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        let presence = match &recv {
-            SafeNavRecv::Unboxed { present, .. } if test_presence => Some(*present),
-            _ => None,
-        };
-        let cond = match presence {
-            Some(present) => present,
-            None => self.safe_nav_absent_cond(&recv),
-        };
-        self.absent_or_join(
-            self.current_expr_storage_ty_id(),
-            cond,
-            presence.is_some(),
-            Lit::Nil,
-            |s| value_arm(s, recv),
-        )
     }
 
     fn safe_nav_field_plan(
@@ -2106,7 +2064,9 @@ impl<'a> Builder<'a> {
         body: Idx<Expr>,
         shape: RepLayout,
     ) -> Result<ValueRepr, CompilerError> {
-        self.safe_nav_repr(receiver, shape, |s, recv| {
+        let recv = self.lower_safe_nav_receiver(receiver)?;
+        self.safe_nav_repr(recv, Some(shape), |s, recv| {
+            let recv = s.safe_nav_present_value(recv)?;
             let cell = s.new_binding_cell(
                 binding,
                 s.body.binding_arena[binding].name,
@@ -2115,7 +2075,7 @@ impl<'a> Builder<'a> {
             );
             s.store_cell(cell, recv);
             s.binds.insert(raw(binding), cell);
-            s.lower_expr_repr(body)
+            s.lower_expr_repr(body).map(SafeNavValue::Repr)
         })
     }
 
@@ -2124,8 +2084,25 @@ impl<'a> Builder<'a> {
         e: Idx<Expr>,
         base: Idx<Expr>,
         field: Ustr,
-        shape: RepLayout,
+        shape: Option<RepLayout>,
     ) -> Result<ValueRepr, CompilerError> {
+        if shape.is_none() {
+            let recv = self.lower_scalar_safe_nav_receiver(e, base, field)?;
+            return self.safe_nav_repr(recv, None, |s, recv| {
+                let value = if let SafeNavRecv::Unboxed {
+                    repr: ValueRepr::Group { name, parts, .. },
+                    ..
+                } = &recv
+                    && let Some(index) = s.field_index(*name, field)
+                {
+                    s.pack(parts[index].clone())?
+                } else {
+                    let bv = s.safe_nav_present_value(recv)?;
+                    s.safe_nav_field_value(e, base, bv, field)?
+                };
+                Ok(SafeNavValue::Slot(value))
+            });
+        }
         let plan = self.safe_nav_field_plan(base, field)?;
         let embed = plan.and_then(|p| p.inline_child());
         let group_shape = match embed {
@@ -2133,10 +2110,12 @@ impl<'a> Builder<'a> {
             None => None,
         };
         let nullable_child = embed.is_some() && self.embed_read_is_nullable(base, field)?;
-        self.safe_nav_repr(base, shape, move |s, bv| {
+        let recv = self.lower_safe_nav_receiver(base)?;
+        self.safe_nav_repr(recv, shape, move |s, recv| {
+            let bv = s.safe_nav_present_value(recv)?;
             let Some(vs) = group_shape else {
                 let value = ValueRepr::Scalar(s.safe_nav_field_value(e, base, bv, field)?);
-                return s.value_bundle_for_expr(e, value);
+                return s.value_bundle_for_expr(e, value).map(SafeNavValue::Repr);
             };
             // An embed-read base is a re-materialized box with undotted keys.
             let (pbase, key) = s.physical_field(base, field)?;
@@ -2154,7 +2133,7 @@ impl<'a> Builder<'a> {
                     *p = Some(present);
                 }
             }
-            s.value_bundle_for_expr(e, g)
+            s.value_bundle_for_expr(e, g).map(SafeNavValue::Repr)
         })
     }
 
