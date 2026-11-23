@@ -22,7 +22,9 @@ const OUTLINE_FLAME: float = 0.0
 // sync with the @size(256) shader arrays.
 pub const OUTLINE_MAX_ENTRIES: int = 256
 
-pub value OutlineEntry {
+// Entries are reused frame to frame: each registry owns the entries it hands
+// out until the retire swap clears it, so a frame registers without boxing.
+pub struct OutlineEntry {
     color: Color,
     occluded_color: Color,
     width: float,
@@ -32,6 +34,9 @@ pub value OutlineEntry {
 
 pub global OUTLINE_ENTRIES: Map<int, OutlineEntry> = map_new()
 pub global OUTLINE_ENTRIES_LAST: Map<int, OutlineEntry> = map_new()
+global OUTLINE_ENTRY_POOL: [OutlineEntry] = []
+global OUTLINE_ENTRY_POOL_LAST: [OutlineEntry] = []
+global OUTLINE_ENTRY_POOL_USED: int = 0
 
 global OUTLINE_FALLBACK_SLOT_USED: bool = false
 
@@ -59,9 +64,13 @@ fn retire_outline_commands(snapshot: bool) {
         let previous = OUTLINE_ENTRIES_LAST
         OUTLINE_ENTRIES_LAST = OUTLINE_ENTRIES
         OUTLINE_ENTRIES = previous
+        let previous_pool = OUTLINE_ENTRY_POOL_LAST
+        OUTLINE_ENTRY_POOL_LAST = OUTLINE_ENTRY_POOL
+        OUTLINE_ENTRY_POOL = previous_pool
     }
     CURRENT_OUTLINE_ID = 0
     OUTLINE_ENTRIES.clear()
+    OUTLINE_ENTRY_POOL_USED = 0
     OUTLINE_FALLBACK_SLOT_USED = false
 }
 
@@ -98,13 +107,18 @@ pub fn register_outline_entry(entity_id: int, outline: Outline) {
     }
 
     let occluded = outline.occluded_color ?? default_occluded_fade(outline.color)
-    OUTLINE_ENTRIES.insert(entity_id, OutlineEntry {
-        color: outline.color,
-        occluded_color: occluded,
-        width: outline.width,
-        flame: outline.flame,
-        flame_phase: outline_flame_phase(outline),
-    })
+    if OUTLINE_ENTRY_POOL_USED == OUTLINE_ENTRY_POOL.len() {
+        OUTLINE_ENTRY_POOL.push(OutlineEntry { color: outline.color, occluded_color: occluded,
+            width: 0.0, flame: 0.0, flame_phase: 0.0 })
+    }
+    let entry = OUTLINE_ENTRY_POOL[OUTLINE_ENTRY_POOL_USED]
+    OUTLINE_ENTRY_POOL_USED += 1
+    entry.color = outline.color
+    entry.occluded_color = occluded
+    entry.width = outline.width
+    entry.flame = outline.flame
+    entry.flame_phase = outline_flame_phase(outline)
+    OUTLINE_ENTRIES.insert(entity_id, entry)
 }
 
 fn outline_flame_phase(outline: Outline) -> float {
@@ -604,4 +618,36 @@ fn adhoc_detect_pass(it: AdhocIntermediate, target: Canvas, radius: float) -> Pa
     it.pass_key = key
     it.pass = p
     return p
+}
+
+inline(lua) fn outline_allocated_bytes(body: fn()) -> float = """
+    local was_on = jit.status()
+    jit.off()
+    collectgarbage('collect')
+    collectgarbage('stop')
+    local before = collectgarbage('count')
+    local ok, err = pcall(body)
+    local bytes = (collectgarbage('count') - before) * 1024
+    collectgarbage('restart')
+    if was_on then jit.on() end
+    if not ok then error(err) end
+    return bytes
+"""
+
+@test
+fn outline_registration_reuses_entries_across_frames() {
+    let outline = Outline { entity_id: 3, color: RED, width: 2.0, flame_time: 0.0 }
+    let frame = () => {
+        register_outline_entry(3, outline)
+        register_outline_entry(4, outline)
+        retire_outline_commands(snapshot: true)
+    }
+    frame()
+    frame()
+    let bytes = outline_allocated_bytes(() => { for _ in 0..16 { frame() } })
+    assert(bytes == 0.0, "16 frames of outline registration allocated {bytes} bytes")
+    let entry = OUTLINE_ENTRIES_LAST.get(3).unwrap()
+    assert(entry.color == RED && entry.width == 2.0, "the snapshot keeps the last frame's style")
+    retire_outline_commands(snapshot: true)
+    retire_outline_commands(snapshot: true)
 }
