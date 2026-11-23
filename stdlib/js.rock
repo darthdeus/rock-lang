@@ -1012,6 +1012,7 @@ inline(js) fn __json_record_decode<T>(name: string, codec: JsonRecordCodec, valu
 """
 
 inline(js) fn __json_record_lua_backend() -> bool = "return false;"
+@nomangle inline(js) fn __json_record_adapters(codec: JsonRecordCodec) -> Map<string, JsonRecordAdapter>? = 'throw new Error("json record adapter caching is Lua-only");'
 inline(js) fn __json_record_write<T>(name: string, codec: JsonRecordCodec, value: T, sink: __JsonRecordSink) -> string = 'throw new Error("json record text writing is Lua-only");'
 inline(js) fn __json_record_read<T>(name: string, codec: JsonRecordCodec, src: string, at: int, source: __JsonRecordSource) -> T? = 'throw new Error("json record source decoding is Lua-only");'
 

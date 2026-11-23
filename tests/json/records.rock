@@ -763,3 +763,30 @@ fn json_raw_places_written_records_into_a_document() {
 
 struct JsonRawHolder { record: Record, after: int }
 struct JsonRawRows { rows: [Record] }
+
+@test
+fn json_record_reused_codec_follows_adapter_changes() {
+    let codec = JsonRecordCodec { adapters: [json_record_adapter(Kind::First, k => json_str("one"), w => Kind::First)] }
+    let doc = JsonKindHolder { kind: Kind::Second, marker: v(1.0, 2.0) }
+    assert_eq(json_record_write(codec, doc), json_encode(json_record_encode(codec, doc)))
+    assert(json_encode(json_record_encode(codec, doc)).contains("\"one\""))
+    codec.adapters[0] = json_record_adapter(Kind::First, k => json_str("two"), w => Kind::Second)
+    assert(json_record_write(codec, doc).contains("\"two\""))
+    assert(json_encode(json_record_encode(codec, doc)).contains("\"two\""))
+    assert(json_record_decode<JsonKindHolder>(codec, json_record_encode(codec, doc)).unwrap().kind == Kind::Second)
+    codec.adapters.push(json_record_adapter(v(0.0, 0.0), p => json_int(7), w => v(0.0, 0.0)))
+    assert_eq(json_record_write(codec, doc), "{{\"kind\":\"two\",\"marker\":7}}")
+    let _ = codec.adapters.pop()
+    assert_eq(json_record_write(codec, doc), json_encode(json_record_encode(codec, doc)))
+    assert(!json_record_write(codec, doc).contains("7"))
+
+    let shared = JsonRecordCodec {}
+    shared.adapters.push(json_record_adapter(Kind::First,
+        k => json_raw(json_record_write(shared, Tint { red: 1.0, visible: k == Kind::Second })), w => Kind::First))
+    let nested = "{{\"kind\":{{\"red\":1,\"visible\":true}},\"marker\":{{\"x\":1,\"y\":2}}}}"
+    assert_eq(json_record_write(shared, doc), nested)
+    assert_eq(json_encode(json_record_encode(shared, doc)), nested)
+    assert_eq(json_record_write(shared, doc), nested)
+}
+
+struct JsonKindHolder { kind: Kind, marker: Vec2 }

@@ -1644,7 +1644,8 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     local n, out = codec.n + 1, codec.out
     out[n] = text
     if n == 512 then
-        local chunks = codec.chunks
+        local chunks = codec.chunks or {}
+        codec.chunks = chunks
         chunks[#chunks + 1] = table.concat(out, '', 1, 512)
         n = 0
     end
@@ -2070,27 +2071,76 @@ fn json_record_source_string(src: string, at: int) -> string {
     return value.unwrap()
 }
 
-@nomangle fn __json_record_context(codec: JsonRecordCodec, reading: bool) -> __JsonRecordContext {
-    let adapters: Map<string, JsonRecordAdapter>? = null
-    if codec.adapters.len() > 0 {
-        let lookup: Map<string, JsonRecordAdapter> = map_new()
-        for adapter in codec.adapters {
-            if lookup.contains(adapter.name) { error("json record duplicate adapter: {adapter.name}") }
-            lookup[adapter.name] = adapter
-        }
-        adapters = lookup
+// The lookup is kept on the codec and reused while its adapters are the same
+// objects, so a codec encoding many small records builds it once.
+@nomangle inline(lua) fn __json_record_adapters(codec: JsonRecordCodec) -> Map<string, JsonRecordAdapter>? = """
+    local adapters = codec.adapters
+    local count = adapters[0]
+    if count == 0 then return nil end
+    local lookup = rawget(codec, '__json_adapters')
+    if lookup and rawget(codec, '__json_adapter_count') == count then
+        for i = 1, count do
+            local adapter = adapters[i]
+            if lookup[adapter.name] ~= adapter then lookup = nil break end
+        end
+        if lookup then return lookup end
+    end
+    lookup = {}
+    for i = 1, count do
+        local adapter = adapters[i]
+        if lookup[adapter.name] then error('json record duplicate adapter: ' .. adapter.name) end
+        lookup[adapter.name] = adapter
+    end
+    rawset(codec, '__json_adapters', lookup)
+    rawset(codec, '__json_adapter_count', count)
+    return lookup
+"""
+
+fn __json_record_adapter_map(codec: JsonRecordCodec) -> Map<string, JsonRecordAdapter>? {
+    if codec.adapters.len() == 0 { return null }
+    let lookup: Map<string, JsonRecordAdapter> = map_new()
+    for adapter in codec.adapters {
+        if lookup.contains(adapter.name) { error("json record duplicate adapter: {adapter.name}") }
+        lookup[adapter.name] = adapter
     }
+    return lookup
+}
+
+@nomangle fn __json_record_context(codec: JsonRecordCodec, reading: bool) -> __JsonRecordContext {
     return __JsonRecordContext {
-        adapters,
+        adapters: if __json_record_lua_backend() { __json_record_adapters(codec) } else { __json_record_adapter_map(codec) },
         field_names: if reading && codec.reject_unknown_fields { map_new() } else { null },
         encode_float: codec.encode_float,
         decode_float: codec.decode_float,
     }
 }
 
+// Encoding reuses one context per codec, so encoding many small records does
+// not rebuild it. A context still busy (a nested call, or one left by an
+// error) is replaced rather than shared.
+@nomangle inline(lua) fn __json_record_encoder(codec: JsonRecordCodec, name: string) -> any = """
+    local context = rawget(codec, '__json_encoder')
+    if context == nil or context.busy or context.encode_float ~= codec.encode_float then
+        context = __json_record_context(codec, false)
+        context.seen, context.roots = {}, {}
+        rawset(codec, '__json_encoder', context)
+    else
+        context.adapters = __json_record_adapters(codec)
+    end
+    context.busy = true
+    local root = context.roots[name]
+    if not root then
+        root = { k = 'nom', name = name }
+        context.roots[name] = root
+    end
+    return context, root
+"""
+
 inline(lua) fn __json_record_encode<T>(name: string, codec: JsonRecordCodec, value: T) -> JsonValue = """
-    local ok, result = __json_record_visit(__json_record_context(codec, false), { k = 'nom', name = name }, value, false, {}, 0)
+    local context, root = __json_record_encoder(codec, name)
+    local ok, result = __json_record_visit(context, root, value, false, context.seen, 0)
     if not ok then error('invalid value for json record encoding', 0) end
+    context.busy = false
     return result
 """
 
@@ -2119,12 +2169,18 @@ inline(lua) fn __json_record_read<T>(name: string, codec: JsonRecordCodec, src: 
 inline(lua) fn __json_record_lua_backend() -> bool = "return true"
 
 inline(lua) fn __json_record_write<T>(name: string, codec: JsonRecordCodec, value: T, sink: __JsonRecordSink) -> string = """
-    local context = __json_record_context(codec, false)
-    context.out, context.chunks, context.sink = {}, {}, sink
-    local ok = __json_record_visit(context, { k = 'nom', name = name }, value, false, {}, 0)
+    local context, root = __json_record_encoder(codec, name)
+    context.out, context.n, context.chunks, context.sink = context.buffer or {}, 0, nil, sink
+    local ok = __json_record_visit(context, root, value, false, context.seen, 0)
     if not ok then error('invalid value for json record encoding', 0) end
-    local chunks = context.chunks
-    chunks[#chunks + 1] = table.concat(context.out, '', 1, context.n)
+    local out, chunks = context.out, context.chunks
+    context.out, context.busy = nil, false
+    local text = table.concat(out, '', 1, context.n)
+    if not chunks then
+        context.buffer = out
+        return text
+    end
+    chunks[#chunks + 1] = text
     return table.concat(chunks)
 """
 
@@ -2157,14 +2213,20 @@ fn json_record_read<T>(codec: JsonRecordCodec, reader: JsonReader) -> T? {
 
 // The JSON text json_encode(json_record_encode(codec, value)) would produce,
 // written without building the JsonValue tree.
+global __json_record_sink: __JsonRecordSink? = null
+
 fn json_record_write<T>(codec: JsonRecordCodec, value: T) -> string {
     if !__json_record_lua_backend() { return json_encode(json_record_encode(codec, value)) }
-    let sink = __JsonRecordSink {
-        default_float: json_float,
-        float_text: f => format_float(f),
-        int_text: json_int_text,
-        string_text: encode_string,
-        value_text: json_encode,
+    let sink = __json_record_sink ?? {
+        let created = __JsonRecordSink {
+            default_float: json_float,
+            float_text: f => format_float(f),
+            int_text: json_int_text,
+            string_text: encode_string,
+            value_text: json_encode,
+        }
+        __json_record_sink = created
+        created
     }
     return __json_record_write(__json_record_type(value), codec, materialize(value), sink)
 }
