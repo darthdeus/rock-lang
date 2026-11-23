@@ -1950,7 +1950,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
         if reading then return true, result end
         return true, __json_record_node('Object', result, row)
     end
-    if kind ~= 'nom' then error('json record unsupported shape: ' .. tostring(kind), 0) end
+    if kind ~= 'nom' then error('json record value of type `' .. tostring(kind) .. '` has no JSON shape (a generic parameter, any or a function type); use a codec adapter', 0) end
     local name = shape.name
     local adapter = not shape.record and codec.adapters and codec.adapters[name]
     if adapter then
@@ -2137,6 +2137,9 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
                             ok, decoded = __json_record_visit(codec, child, nil, true, seen, depth + 1)
                         else return false, __json_record_error_at(__json_record_failure(child, nil), wire_name) end
                     else
+                        if child.k == 'any' then
+                            error('json record field `' .. field.name .. '` of struct `' .. name .. '` has no JSON shape (a generic parameter, any or a function type); use a codec adapter', 0)
+                        end
                         if out then
                             __json_record_put(codec, first and field.json_write_key or field.json_write_next_key)
                             first = false

@@ -862,7 +862,7 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
         if (!reading) return node("Object", map);
         return flatMap ? __json_record_js_flat_map(map, shape.val.name, held) : map;
     }
-    if (kind !== "nom") throw new Error("json record unsupported shape: " + String(kind));
+    if (kind !== "nom") throw new Error("json record value of type `" + String(kind) + "` has no JSON shape (a generic parameter, any or a function type); use a codec adapter");
     var name = shape.name;
     var adapter = shape.record ? undefined : codec.adapters[name];
     if (adapter !== undefined) {
@@ -1031,6 +1031,7 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
                 else if (child.k === "field") r = __json_record_js_visit(codec, child, null, true, seen, depth + 1, null);
                 else return at(fail(child, null), wire);
             } else {
+                if (child.k === "any") throw new Error("json record field `" + field.name + "` of struct `" + name + "` has no JSON shape (a generic parameter, any or a function type); use a codec adapter");
                 r = __json_record_js_visit(codec, child, item, reading, seen, depth + 1, fallback);
             }
             if (failed(r)) {

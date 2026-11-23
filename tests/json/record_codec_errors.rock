@@ -1,4 +1,5 @@
 struct Node { next: Node? = null }
+struct Box<T> { value: T, label: string }
 struct NumericKeys { entries: Map<int, string> }
 inline(lua) fn fails(run: fn() -> JsonValue, message: string) = """
     local ok, err = pcall(run)
@@ -11,5 +12,7 @@ fn typed_json_rejects_cycles_and_unsupported_storage() {
     node.next = node
     fails(() => json_record_encode(codec, node), "cannot encode cycles")
     fails(() => json_record_encode(codec, NumericKeys { entries: map_new() }), "require string keys")
+    fails(() => json_record_encode(codec, Box { value: 1, label: "a" }),
+        "field `value` of struct `Box` has no JSON shape (a generic parameter, any or a function type); use a codec adapter")
     print("ok")
 }
