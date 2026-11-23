@@ -1,3 +1,5 @@
+use crate::tokenizer::directive;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flavor {
     Quoted,
@@ -362,6 +364,28 @@ fn resolve_unicode_escape(src: &str, at: usize) -> Esc {
     }
 }
 
+// Scan comment contents as the hole lexer will see them after escape decoding.
+fn comment_end(src: &str, mut i: usize, flavor: Flavor, block: bool) -> usize {
+    let mut star = false;
+    let bytes = src.as_bytes();
+    while i < bytes.len() {
+        let c = if flavor.escapes() && bytes[i] == b'\\' {
+            let escape = resolve_escape(src, i + 1);
+            i += 1 + escape.len;
+            let Some(c) = escape.ch else { continue };
+            c
+        } else {
+            i += 1;
+            bytes[i - 1] as char
+        };
+        if (block && star && c == '/') || (!block && c == '\n') {
+            break;
+        }
+        star = c == '*';
+    }
+    i
+}
+
 fn scan_hole(src: &str, open: usize, flavor: Flavor) -> (usize, Piece) {
     let b = src.as_bytes();
     let n = b.len();
@@ -372,17 +396,45 @@ fn scan_hole(src: &str, open: usize, flavor: Flavor) -> (usize, Piece) {
     let mut depth: i32 = 0;
     let mut spec_start: Option<usize> = None;
     let mut closed = false;
+    let mut escaped_quote = None;
+    let mut escaped_backslash = false;
     while i < n {
         // Regardless of depth: nothing inside a hole may outlive the literal.
         if flavor.closes_inside_hole() && b[i..].starts_with(close) {
             break;
         }
-        // `\"` inside a hole is an escaped quote, not a nested literal; `hole_source` replays the pass.
+        // A cooked quote can delimit a nested string. Its slash pairs are
+        // string text even though its opening quote is escaped in the source.
         if flavor.escapes() && b[i] == b'\\' {
-            i += 1 + src[i + 1..].chars().next().map_or(0, char::len_utf8);
+            let escape = resolve_escape(src, i + 1);
+            i += 1 + escape.len;
+            if let Some(c) = escape.ch {
+                if !escaped_backslash && matches!(c, '"' | '\'') {
+                    if escaped_quote == Some(c) {
+                        escaped_quote = None;
+                    } else if escaped_quote.is_none() {
+                        escaped_quote = Some(c);
+                    }
+                }
+                escaped_backslash = c == '\\' && !escaped_backslash;
+            }
             continue;
         }
+        escaped_backslash = false;
+        let can_start_comment = spec_start.is_none() && escaped_quote.is_none();
         match b[i] {
+            b'/' if can_start_comment && b.get(i + 1) == Some(&b'*') => {
+                i = comment_end(src, i + 2, flavor, true);
+                continue;
+            }
+            b'/' if can_start_comment && b.get(i + 1) == Some(&b'/') => {
+                i = comment_end(src, i + 2, flavor, false);
+                continue;
+            }
+            b'#' if can_start_comment && directive(&src[i + 1..]).is_none() => {
+                i = comment_end(src, i + 1, flavor, false);
+                continue;
+            }
             b'}' if depth == 0 => {
                 closed = true;
                 break;
@@ -415,4 +467,35 @@ fn scan_hole(src: &str, open: usize, flavor: Flavor) -> (usize, Piece) {
             closed,
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn comment_delimiters_inside_holes_are_trivia() {
+        for expression in [
+            r#"12 /* } : [ " */ + 3"#,
+            r#"12 /* } : [ " \u{002a}/ + 3"#,
+            r#"12 // } : [ " \n + 3"#,
+            "12 // } : [ \"\n + 3",
+            "12 # } : [ \"\n + 3",
+        ] {
+            let src = format!("\"{{{expression}:x}}\"");
+            let scan = scan_string(&src, 0);
+            assert!(scan.terminated, "{src}");
+            let end = 2 + expression.len();
+            assert_eq!(
+                scan.pieces,
+                [Piece::Hole {
+                    range: (1, end + 3),
+                    expr: (2, end),
+                    spec: Some((end + 1, end + 2)),
+                    closed: true,
+                }],
+                "{src}"
+            );
+        }
+    }
 }

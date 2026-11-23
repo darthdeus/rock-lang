@@ -341,3 +341,16 @@ fn raw_literals_preserve_braces_and_backslashes() {
 """
     assert_eq(source, "\n{{ literal }}\n")
 }
+
+
+@test
+fn comments_inside_interpolation_holes() {
+    assert_eq("{12 /* } */}", "12")
+    assert_eq("{wrap(\"//\")}", "[//]")
+    assert_eq("{wrap(\"/*\")}", "[/*]")
+    assert_eq("{12 /* } : [ " */ + 3:x}", "f")
+    assert_eq("{12 // } : [ "
+    :x}", "c")
+    assert_eq("""{12 # } : [ """
+    :x}""", "c")
+}

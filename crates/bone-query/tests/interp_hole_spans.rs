@@ -29,3 +29,23 @@ fn dynamic_format_width_after_an_escape_keeps_its_source_span() {
         .expect("width expression reaches its binding");
     assert_eq!(found.range.start, pos(src, "digits =", 0));
 }
+
+#[test]
+fn completion_and_definition_reach_past_a_comment_in_a_hole() {
+    let src = r#"fn main() {
+    let count = 2
+    print("{12 /* } */ + count}")
+}
+"#;
+    let mut bone = workspace(src);
+    let at = pos(src, "count}", 4);
+    let found = bone
+        .definition(PATH, at)
+        .expect("count resolves inside hole");
+    assert_eq!(found.range.start, pos(src, "count =", 0));
+    assert!(
+        bone.completion(PATH, at)
+            .iter()
+            .any(|item| item.label == "count")
+    );
+}
