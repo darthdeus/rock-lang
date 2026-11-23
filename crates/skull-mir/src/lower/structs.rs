@@ -393,6 +393,13 @@ impl<'a> Builder<'a> {
         super::shape::is_value_struct(self.ws, name)
     }
 
+    pub(super) fn expr_is_shared_struct(&self, e: Idx<Expr>) -> bool {
+        self.concrete_expr_ty(e)
+            .and_then(|ty| ty.peel_nullable().0.nominal())
+            .and_then(|name| self.ws.nominals.struct_id(name))
+            .is_some_and(|sid| !self.ws.modules[sid.module.index()].structs[sid.def].is_value)
+    }
+
     /// Whether a later write can reach storage read by `e`, so a whole-value read
     /// needs a copy. Value locals and value-call results are fresh.
     pub(crate) fn is_mutable_place(&self, e: Idx<Expr>) -> Result<bool, CompilerError> {
@@ -400,11 +407,14 @@ impl<'a> Builder<'a> {
             Expr::Global(_) | Expr::Index { .. } => Ok(true),
             Expr::FieldAccess { base, .. }
             | Expr::SafeNav { base, .. }
-            | Expr::TupleIndex { tuple: base, .. } => self.is_mutable_place(*base),
+            | Expr::TupleIndex { tuple: base, .. } => {
+                Ok(self.is_mutable_place(*base)? || self.expr_is_shared_struct(e))
+            }
             // A reference-struct binding aliases shared storage; a value binding is its own copy.
             Expr::Var(b) => Ok(!self.binding_is_nonnull_value_struct(*b)),
             Expr::Call { .. } | Expr::SafeNavCall { .. } => Ok(!self.expr_is_value_struct(e)),
-            _ => Ok(false),
+            Expr::StructLiteral { .. } => Ok(false),
+            _ => Ok(self.expr_is_shared_struct(e)),
         }
     }
 

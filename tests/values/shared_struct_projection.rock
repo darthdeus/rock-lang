@@ -1,0 +1,79 @@
+value Position { x: int, y: int }
+struct Body { pos: Position }
+value Handle { body: Body, id: int }
+
+fn make_handle() -> Handle {
+    return Handle { body: Body { pos: Position { x: 1, y: 2 } }, id: 7 }
+}
+
+fn mutate_projected_local(h: Handle) -> int {
+    let p = h.body.pos
+    p.x = 99
+    return p.x
+}
+
+@test fn projected_local_can_mutate_independently() {
+    let h = make_handle()
+    assert_eq(mutate_projected_local(h), 99)
+    assert_eq(h.body.pos.x, 1)
+}
+
+@test fn projected_local_snapshots_before_a_write() {
+    let h = make_handle()
+    let p = h.body.pos
+    h.body.pos.x = 99
+    assert_eq(p.x, 1)
+    assert_eq(h.body.pos.x, 99)
+}
+
+@test fn closure_captures_the_snapshot() {
+    let h = make_handle()
+    let p = h.body.pos
+    let read = () => p.x + p.y
+    h.body.pos.x = 99
+    assert_eq(read(), 3)
+}
+
+co fn snapshot_across_yield(h: Handle) -> Coroutine<int> {
+    let p = h.body.pos
+    yield p.x
+    yield p.x
+}
+
+@test fn coroutine_local_keeps_the_snapshot() {
+    let h = make_handle()
+    let c = snapshot_across_yield(h)
+    assert_eq(c.resume() ?? -1, 1)
+    h.body.pos.x = 99
+    assert_eq(c.resume() ?? -1, 1)
+}
+
+fn generic_snapshot<T>(h: Handle, marker: T) -> (Position, T) {
+    let p = h.body.pos
+    h.body.pos.x = 99
+    return (p, marker)
+}
+
+@test fn generic_function_snapshots_the_field() {
+    let (p, marker) = generic_snapshot(make_handle(), "marker")
+    assert_eq(p.x, 1)
+    assert_eq(marker, "marker")
+}
+
+@test fn tuple_holds_a_snapshot() {
+    let h = make_handle()
+    let pair = (h.body.pos, 1)
+    h.body.pos.x = 99
+    assert_eq(pair.0.x, 1)
+    assert_eq(pair.1, 1)
+}
+
+fn take_snapshot(chosen: Body, other: Body, select: bool) -> int {
+    let p = (if select { chosen } else { other }).pos
+    chosen.pos.x = 99
+    return p.x
+}
+
+@test fn conditional_struct_preserves_shared_storage() {
+    assert_eq(take_snapshot(make_handle().body, make_handle().body, true), 1)
+}
