@@ -22,9 +22,13 @@ import sys
 PASSES = ["sroa", "copyprop", "foldcmp", "foldbr", "inline", "lambda", "forl", "bounds",
           "noboxflat", "mem2reg", "noboxfold", "latefloat", "callfwd"]
 # "too wide" errors (register slots without SROA) name the function as `@/path::fn`.
-EXPECTED = re.compile(r"@noalloc|nobox|boxes `|constructs a tuple table|^`@/")
+# Runtime representation checks (no carriers, no allocation, scalar captures)
+# also rely on SROA.
+EXPECTED = re.compile(r"@noalloc|nobox|boxes `|constructs a tuple table|^`@/"
+                      r"|must not materialize carriers|bytes per slot update|not a scalar leaf")
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 FILE_FAIL = re.compile(r"^(\S+\.rock)\.* FAILED\s*(.*)$")
+TEST_FAIL = re.compile(r"^  (\w+): (?:error: \S+:\d+: )?(.*)$")
 ERROR_FAIL = re.compile(r"^\s+(tests/errors/\S+)\s+--\s+(.*)$")
 SUMMARY = re.compile(r"rock test: (\d+)/(\d+) @tests passed")
 
@@ -36,12 +40,21 @@ def run(rock, corpus, disabled, checks):
     if disabled:
         env["ROCK_MIR_DISABLE"] = disabled
     out = subprocess.run([rock, "test", corpus], env=env, capture_output=True, text=True).stdout
-    failures, passed = {}, None
+    failures, passed, file = {}, None, None
     for line in ANSI.sub("", out).splitlines():
+        m = TEST_FAIL.match(line)
+        if file and m:
+            # A failing @test names its own reason under the file's summary line.
+            failures.pop((file, summary), None)
+            failures[(file, f"{m.group(1)}: {m.group(2).strip()}")] = True
+            continue
+        file = None
         for pattern in (FILE_FAIL, ERROR_FAIL):
             m = pattern.match(line)
             if m:
-                failures[(m.group(1), m.group(2).strip())] = True
+                summary = m.group(2).strip()
+                failures[(m.group(1), summary)] = True
+                file = m.group(1) if pattern is FILE_FAIL else None
         m = SUMMARY.search(line)
         if m:
             passed = int(m.group(1))

@@ -13,7 +13,8 @@ inline(lua) fn check_capture_record(callback: any, count_expected: int, cell: bo
             else
                 local kind = type(item)
                 assert(kind == 'number' or kind == 'string' or kind == 'boolean'
-                    or (enum_box and kind == 'table' and item.v == nil), kind)
+                    or (enum_box and kind == 'table' and item.v == nil),
+                    'capture is not a scalar leaf: ' .. kind)
             end
         end
     end
