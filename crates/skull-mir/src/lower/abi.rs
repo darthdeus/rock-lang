@@ -985,6 +985,21 @@ impl RepArena {
         })
     }
 
+    /// The labelled `__tostring` fields of a leaf-table value, read through its leaves.
+    pub fn nominal_value_display_fields_required(
+        &self,
+        ws: &Workspace,
+        target: FnBackend,
+        name: Ustr,
+    ) -> Result<Vec<(String, Vec<crate::lua_nesting::LuaDisplayPart>)>, RepError> {
+        let id = self.plan_nominal_value(ws, target, name)?;
+        let shape = self.value_shape(id).ok_or_else(|| RepError {
+            span: None,
+            message: format!("`{name}` has no physical leaf plan"),
+        })?;
+        Ok(super::struct_plan::lua_display_fields(ws, shape, ""))
+    }
+
     pub fn nominal_value_leaf_presence_flags_required(
         &self,
         ws: &Workspace,

@@ -31,6 +31,13 @@ pub enum LuaDisplayPart {
         value: String,
         parts: Vec<LuaDisplayPart>,
     },
+    /// The enum `name` rebuilt from the leaves under `v["<prefix>.<leaf>"]`;
+    /// `lua` is its Lua spelling.
+    Enum {
+        name: ustr::Ustr,
+        prefix: String,
+        lua: String,
+    },
 }
 
 impl LuaDisplayPart {
@@ -62,7 +69,7 @@ fn operand_count(parts: &[LuaDisplayPart]) -> usize {
     parts
         .iter()
         .map(|p| match p {
-            LuaDisplayPart::Expr(_) => 1,
+            LuaDisplayPart::Expr(_) | LuaDisplayPart::Enum { .. } => 1,
             LuaDisplayPart::UnlessNil { parts, .. } => 1 + operand_count(parts),
         })
         .sum()
@@ -74,7 +81,7 @@ fn write_expr(out: &mut String, parts: &[LuaDisplayPart]) {
             out.push_str(" .. ");
         }
         match part {
-            LuaDisplayPart::Expr(e) => out.push_str(e),
+            LuaDisplayPart::Expr(e) | LuaDisplayPart::Enum { lua: e, .. } => out.push_str(e),
             LuaDisplayPart::UnlessNil { value, parts } => {
                 let _ = write!(out, "({value} == nil and \"nil\" or (");
                 write_expr(out, parts);
@@ -119,7 +126,7 @@ impl<'a> Appender<'a> {
     fn append(&mut self, parts: &'a [LuaDisplayPart], indent: &str) {
         for part in parts {
             match part {
-                LuaDisplayPart::Expr(e) => {
+                LuaDisplayPart::Expr(e) | LuaDisplayPart::Enum { lua: e, .. } => {
                     if self.run.len() == DISPLAY_CONCAT_RUN {
                         self.flush(indent);
                     }

@@ -1156,23 +1156,13 @@ fn value_struct_gc_defs(
             ));
             out.push_str("end\n");
             out.push_str(&format!("{mt}.__tostring = function(v)\n"));
-            let parts = if paths.is_empty() {
-                vec![
-                    LuaDisplayPart::literal(&format!("{shown} {{ ")),
-                    LuaDisplayPart::literal(""),
-                    LuaDisplayPart::literal(" }"),
-                ]
+            let fields = rep_arena
+                .nominal_value_display_fields_required(ws, bone_semantic::hir::FnBackend::Lua, n)
+                .map_err(|e| CompilerError::new_no_location(e.message))?;
+            let parts = if fields.is_empty() {
+                vec![LuaDisplayPart::literal(&format!("{shown} {{ }}"))]
             } else {
-                display_record(
-                    &format!("{shown} {{ "),
-                    paths.iter().map(|p| {
-                        (
-                            format!("{p}: "),
-                            vec![LuaDisplayPart::Expr(format!("tostring(v[\"{p}\"])"))],
-                        )
-                    }),
-                    " }",
-                )
+                display_record(&format!("{shown} {{ "), fields, " }")
             };
             out.push_str(&display_return(&parts, "  "));
             out.push_str("end\n");
@@ -1247,7 +1237,7 @@ fn value_struct_gc_defs(
                 &format!("{shown} {{ "),
                 fields
                     .iter()
-                    .map(|f| (format!("{}: ", f.name), f.lua_display_parts())),
+                    .map(|f| (format!("{}: ", f.name), f.lua_display_parts(ws))),
                 " }",
             );
             out.push_str(&display_return(&parts, "  "));

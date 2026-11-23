@@ -376,10 +376,10 @@ impl GcTableField {
     }
 
     /// An inline child renders as its own box would.
-    pub fn lua_display_parts(&self) -> Vec<LuaDisplayPart> {
+    pub fn lua_display_parts(&self, ws: &Workspace) -> Vec<LuaDisplayPart> {
         match &self.inline {
             None => vec![LuaDisplayPart::Expr(format!("tostring(v.{})", self.name))],
-            Some(sub) => lua_display_inline(sub, self.name.as_str()),
+            Some(sub) => lua_display_inline(ws, sub, self.name.as_str()),
         }
     }
 }
@@ -414,22 +414,61 @@ fn leaf_eq(ws: &Workspace, shape: &ValueShape, nested: bool, out: &mut Vec<GcFie
     }
 }
 
-fn lua_display_inline(shape: &ValueShape, prefix: &str) -> Vec<LuaDisplayPart> {
-    let name = bone_core::modules::display_name(shape.name.as_str());
-    let fields: Vec<(String, Vec<LuaDisplayPart>)> = shape
+/// The labelled fields of a value whose leaves sit under `v["<prefix><field>"]`.
+pub(super) fn lua_display_fields(
+    ws: &Workspace,
+    shape: &ValueShape,
+    prefix: &str,
+) -> Vec<(String, Vec<LuaDisplayPart>)> {
+    shape
         .fields
         .iter()
         .map(|(fname, fs)| {
-            let key = format!("{prefix}.{fname}");
+            let key = format!("{prefix}{fname}");
             let value = match fs {
                 super::FieldShape::Prim => {
                     vec![LuaDisplayPart::Expr(format!("tostring(v[\"{key}\"])"))]
                 }
-                super::FieldShape::Nested(sub) => lua_display_inline(sub, &key),
+                super::FieldShape::Nested(sub) => lua_display_inline(ws, sub, &key),
             };
             (format!("{fname}: "), value)
         })
-        .collect();
+        .collect()
+}
+
+fn lua_display_inline(ws: &Workspace, shape: &ValueShape, prefix: &str) -> Vec<LuaDisplayPart> {
+    if let Some(plan) = EnumPlan::for_name(ws, shape.name) {
+        let leaf = |l: &str| format!("v[\"{prefix}.{l}\"]");
+        let symbol = crate::mangle::type_symbol(ws, shape.name);
+        let lua = if let Some(cdata) = plan.cdata() {
+            let args: Vec<String> = cdata.field_names().iter().map(|l| leaf(l)).collect();
+            format!("tostring({symbol}_ct({}))", args.join(", "))
+        } else {
+            let fields: Vec<String> = std::iter::once(format!("__variant = {}", leaf("#")))
+                .chain(
+                    shape
+                        .fields
+                        .iter()
+                        .skip(1)
+                        .map(|(l, _)| match l.parse::<usize>() {
+                            Ok(_) => leaf(l),
+                            Err(_) => format!("{l} = {}", leaf(l)),
+                        }),
+                )
+                .collect();
+            format!(
+                "tostring(setmetatable({{ {} }}, __rock_box_mts[\"{symbol}\"]))",
+                fields.join(", ")
+            )
+        };
+        return vec![LuaDisplayPart::Enum {
+            name: shape.name,
+            prefix: prefix.to_string(),
+            lua,
+        }];
+    }
+    let name = bone_core::modules::display_name(shape.name.as_str());
+    let fields = lua_display_fields(ws, shape, &format!("{prefix}."));
     let body = if fields.is_empty() {
         vec![LuaDisplayPart::literal(&format!("{} {{ }}", name))]
     } else {

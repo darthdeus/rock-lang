@@ -146,3 +146,17 @@ fn leaf_table_enum_child_reads_its_writes() {
     assert_eq("{m}", "LrMover {{ tag: LrId {{ value: 1 }}, mode: LrMode::Run {{ speed: 9 }}, k: 4 }}")
     assert_eq(inspect(m), "LrMover {{\n  k = 4,\n  mode = LrMode::Run {{ speed = 9 }},\n  tag = LrId {{ value = 1 }}\n}}")
 }
+
+// Display through `any` walks the same leaves as the logical value.
+nobox value LrStep { mode: LrMode, n: int }
+value LrTrail { name: string, step: LrStep }
+
+fn lr_show(x: any) { print(x) }
+
+@test(output = "LrRow {{ id: 1, tag: LrId {{ value: 5 }}, pos: LrV2 {{ x: 2, y: 3 }} }}\nLrRow {{ id: 2, tag: nil, pos: LrV2 {{ x: 4, y: 5 }} }}\nLrMover {{ tag: LrId {{ value: 1 }}, mode: LrMode::Run {{ speed = 9 }}, k: 4 }}\nLrTrail {{ name: t, step: LrStep {{ mode: LrMode::Walk {{ [1] = 1, [2] = 2 }}, n: 3 }} }}")
+fn leaf_children_display_logically() {
+    lr_show(LrRow { id: 1, tag: LrId { value: 5 }, pos: LrV2 { x: 2, y: 3 } })
+    lr_show(LrRow { id: 2, pos: LrV2 { x: 4, y: 5 } })
+    lr_show(LrMover { tag: LrId { value: 1 }, mode: LrMode::Run { speed: 9 }, k: 4 })
+    lr_show(LrTrail { name: "t", step: LrStep { mode: LrMode::Walk(1, 2), n: 3 } })
+}

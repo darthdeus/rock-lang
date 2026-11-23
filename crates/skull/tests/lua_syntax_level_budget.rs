@@ -58,7 +58,7 @@ fn display_tiers_expected(n: usize) -> String {
         cdata_inspect,
         format!("GcWide {{ {} }}", join(&|i| format!("g{i}: s{i}"))),
         format!(
-            "LeafWide {{ pos: true, pos.x: 1, pos.y: 2, {} }}",
+            "LeafWide {{ pos: Pair {{ x: 1, y: 2 }}, {} }}",
             join(&|i| format!("l{i}: {i}.25"))
         ),
         format!("Holder {{ tag: t, inner: {inline} }}"),

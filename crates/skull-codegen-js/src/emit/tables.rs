@@ -78,16 +78,13 @@ pub(super) fn emit_tostring_ty(
                     .collect()
             }
             ValueStorage::LeafTable => arena
-                .nominal_value_leaf_paths_required(ws, bone_core::hir::FnBackend::Js, name)
-                .map_err(|e| err(e.message))?
-                .iter()
-                .map(|p| (format!("{p}: "), leaf(p.as_str())))
-                .collect(),
+                .nominal_value_display_fields_required(ws, bone_core::hir::FnBackend::Js, name)
+                .map_err(|e| err(e.message))?,
             ValueStorage::GcTable => {
                 skull_mir::lower::gc_table_fields(ws, bone_core::hir::FnBackend::Js, name)
                     .map_err(|e| err(e.message))?
                     .iter()
-                    .map(|f| (format!("{}: ", f.name), f.lua_display_parts()))
+                    .map(|f| (format!("{}: ", f.name), f.lua_display_parts(ws)))
                     .collect()
             }
         };
@@ -104,7 +101,7 @@ pub(super) fn emit_tostring_ty(
             js_string_lit(
                 skull_mir::mangle::type_symbol(ws, ustr::Ustr::from(name.as_str())).as_str()
             ),
-            js_display_expr(&parts)?
+            js_display_expr(ws, &parts)?
         ));
     }
     Ok(out)
@@ -113,6 +110,7 @@ pub(super) fn emit_tostring_ty(
 /// The JS spelling of a display body shared with the luajit `__tostring` emitter; anything but
 /// string literals and `tostring(v.<key>)` reads is rejected.
 fn js_display_expr(
+    ws: &Workspace,
     parts: &[skull_mir::lua_nesting::LuaDisplayPart],
 ) -> Result<String, CompilerError> {
     use skull_mir::lua_nesting::LuaDisplayPart;
@@ -139,12 +137,19 @@ fn js_display_expr(
             })?,
             LuaDisplayPart::UnlessNil { value, parts } if is_js_box_read(value) => format!(
                 "({value} == null ? \"nil\" : ({}))",
-                js_display_expr(parts)?
+                js_display_expr(ws, parts)?
             ),
             LuaDisplayPart::UnlessNil { value, .. } => {
                 return Err(err(format!(
                     "JS subset: display presence read `{value}` has no JS spelling"
                 )));
+            }
+            LuaDisplayPart::Enum { name, prefix, .. } => {
+                let view = enum_leaf_view(ws, *name, |l| {
+                    format!("v[{}]", js_string_lit(&format!("{prefix}.{l}")))
+                })
+                .ok_or_else(|| err(format!("JS subset: display enum `{name}` has no leaf view")))?;
+                format!("lua_tostring({view})")
             }
         });
     }
