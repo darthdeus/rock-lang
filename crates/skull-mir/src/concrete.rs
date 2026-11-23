@@ -306,6 +306,26 @@ pub struct ConcreteCallee {
     pub signature: ConcreteSignatureHandle,
 }
 
+/// Immutable callee rows in site order.
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+pub struct ConcreteCallees(Box<[(Site, ConcreteCallee)]>);
+
+impl ConcreteCallees {
+    pub fn from_sorted(rows: Vec<(Site, ConcreteCallee)>) -> Self {
+        debug_assert!(rows.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        Self(rows.into_boxed_slice())
+    }
+
+    pub fn get(&self, site: &Site) -> Option<&ConcreteCallee> {
+        let row = self.0.binary_search_by(|(key, _)| key.cmp(site)).ok()?;
+        Some(&self.0[row].1)
+    }
+
+    pub fn rows(&self) -> &[(Site, ConcreteCallee)] {
+        &self.0
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConcreteBodyPlan {
     pub owner: ConcreteOwner,
@@ -315,7 +335,7 @@ pub struct ConcreteBodyPlan {
     /// Struct-default domains, keyed because each has a distinct HIR arena.
     pub foreign_domains: BTreeMap<SiteDomain, ConcreteTypeTables>,
     pub signature: ConcreteSignatureHandle,
-    pub callees: BTreeMap<Site, ConcreteCallee>,
+    pub callees: ConcreteCallees,
     /// Visited but unresolved, distinct from absent, so lowering reports a planned
     /// failure at the site.
     pub failed_sites: BTreeMap<Site, &'static str>,
@@ -358,7 +378,7 @@ pub fn select_concrete_plan_closure<'a>(
         let Some(plan) = plans.get(&instance) else {
             continue;
         };
-        for callee in plan.callees.values() {
+        for (_, callee) in plan.callees.rows() {
             if selected.insert(callee.instance.clone()) {
                 queue.push(callee.instance.clone());
             }

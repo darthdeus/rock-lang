@@ -6,8 +6,8 @@ use bone_core::prelude::TyId;
 use bone_core::workspace::Workspace;
 use rustc_hash::FxHashMap;
 use skull_mir::concrete::{
-    ConcreteAlwaysPlans, ConcreteBodyPlan, ConcreteCallee, ConcreteOwner, ConcretePlans,
-    ConcreteSignature, ConcreteSignatureHandle, ConcreteTypeTables,
+    ConcreteAlwaysPlans, ConcreteBodyPlan, ConcreteCallee, ConcreteCallees, ConcreteOwner,
+    ConcretePlans, ConcreteSignature, ConcreteSignatureHandle, ConcreteTypeTables,
 };
 use skull_mir::mir::FuncRef;
 use skull_mir::monoty::{MonoSubst, MonoTyReason, TyEnv};
@@ -104,7 +104,7 @@ impl ConcreteBodies {
                     self.plan_failure_index.insert(built.instance, reason);
                 }
                 Ok(plan) => {
-                    for callee in plan.callees.values() {
+                    for (_, callee) in plan.callees.rows() {
                         let instance = &callee.instance;
                         let count = self.candidate_counts.entry(instance.clone()).or_default();
                         if *count == 0 {
@@ -150,7 +150,7 @@ impl ConcreteBodies {
             .expect("local concrete update lost its unique plan store")
             .remove(instance)
         {
-            for callee in plan.callees.values() {
+            for (_, callee) in plan.callees.rows() {
                 let instance = &callee.instance;
                 let count = self
                     .candidate_counts
@@ -448,12 +448,13 @@ fn concrete_plan_from_sites(
     inst: &Instance,
     types: Result<ConcreteTypeTables, MonoTyReason>,
 ) -> Result<ConcreteBodyPlan, MonoTyReason> {
-    let mut callees = BTreeMap::new();
+    let mut callees = Vec::new();
     let mut failed_sites = Vec::new();
     let mut site_domains = Vec::new();
     let mut callee_signature_error: Option<(u8, Site, MonoTyReason)> = None;
     let g = publication.graph;
     if let Some(sites) = g.sites_of(inst) {
+        callees.reserve_exact(sites.len());
         for (site, record) in sites {
             match &record.outcome {
                 SiteOutcome::Failed(reason) => {
@@ -463,13 +464,13 @@ fn concrete_plan_from_sites(
                     let callee_instance = target.clone();
                     match publication.signature(target) {
                         Ok(signature) => {
-                            callees.insert(
+                            callees.push((
                                 site.clone(),
                                 ConcreteCallee {
                                     instance: callee_instance,
                                     signature,
                                 },
-                            );
+                            ));
                         }
                         Err(reason) => {
                             let rank = callee_table_rank(site);
@@ -507,7 +508,7 @@ fn concrete_plan_from_sites(
         types,
         foreign_domains,
         signature,
-        callees,
+        callees: ConcreteCallees::from_sorted(callees),
         failed_sites: failed_sites.into_iter().collect(),
         bound_tree: g
             .bound_tree(inst)
@@ -546,18 +547,18 @@ fn plan_always(
             .contributions
             .get(&Owner::AlwaysEmitted(module, body_owner))
             .ok_or(MonoTyReason::NoNode)?;
-        let mut callees = BTreeMap::new();
+        let mut callees = Vec::with_capacity(contribution.call_sites.len());
         let mut failed_sites = BTreeMap::new();
         for (site, record) in &contribution.call_sites {
             match &record.outcome {
                 SiteOutcome::Resolved(instance) => {
-                    callees.insert(
+                    callees.push((
                         site.clone(),
                         ConcreteCallee {
                             instance: instance.clone(),
                             signature: publication.signature(instance)?,
                         },
-                    );
+                    ));
                 }
                 SiteOutcome::Failed(reason) => {
                     failed_sites.insert(site.clone(), *reason);
@@ -605,7 +606,7 @@ fn plan_always(
             types,
             foreign_domains,
             signature,
-            callees,
+            callees: ConcreteCallees::from_sorted(callees),
             failed_sites,
             bound_tree: Default::default(),
         }))
@@ -652,7 +653,7 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
     for built in results.into_iter().flatten() {
         match built.plan {
             Ok(plan) => {
-                for callee in plan.callees.values() {
+                for (_, callee) in plan.callees.rows() {
                     *counts.entry(callee.instance.clone()).or_default() += 1;
                 }
                 plan_rows.push((built.instance, Arc::new(plan)));

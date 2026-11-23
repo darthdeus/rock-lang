@@ -1290,7 +1290,7 @@ fn validate_always_plan<'a>(
 }
 
 fn validate_plan_domains(plan: &ConcreteBodyPlan, label: &str) -> Result<(), CompilerError> {
-    for site in plan.callees.keys() {
+    for (site, _) in plan.callees.rows() {
         if !matches!(site.domain, crate::site::SiteDomain::Own)
             && plan.domain_types(&site.domain).is_none()
         {
@@ -1318,7 +1318,7 @@ fn validate_concrete_callee_plans(
     plan: &ConcreteBodyPlan,
     concrete_plans: &ConcretePlans,
 ) -> Result<(), CompilerError> {
-    for (site, callee) in &plan.callees {
+    for (site, callee) in plan.callees.rows() {
         let owner = &callee.instance;
         if !callee_has_body_plan(ws, scx, owner) {
             continue;
