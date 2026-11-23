@@ -23,3 +23,27 @@ fn json_default_expression_edit_rebuilds_the_interface_and_factory() {
     );
     assert_eq!(run_luajit(&script), "ok");
 }
+
+#[test]
+fn reloaded_declaration_replaces_one_already_read() {
+    use bone_incremental::session::{Session, SessionFile};
+    let source = "struct Row { a: int }";
+    let mut session = Session::new(
+        skull_parser::stdlib::cached().as_ref().unwrap().clone(),
+        vec![SessionFile::standalone("reload-decl.rock", source)],
+        &Default::default(),
+    )
+    .unwrap();
+    let mid = session.workspace().module_ids[&ustr::Ustr::from("reload-decl.rock")];
+    let original = emit_full(session.workspace(), mid).unwrap().0;
+    session
+        .update_file("reload-decl.rock", "struct Row { a: int, b: int }")
+        .unwrap();
+    let rebuilt = emit_full(session.workspace(), mid).unwrap().0;
+    let fields = "#_G.__ROCK_TYPE_TABLE.Row.fields";
+    let script = format!(
+        "{}\nassert({fields} == 1)\n{}\nassert({fields} == 2)\nprint('ok')",
+        original.lua, rebuilt.lua
+    );
+    assert_eq!(run_luajit(&script), "ok");
+}

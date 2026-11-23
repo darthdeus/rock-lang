@@ -60,7 +60,7 @@ fn v1_type_table_key_matches_the_emitted_constructor() {
     assert!(
         emitted
             .lua
-            .contains(&format!("_G.__ROCK_TYPE_TABLE[\"{key}\"]"))
+            .contains(&format!("[\"{key}\"]=[[return {{ kind = \"c_struct\""))
     );
     assert!(
         emitted

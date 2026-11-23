@@ -431,7 +431,31 @@ local __rock_map_sort_scratch
 local __rock_table_clear = require("table.clear")
 if not _G.ffi then _G.ffi = require("ffi") end
 if not _G.__ROCK_C_STRUCT then _G.__ROCK_C_STRUCT = {} end
-if not _G.__ROCK_TYPE_TABLE then _G.__ROCK_TYPE_TABLE = {} end
+if not _G.__ROCK_TYPE_TABLE then
+  local sources = {}
+  _G.__ROCK_TYPE_TABLE = setmetatable({}, { sources = sources, __index = function(types, name)
+    local source = sources[name]
+    if source == nil then return nil end
+    local decl = loadstring(source)()
+    decl.name = name
+    -- A field is emitted as { name, type, desc, flags... }.
+    local fields = decl.fields
+    for i = 1, fields and #fields or 0 do
+      local f = fields[i]
+      f.name, f.type, f.desc, f[1], f[2], f[3] = f[1], f[2], f[3], nil, nil, nil
+    end
+    types[name] = decl
+    return decl
+  end })
+end
+function __rock_type_sources(decls)
+  local types = _G.__ROCK_TYPE_TABLE
+  local sources = getmetatable(types).sources
+  for name, source in pairs(decls) do
+    sources[name] = source
+    rawset(types, name, nil)
+  end
+end
 -- skull_codegen_lua::OMITTED_ARG: what a call passes for an omitted argument
 -- whose nullable parameter has a non-null default (EXPLICIT_NULL_DEFAULT).
 if not _G.__rock_omitted then
@@ -1802,7 +1826,7 @@ fn append_payload_paths(d: &mut String, p: &skull_mir::type_table::PositionEntry
     }
 }
 
-fn type_entry_lua(entry: &skull_mir::type_table::Entry, out: &mut String) {
+fn type_entry_lua(entry: &skull_mir::type_table::Entry, out: &mut String, decls: &mut String) {
     use skull_codegen_lua::lua_string;
     use skull_mir::type_table::Entry;
     match entry {
@@ -1834,6 +1858,7 @@ fn type_entry_lua(entry: &skull_mir::type_table::Entry, out: &mut String) {
                     } else {
                         ""
                     };
+                    let nullable = if f.nullable { ", nullable = true" } else { "" };
                     let flat = f
                         .flat
                         .as_ref()
@@ -1849,7 +1874,7 @@ fn type_entry_lua(entry: &skull_mir::type_table::Entry, out: &mut String) {
                     let desc = f
                         .shape
                         .as_ref()
-                        .map(|d| format!(", desc = {}", shape_lua_string(d)))
+                        .map(|d| format!(", {}", shape_lua_string(d)))
                         .unwrap_or_default();
                     let mut json = f
                         .json_name
@@ -1865,8 +1890,8 @@ fn type_entry_lua(entry: &skull_mir::type_table::Entry, out: &mut String) {
                         json.push_str(", json_skip = true");
                     }
                     format!(
-                        "{{ name = \"{}\", type = \"{}\", nullable = {}{}{}{}{} }}",
-                        f.name, f.ty, f.nullable, embed, flat, desc, json
+                        "{{\"{}\", \"{}\"{desc}{nullable}{embed}{flat}{json}}}",
+                        f.name, f.ty
                     )
                 })
                 .collect();
@@ -1881,14 +1906,16 @@ fn type_entry_lua(entry: &skull_mir::type_table::Entry, out: &mut String) {
                     format!(", vec_columns = {{ {keys} }}")
                 })
                 .unwrap_or_default();
-            out.push_str(&format!(
-                "_G.__ROCK_TYPE_TABLE[\"{name}\"] = {{ name = \"{name}\", kind = \"{kind}\", fields = {{ {f} }}{vec_columns} }}\n",
-                f = fields.join(", ")
-            ));
+            push_decl(
+                decls,
+                name,
+                &format!(
+                    "{{ kind = \"{kind}\", fields = {{ {f} }}{vec_columns} }}",
+                    f = fields.join(", ")
+                ),
+            );
         }
-        Entry::Newtype { name } => out.push_str(&format!(
-            "_G.__ROCK_TYPE_TABLE[\"{name}\"] = {{ name = \"{name}\", kind = \"newtype\", fields = {{ }} }}\n",
-        )),
+        Entry::Newtype { name } => push_decl(decls, name, "{ kind = \"newtype\", fields = { } }"),
         Entry::FlatLayout {
             name,
             tuple_width,
@@ -1910,30 +1937,35 @@ fn type_entry_lua(entry: &skull_mir::type_table::Entry, out: &mut String) {
                 .map(|(i, v)| format!("[{i}]={:?}", v.as_str()))
                 .collect::<Vec<_>>()
                 .join(",");
-            out.push_str(&format!(
-                "_G.__ROCK_TYPE_TABLE[\"{name}\"] = {{ name = \"{name}\", kind = \"enum_tag\", variants = {{ {variants} }} }}\n"
-            ));
+            push_decl(
+                decls,
+                name,
+                &format!("{{ kind = \"enum_tag\", variants = {{ {variants} }} }}"),
+            );
         }
         Entry::Enum { name, variants } => {
             let vd = variants
                 .iter()
-                .map(|(variant, entry)| format!("[{:?}]={{{}}}", variant.as_str(), variant_lua(entry)))
+                .map(|(variant, entry)| {
+                    format!("[{:?}]={{{}}}", variant.as_str(), variant_lua(entry))
+                })
                 .collect::<Vec<_>>()
                 .join(",");
-            out.push_str(&format!(
-                "_G.__ROCK_TYPE_TABLE[\"{name}\"] = {{ name = \"{name}\", kind = \"enum\", fields = {{ }}, variant_desc = {{ {vd} }} }}\n",
-            ));
+            push_decl(
+                decls,
+                name,
+                &format!("{{ kind = \"enum\", fields = {{ }}, variant_desc = {{ {vd} }} }}"),
+            );
         }
         Entry::CEnum {
             name,
             slots,
             variants,
         } => {
-            let mut fields =
-                vec!["{ name = \"__tag\", type = \"int\", nullable = false }".to_string()];
+            let mut fields = vec!["{\"__tag\", \"int\"}".to_string()];
             fields.extend(slots.iter().map(|(slot, c_type)| {
                 let field_type = if *c_type == "double" { "float" } else { c_type };
-                format!("{{ name = \"{slot}\", type = \"{field_type}\", nullable = false }}")
+                format!("{{\"{slot}\", \"{field_type}\"}}")
             }));
             let variants: Vec<String> = variants
                 .iter()
@@ -1954,16 +1986,34 @@ fn type_entry_lua(entry: &skull_mir::type_table::Entry, out: &mut String) {
                     )
                 })
                 .collect();
-            out.push_str(&format!(
-                "_G.__ROCK_TYPE_TABLE[\"{name}\"] = {{ name = \"{name}\", kind = \"c_enum\", fields = {{ {f} }}, variants = {{ {v} }} }}\n",
-                f = fields.join(", "),
-                v = variants.join(", ")
-            ));
+            push_decl(
+                decls,
+                name,
+                &format!(
+                    "{{ kind = \"c_enum\", fields = {{ {f} }}, variants = {{ {v} }} }}",
+                    f = fields.join(", "),
+                    v = variants.join(", ")
+                ),
+            );
         }
     }
 }
 
-/// Register every struct and newtype into `_G.__ROCK_TYPE_TABLE`.
+/// Queue one declaration's constructor source for `_G.__ROCK_TYPE_TABLE`.
+fn push_decl(decls: &mut String, name: &str, source: &str) {
+    let mut level = String::new();
+    while source.contains(&format!("]{level}]")) {
+        level.push('=');
+    }
+    decls.push_str(&format!(
+        "[{}]=[{level}[return {source}]{level}],\n",
+        skull_codegen_lua::lua_string(name)
+    ));
+}
+
+/// Register every struct, newtype and enum declaration. A declaration stays
+/// source text until the first reader asks for it: most types are never
+/// reflected, and building their tables at load costs startup time and heap.
 fn type_table_defs(
     ws: &Workspace,
     gc: &rustc_hash::FxHashSet<ustr::Ustr>,
@@ -1973,6 +2023,7 @@ fn type_table_defs(
     let factories = type_table::json_field_factories(ws);
     let is_gc = |name| gc.contains(&name);
     let mut out = String::from("_G.__ROCK_ENUM_FLAT_LAYOUT = {}\n_G.__ROCK_STRIDED_ROWS = {}\n");
+    let mut decls = String::new();
     for module in ws.modules.iter() {
         for (_, s) in module.structs.iter() {
             let entries = type_table::struct_entries(
@@ -1983,7 +2034,9 @@ fn type_table_defs(
                 &factories,
                 s,
             )?;
-            entries.iter().for_each(|e| type_entry_lua(e, &mut out));
+            entries
+                .iter()
+                .for_each(|e| type_entry_lua(e, &mut out, &mut decls));
         }
         for (_, nt) in module.newtypes.iter() {
             type_entry_lua(
@@ -1991,16 +2044,20 @@ fn type_table_defs(
                     name: skull_mir::mangle::type_symbol(ws, nt.name),
                 },
                 &mut out,
+                &mut decls,
             );
         }
     }
     for module in ws.modules.iter() {
         for (_, e) in module.enums.iter() {
             for entry in type_table::enum_entries(ws, e) {
-                type_entry_lua(&entry, &mut out);
+                type_entry_lua(&entry, &mut out, &mut decls);
             }
         }
     }
+    out.push_str("__rock_type_sources({\n");
+    out.push_str(&decls);
+    out.push_str("})\n");
     Ok(out)
 }
 
