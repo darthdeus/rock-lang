@@ -175,9 +175,8 @@ pub fn check_generic_fn_eq(ws: &mut Workspace) {
             .map(|module| {
                 let mut found = Vec::new();
                 for (mid, owner, body, bi) in module_bodies(ws, module) {
-                    let mut calls: Vec<_> = bi.call_generic_bindings.iter().collect();
-                    calls.sort_unstable_by_key(|(id, _)| id.into_raw().into_u32());
-                    for (&id, bindings) in calls {
+                    let mut rejected = Vec::new();
+                    for (&id, bindings) in &bi.call_generic_bindings {
                         let Some(&callee) = bi.resolved_overload_calls.get(&id) else {
                             continue;
                         };
@@ -188,18 +187,22 @@ pub fn check_generic_fn_eq(ws: &mut Workspace) {
                             .iter()
                             .any(|&j| bindings.get(j).is_some_and(|&ty| is_fn_type(ws, bi, ty)))
                         {
-                            let name = ws.module(callee.0).functions[callee.1].name;
-                            found.push((
-                                mid,
-                                owner,
-                                CompilerError::new_with_label(
-                                    body.expr_spans[id],
-                                    format!(
-                                        "{REJECTION_PREFIX}{name}` compares a generic parameter with `==`/`!=`, but it is instantiated with a fn type here -- fn identity is not meaningful (a capture-free lambda is one shared fn; a capturing lambda is a fresh record per creation). Restructure around explicit keys"
-                                    ),
-                                ),
-                            ));
+                            rejected.push((id, callee));
                         }
+                    }
+                    rejected.sort_unstable_by_key(|(id, _)| id.into_raw().into_u32());
+                    for (id, callee) in rejected {
+                        let name = ws.module(callee.0).functions[callee.1].name;
+                        found.push((
+                            mid,
+                            owner,
+                            CompilerError::new_with_label(
+                                body.expr_spans[id],
+                                format!(
+                                    "{REJECTION_PREFIX}{name}` compares a generic parameter with `==`/`!=`, but it is instantiated with a fn type here -- fn identity is not meaningful (a capture-free lambda is one shared fn; a capturing lambda is a fresh record per creation). Restructure around explicit keys"
+                                ),
+                            ),
+                        ));
                     }
                 }
                 found

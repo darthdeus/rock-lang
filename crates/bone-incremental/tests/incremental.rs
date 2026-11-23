@@ -694,3 +694,36 @@ fn relocation_verdict_follows_an_edit_to_the_callee() {
         assert_eq!(relocations(&session), 0, "{:?}", session.diagnostics());
     }
 }
+
+#[test]
+fn generic_identity_verdicts_follow_edits_to_the_callee() {
+    let clean = "fn same<T>(a: T, b: T) -> bool { return true }";
+    let compares = "fn same<T>(a: T, b: T) -> bool { return a == b }";
+    let caller = "fn make_fn() -> fn() -> int { return () => 1 }\n\
+        fn main() {\n\
+            let first = same(make_fn(), make_fn())\n\
+            let second = same(make_fn(), make_fn())\n\
+        }";
+    let mut h = Harness::new(&[("callee.rock", clean), ("caller.rock", caller)]);
+    h.assert_clean();
+    h.update("callee.rock", compares);
+    let offsets: Vec<_> = h
+        .session
+        .diagnostics()
+        .into_iter()
+        .filter(|e| {
+            e.location.file.as_str() == "caller.rock"
+                && e.message.contains("compares a generic parameter")
+        })
+        .map(|e| e.location.offset)
+        .collect();
+    assert_eq!(
+        offsets,
+        caller
+            .match_indices("same(")
+            .map(|(at, _)| at)
+            .collect::<Vec<_>>()
+    );
+    h.update("callee.rock", clean);
+    h.assert_clean();
+}
