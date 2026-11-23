@@ -1,4 +1,8 @@
 enum BlendMode { Normal, Additive, Multiply }
 
-@test(backends = "lua", output = "1")
-fn a_unit_enum_inspects_as_ordinal() { print(inspect(BlendMode::Additive)) }
+// `inspect` takes `any`, where a payload-free enum is its bare ordinal.
+@test(output = "1 BlendMode::Additive")
+fn a_unit_enum_inspects_as_ordinal() {
+    let mode = BlendMode::Additive
+    print("{inspect(mode)} {mode}")
+}

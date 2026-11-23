@@ -73,6 +73,11 @@ assignment-compatible types and numeric conversions. Contextual type ascription
 supplies a type to the operand: `(expression : Type)`. `::` separates module
 path segments.
 Use `cast<T>` to extract a nominal value from `any`.
+`inspect` takes `any`. A value of an enum whose variants carry no payload is a
+plain number there, so it prints as its ordinal: `inspect(BlendMode::Additive)`
+prints `1`, also as a field or element. Variants of an enum with payloads print
+as `Enum::Variant`, and string interpolation prints the variant name of any
+enum: `"{mode}"` is `BlendMode::Additive`.
 
 ## Function forms and static locals
 
