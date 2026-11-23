@@ -2864,7 +2864,10 @@ impl<'a> Builder<'a> {
             return Ok(vec![self.emit_cur(Inst::Load(self.binds[&raw(b)]))]);
         }
         self.with_value_lending(lend, |s| {
-            let r = s.lower_expr_repr(a)?;
+            let r = match s.json_vec_argument(a, slot)? {
+                Some(value) => value,
+                None => s.lower_expr_repr(a)?,
+            };
             s.snapshot_argument_slot(r, slot)
         })
     }

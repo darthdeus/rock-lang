@@ -73,10 +73,9 @@ pub fn json_encode_job_advance_into(job: JsonEncodeJob, budget: int,
                 Array(items) => {
                     if job.pretty && !scanned {
                         if scan < items.len() {
-                            match items[scan] {
-                                Array(_) => { multiline = true; scanned = true },
-                                Object(_) => { multiline = true; scanned = true },
-                                _ => {}
+                            if json_is_container(items[scan]) {
+                                multiline = true
+                                scanned = true
                             }
                             scan += 1
                         } else { scanned = true }
@@ -86,10 +85,7 @@ pub fn json_encode_job_advance_into(job: JsonEncodeJob, budget: int,
                     } else if index < items.len() {
                         if index > 0 { parts.push(if multiline { ",\n" } else { "," }) }
                         if multiline { parts.push(json_indent(level + 1)) }
-                        let child = items[index]
-                        let used = json_encode_job_leaf(child, parts, budget - spent - 1)
-                        if used == 0 { job.stack.push(JsonEncodeFrame { value: child }) }
-                        spent += used
+                        spent += json_encode_job_child(job, items[index], parts, budget - spent - 1)
                         index += 1
                     } else {
                         if multiline { parts.push("\n" + json_indent(level)) }
@@ -107,10 +103,9 @@ pub fn json_encode_job_advance_into(job: JsonEncodeJob, budget: int,
                     let keys = object_keys.unwrap()
                     if job.pretty && !scanned {
                         if scan < keys.len() {
-                            match values[keys[scan]] {
-                                Array(_) => { multiline = true; scanned = true },
-                                Object(_) => { multiline = true; scanned = true },
-                                _ => {}
+                            if json_is_container(values[keys[scan]]) {
+                                multiline = true
+                                scanned = true
                             }
                             scan += 1
                         } else { scanned = true }
@@ -123,10 +118,7 @@ pub fn json_encode_job_advance_into(job: JsonEncodeJob, budget: int,
                         let key = keys[index]
                         parts.push(encode_string(key))
                         parts.push(if multiline { ": " } else { ":" })
-                        let child = values[key]
-                        let used = json_encode_job_leaf(child, parts, budget - spent - 1)
-                        if used == 0 { job.stack.push(JsonEncodeFrame { value: child }) }
-                        spent += used
+                        spent += json_encode_job_child(job, values[key], parts, budget - spent - 1)
                         index += 1
                     } else {
                         if multiline { parts.push("\n" + json_indent(level)) }
@@ -156,21 +148,25 @@ pub fn json_encode_job_take_output(job: JsonEncodeJob) -> string {
 }
 
 // Charges the same opening/string/closing units as the general cursor path.
-fn json_encode_job_leaf(value: JsonValue, parts: [string], budget: int) -> int {
-    if budget <= 0 { return 0 }
-    match value {
-        Array(_) => return 0,
-        Object(_) => return 0,
-        Str(s) => {
-            if s.len() + 2 > budget || s.len() > 256 { return 0 }
-            parts.push("\"")
-            json_escape_into(s, parts)
-            parts.push("\"")
-            return s.len() + 2
-        },
-        _ => {
-            parts.push(json_encode(value))
-            return 1
+fn json_encode_job_child(job: JsonEncodeJob, value: JsonValue, parts: [string], budget: int) -> int {
+    if budget > 0 {
+        match value {
+            Array(_) => {},
+            Object(_) => {},
+            Str(s) => {
+                if s.len() + 2 <= budget && s.len() <= 256 {
+                    parts.push("\"")
+                    json_escape_into(s, parts)
+                    parts.push("\"")
+                    return s.len() + 2
+                }
+            },
+            _ => {
+                parts.push(json_encode(value))
+                return 1
+            },
         }
     }
+    job.stack.push(JsonEncodeFrame { value })
+    return 0
 }

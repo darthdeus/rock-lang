@@ -105,6 +105,8 @@ enum ImageChoice { Empty, Text(string) }
     nullable: [bool?],
     choice: any,
     empty: any,
+    nodes: [JsonValue],
+    alias: [JsonValue],
 }
 
 inline(lua) fn image_typed_round_trip(value: ImageTypedGraph) -> ImageTypedGraph = """
@@ -129,11 +131,16 @@ inline(lua) fn image_typed_round_trip(value: ImageTypedGraph) -> ImageTypedGraph
 
 @test
 fn data_image_restores_boxed_types_and_enum_singletons() {
+    let nodes = json_as_array(json_decode("[7,7,null]").unwrap()).unwrap()
+    let alias: [JsonValue] = []
+    alias.push(nodes[0])
     let original = ImageTypedGraph {
         label: ImageLabel { text: "image" },
         nullable: [false, null, true],
         choice: ImageChoice::Text("payload"),
         empty: ImageChoice::Empty,
+        nodes,
+        alias,
     }
     let restored = image_typed_round_trip(original)
     assert(restored == original)
@@ -141,6 +148,10 @@ fn data_image_restores_boxed_types_and_enum_singletons() {
     assert_eq(restored.nullable[1], null)
     assert(!same_ref(restored.choice, original.choice))
     assert(same_ref(restored.empty, original.empty))
+    assert(same_ref(restored.nodes[0], restored.alias[0]))
+    assert(!same_ref(restored.nodes[0], original.nodes[0]))
+    assert(!same_ref(restored.nodes[0], restored.nodes[1]))
+    assert_eq(json_encode(json_array(restored.nodes)), "[7,7,null]")
 }
 
 inline(lua) fn image_scalar_cdata_round_trip() -> bool = """

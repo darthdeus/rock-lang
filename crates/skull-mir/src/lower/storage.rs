@@ -6,6 +6,9 @@ use super::*;
 pub const SYNTHESIZED_ENTRIES: &[&str] = &[
     "__arena_store_or_empty",
     "__descriptor_with",
+    "__rock_json_vec_at",
+    "__rock_json_vec_copy",
+    "__rock_json_vec_parts",
     "__map_col_clear",
     "__map_col_contains",
     "__map_col_free",
@@ -50,6 +53,47 @@ struct FlatRow {
 }
 
 impl<'a> Builder<'a> {
+    pub(crate) fn is_compact_json_vec(&self, elem: ColumnElem) -> bool {
+        self.scx.target() == bone_core::hir::FnBackend::Lua && is_json_value(self.ws, elem.name)
+    }
+
+    pub(crate) fn json_vec_argument(
+        &mut self,
+        expr: Idx<Expr>,
+        slot: &RepLayout,
+    ) -> Result<Option<ValueBundle>, CompilerError> {
+        let RepLayout::Leaves(expected) = slot else {
+            return Ok(None);
+        };
+        let Expr::Index { base, index } = self.body.expr_arena[expr] else {
+            return Ok(None);
+        };
+        if !is_json_value(self.ws, expected.name) {
+            return Ok(None);
+        }
+        let Some((elem, FlatStorage::Strided)) = self.vec_flat_elem_of(base)? else {
+            return Ok(None);
+        };
+        if !self.is_compact_json_vec(elem) {
+            return Ok(None);
+        }
+        self.with_site_expr(expr, |s| {
+            let (vec, index, _) = s.index_place(base, index)?;
+            let slot = s.checked_column_index(vec, index);
+            let name = "__rock_json_vec_parts";
+            let func = s.stdlib_funcref(name)?;
+            let cells = s.fresh_cells(2);
+            let (_, leaves) = s.with_site_op(crate::site::SiteOp::Synthesized(name), |s| {
+                s.call_multi(cells, func, vec![vec, slot])
+            });
+            let shape = s.column_shape(elem)?;
+            Ok(Some(ValueBundle::new(
+                elem.representation(),
+                Self::rebuild_from_leaves(&shape, &leaves),
+            )))
+        })
+    }
+
     fn flat_row(&self, elem: ColumnElem, storage: FlatStorage) -> Result<FlatRow, CompilerError> {
         let shape = self.column_shape(elem)?;
         let columns = (storage == FlatStorage::Columns).then(|| column_leaf_paths(&shape));
@@ -71,6 +115,14 @@ impl<'a> Builder<'a> {
         elem: ColumnElem,
         storage: FlatStorage,
     ) -> Result<ValueBundle, CompilerError> {
+        if self.is_compact_json_vec(elem) {
+            let slot = self.checked_column_index(vec, index);
+            let boxed = self.call_spine("__rock_json_vec_at", vec![vec, slot])?;
+            return Ok(ValueBundle::new(
+                elem.representation(),
+                ValueRepr::Scalar(boxed),
+            ));
+        }
         let row = self.flat_row(elem, storage)?;
         let leaves: Vec<_> = match row.columns {
             Some(paths) => {
@@ -273,8 +325,12 @@ impl<'a> Builder<'a> {
             }
             fields
         } else {
-            let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
-            let copied = self.call_spine("__rock_stride_copy", vec![data.unwrap(), len, width])?;
+            let copied = if self.is_compact_json_vec(elem) {
+                self.call_spine("__rock_json_vec_copy", vec![vec])?
+            } else {
+                let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
+                self.call_spine("__rock_stride_copy", vec![data.unwrap(), len, width])?
+            };
             vec![(crate::names::ustr("_data"), copied)]
         };
         let old_header = self.column_header(vec);
@@ -349,7 +405,7 @@ impl<'a> Builder<'a> {
 
     /// A wide `nobox` struct row keeps every leaf as stored: a `false` leaf would
     /// be corrupted by the flat-enum tier's nil-to-false densifying.
-    /// Enum rows are numeric by eligibility and keep the sentinel.
+    /// Eligible enum payloads reserve false for inactive lanes.
     pub(crate) fn strided_stores_raw(&self, elem: ColumnElem) -> bool {
         self.ws.nominals.struct_id(elem.name).is_some()
     }
@@ -430,7 +486,7 @@ impl<'a> Builder<'a> {
                         i
                     };
                     let value = s.read_index(raw, at, ContainerKind::VecStrideSlot);
-                    let value = if s.strided_stores_raw(elem) {
+                    let value = if s.strided_stores_raw(elem) || s.is_compact_json_vec(elem) {
                         ValueRepr::Scalar(value)
                     } else {
                         let leaves = s.cdata_leaves(value, &row.shape)?;
@@ -944,7 +1000,8 @@ impl<'a> Builder<'a> {
                     }
                 } else {
                     let stride = shape.leaf_count();
-                    let leaves = self.repr_to_storage_leaves(&bundle, &shape, "strided insert")?;
+                    let row = self.flat_row(elem, storage)?;
+                    let leaves = self.flat_row_leaves(&row, &bundle, "strided insert")?;
                     let data = self.read_field(vec, crate::names::ustr("_data"));
                     let len = self.read_field(vec, crate::names::ustr("len"));
                     let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
@@ -1474,6 +1531,12 @@ impl<'a> Builder<'a> {
         bundle: &ValueBundle,
         reason: &str,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        if self.is_compact_json_vec(row.elem)
+            && let ValueRepr::Scalar(boxed) = bundle.value()
+        {
+            let inactive = self.emit_cur(Inst::Const(Lit::Bool(false)));
+            return Ok(vec![*boxed, inactive]);
+        }
         let leaves = self.repr_to_storage_leaves(bundle, &row.shape, reason)?;
         let slots = row.width;
         if leaves.len() != slots {

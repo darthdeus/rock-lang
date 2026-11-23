@@ -845,6 +845,19 @@ deco init on_reload {
         if ar ~= br or len ~= (b[0] or b.len) then return false end
         if ar == "strided" then
             if ah.elem ~= bh.elem or ah.stride ~= bh.stride then return false end
+            if ah.elem == "JsonValue" then
+                local ad, bd = a._data, b._data
+                for i = 1, len do
+                    local j = i * 2
+                    local at, bt = ad[j - 1], bd[j - 1]
+                    if type(at) == "table" or type(bt) == "table" then
+                        if not __op_eq(__rock_json_vec_at(a, i), __rock_json_vec_at(b, i)) then return false end
+                    elseif at ~= bt or not __op_eq(ad[j], bd[j]) then
+                        return false
+                    end
+                end
+                return true
+            end
             for i = 1, len * ah.stride do
                 if not __op_eq(a._data[i], b._data[i]) then return false end
             end
@@ -1776,11 +1789,44 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
     return type(h) == "table" and h.repr == "strided"
 """
 
+// A JSON row holds either tag/payload or an observed box. The box becomes the
+// source of truth so another Vec or inline Lua can share the same object.
+@nomangle inline(lua) fn __rock_json_vec_at(vec: any, index: int) -> any = """
+    local data = vec._data
+    local j = index * 2
+    local tag = data[j - 1]
+    if type(tag) == "table" then return tag end
+    local payload = data[j]
+    if payload == false then return __rock_enum_unit("JsonValue", tag) end
+    local box = setmetatable({ __variant = tag, payload }, __rock_box_mts.JsonValue)
+    data[j - 1], data[j] = box, false
+    return box
+"""
+
+@nomangle inline(lua) fn __rock_json_vec_parts(vec: any, index: int) -> (any, any) = """
+    local data = vec._data
+    local j = index * 2
+    local tag = data[j - 1]
+    if type(tag) == "table" then return tag.__variant, tag[1] end
+    local payload = data[j]
+    if payload == false then payload = nil end
+    return tag, payload
+"""
+
+@nomangle inline(lua) fn __rock_json_vec_copy(vec: any) -> any = """
+    local copy = __rock_table_new(vec.len * 2, 0)
+    for i = 1, vec.len do
+        copy[i * 2 - 1], copy[i * 2] = __rock_json_vec_at(vec, i), false
+    end
+    return copy
+"""
+
 @nomangle inline(lua) fn __rock_materialize_strided_element(vec: any, index: int) -> any = """
     local h = rawget(vec, "@vec")
     if type(h) ~= "table" or h.repr ~= "strided" then
         error("expected strided Vec")
     end
+    if h.elem == "JsonValue" then return __rock_json_vec_at(vec, index) end
     local base = (index - 1) * h.stride
     local tag = vec._data[base + 1]
     local unit = __rock_enum_unit(h.elem, tag)

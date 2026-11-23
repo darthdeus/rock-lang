@@ -157,3 +157,92 @@ print("ok")
     ));
     assert_eq!(out, "ok");
 }
+
+#[test]
+fn json_array_rows_materialize_one_box_per_observed_identity() {
+    let lua = emit_module(
+        r#"
+@nomangle fn parse_json_rows(text: string) -> [JsonValue] {
+    return json_as_array(json_decode(text).unwrap()).unwrap()
+}
+
+@nomangle fn copy_json_row(source: [JsonValue], dest: [JsonValue]) {
+    dest.push(source[0])
+}
+
+@nomangle fn read_json_row(items: [JsonValue], index: int) -> any {
+    return items[index]
+}
+
+@nomangle fn expose_json_rows(items: [JsonValue]) -> any {
+    return __rock_vec_to_lua_array(items)
+}
+
+@nomangle fn import_json_rows(items: any, length: int) -> [JsonValue] {
+    return __rock_vec_from_lua_array(items, length)
+}
+
+@nomangle fn clone_json_rows(items: [JsonValue]) -> [JsonValue] {
+    return items.clone()
+}
+
+@nomangle fn first_json_iteration(items: [JsonValue]) -> any? {
+    for item in items { return item }
+    return null
+}
+
+@nomangle fn json_row_int(items: [JsonValue], index: int) -> int {
+    return json_as_int(items[index]).unwrap()
+}
+
+@nomangle fn show_json_rows(items: [JsonValue]) -> string {
+    return json_encode(json_array(items))
+}
+
+struct JsonRowRecord { values: [int] }
+
+@nomangle fn encode_json_row_record() -> [JsonValue] {
+    let wire = json_record_encode(JsonRecordCodec {}, JsonRowRecord { values: [7,8] })
+    return json_as_array(json_field(wire, "values").unwrap()).unwrap()
+}
+"#,
+    );
+    assert_eq!(
+        run_luajit(&format!(
+            r#"{lua}
+local rows = parse_json_rows("[7,7,8,null]")
+local header = rawget(rows, "@vec")
+assert(header and header.repr == "strided", "expected compact JSON rows")
+assert(json_row_int(rows, 0) == 7)
+assert(type(rows._data[1]) == "string", "typed access materialized a row")
+assert(show_json_rows(rows) == "[7,7,8,null]")
+assert(type(rows._data[1]) == "string", "encoding materialized a row")
+local encoded = encode_json_row_record()
+assert(encoded._data[1] == "Int" and show_json_rows(encoded) == "[7,8]")
+local unobserved = parse_json_rows("[9,null]")
+local iterated = first_json_iteration(unobserved)
+assert(rawequal(iterated, read_json_row(unobserved, 0)))
+local displayed = inspect(unobserved, true, -1)
+assert(displayed:match("^Vec {{ JsonValue::Int {{ .+ = 9 }}, JsonValue::Null }}$"), displayed)
+local clone = clone_json_rows(rows)
+local other = parse_json_rows("[]")
+copy_json_row(rows, other)
+local value = read_json_row(rows, 0)
+assert(rawget(value, "__variant") == "Int" and rawget(value, 1) == 7)
+assert(rawequal(value, read_json_row(rows, 0)))
+assert(rawequal(value, first_json_iteration(rows)))
+assert(not rawequal(value, read_json_row(rows, 1)))
+assert(rawequal(value, read_json_row(other, 0)))
+assert(rawequal(value, read_json_row(clone, 0)))
+local exposed = expose_json_rows(rows)
+assert(rawequal(read_json_row(rows, 2), rawget(exposed, 3)))
+assert(rawequal(value, read_json_row(import_json_rows(exposed, 4), 0)))
+value[1] = 11
+assert(json_row_int(rows, 0) == 11 and json_row_int(other, 0) == 11)
+assert(show_json_rows(rows) == "[11,7,8,null]")
+print("ok")
+"#
+        )),
+        "ok"
+    );
+}

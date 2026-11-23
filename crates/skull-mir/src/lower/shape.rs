@@ -22,6 +22,13 @@ pub(crate) fn is_value_struct(ws: &Workspace, name: Ustr) -> bool {
 /// Explicit `nobox` bypasses the leaf budget because boxing is forbidden.
 pub(crate) const MAX_COLUMN_LEAVES: usize = 4;
 
+pub(crate) fn is_json_value(ws: &Workspace, name: Ustr) -> bool {
+    name.as_str() == "JsonValue"
+        && ws.nominals.enum_id(name).is_some_and(|id| {
+            bone_core::modules::is_stdlib_module_file(ws.module(id.module).file.as_str())
+        })
+}
+
 pub(crate) fn dense_flat_enum_vec_eligible(ws: &Workspace, name: Ustr) -> bool {
     fn dense_payload_ty(ws: &Workspace, ty: TyId, visiting: &mut Vec<Ustr>) -> bool {
         match static_ty(ws, ty) {

@@ -70,3 +70,41 @@ fn static_reload_detects_initializer_operator_changes() {
         assert_eq!(result_after_reload(&before, &after), expected);
     }
 }
+
+#[test]
+fn reload_preserves_cached_and_unobserved_json_rows() {
+    let source = r#"
+global ROWS: [JsonValue] = []
+
+@nomangle fn load_rows() {
+    ROWS = json_as_array(json_decode("[7,8]").unwrap()).unwrap()
+}
+
+@nomangle fn get_row() -> any { return ROWS[0] }
+@nomangle fn row_number() -> int { return json_as_int(ROWS[1]).unwrap() + 0 }
+"#;
+    let emit = |source| {
+        emit_full_of(&ws_with_stdlib(source), "JSON array reload")
+            .0
+            .lua
+    };
+    let before = emit(source);
+    let after = emit(&source.replace("+ 0", "+ 1"));
+    assert_eq!(
+        run_luajit(&format!(
+            r#"
+_G.HOT_RELOAD = false
+{before}
+load_rows()
+local held = get_row()
+assert(row_number() == 8)
+_G.HOT_RELOAD = true
+{after}
+assert(rawequal(held, get_row()))
+assert(row_number() == 9)
+print("ok")
+"#
+        )),
+        "ok"
+    );
+}

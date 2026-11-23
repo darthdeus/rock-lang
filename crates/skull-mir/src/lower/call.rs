@@ -2017,7 +2017,10 @@ impl<'a> Builder<'a> {
                         let bundle = self.value_bundle_for_expr(arg, ValueRepr::Scalar(place))?;
                         self.repr_to_slot_values_bundle(&bundle, slot)?
                     } else if slotted {
-                        let bundle = self.lower_expr_repr(arg)?;
+                        let bundle = match self.json_vec_argument(arg, slot)? {
+                            Some(value) => value,
+                            None => self.lower_expr_repr(arg)?,
+                        };
                         let bundle = self.snapshot_call_bundle(bundle)?;
                         self.snapshot_argument_slot(bundle, slot)?
                     } else {

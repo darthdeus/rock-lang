@@ -106,7 +106,12 @@ impl ContainerPlan {
                 crate::monoty::MonoTy::App {
                     ctor: crate::monoty::MonoCtor::Nominal(name),
                     ..
-                } => crate::lower::dense_flat_enum_vec_eligible(ws, *name),
+                } => {
+                    crate::lower::dense_flat_enum_vec_eligible(ws, *name)
+                        || (target == bone_core::hir::FnBackend::Lua
+                            && crate::lower::is_json_value(ws, *name)
+                            && shape.as_ref().is_some_and(|shape| shape.leaf_count() == 2))
+                }
                 _ => false,
             };
         // A column per leaf costs a lookup, bounds check and barrier per leaf, which

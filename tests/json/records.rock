@@ -545,3 +545,29 @@ fn typed_json_records_roundtrip_and_reject_malformed_fields() {
     assert(json_record_decode(codec, wire, source) == null)
     print("ok")
 }
+
+struct TypedIntRow { values: [int] }
+struct TypedFloatRow { values: [float] }
+
+inline(lua) fn row_tag_before_promotion(items: [JsonValue]) -> string? = """
+    local tag = items._data[1]
+    if type(tag) == "string" then return tag end
+"""
+
+@test(backends = "lua")
+fn decode_json_rows_without_losing_callback_identity() {
+    let node = json_decode("{{\"values\":[7]}}").unwrap()
+    let items = json_as_array(json_field(node, "values").unwrap()).unwrap()
+    let plain = json_record_decode<TypedIntRow>(JsonRecordCodec {}, node).unwrap()
+    assert_eq(plain.values[0], 7)
+    assert_eq(row_tag_before_promotion(items), "Int")
+
+    let stored: [any] = []
+    let codec = JsonRecordCodec { decode_float: value => {
+        stored.push(value)
+        json_as_float(value)
+    } }
+    let custom = json_record_decode<TypedFloatRow>(codec, node).unwrap()
+    assert_eq(custom.values[0], 7.0)
+    assert(same_ref(stored[0], items[0]))
+}
