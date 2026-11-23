@@ -285,10 +285,22 @@ impl<'a> Builder<'a> {
         if self.is_nobox_struct(cname) {
             return self.nominal_rep_shape(cname, true);
         }
-        if self.is_value_struct(cname) {
+        if self.is_value_struct(cname) || EnumPlan::for_name(self.ws, cname).is_some() {
             return self.nominal_rep_shape(cname, false);
         }
         Ok(None)
+    }
+
+    /// A record scrutinee projects fields by name, so an enum's leaves stay a
+    /// variant scrutinee.
+    pub(crate) fn inline_record_shape(
+        &self,
+        cname: Ustr,
+    ) -> Result<Option<ValueShape>, CompilerError> {
+        if self.ws.nominals.struct_id(cname).is_none() {
+            return Ok(None);
+        }
+        self.inline_group_shape(cname)
     }
 
     pub(crate) fn embed_group(

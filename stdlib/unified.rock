@@ -2280,11 +2280,20 @@ const EPSILON: float = 0.0000001
     if nullable and t[slots and slots[prefix] or prefix] == nil then return nil end
     local decl = _G.__ROCK_TYPE_TABLE[ty]
     if not decl then return nil end
+    if decl.kind == "enum" then return __rock_flat_enum_view(t, prefix, ty) end
+    if decl.kind == "c_enum" then
+        local args = {}
+        for i = 1, #decl.fields do
+            local key = prefix .. "." .. decl.fields[i].name
+            args[i] = t[slots and slots[key] or key]
+        end
+        return _G[ty .. "_ct"](unpack(args))
+    end
     local o = { __ty = ty }
     for i = 1, #decl.fields do
         local f = decl.fields[i]
         local key = prefix .. "." .. f.name
-        if f.embed then
+        if f.embed or f.leaf then
             o[f.name] = __rock_embed_view(t, key, f.type, f.nullable)
         elseif f.flat then
             o[f.name] = __rock_flat_enum_view(t, key, f.type)

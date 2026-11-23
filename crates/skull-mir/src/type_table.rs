@@ -182,6 +182,9 @@ pub struct FieldEntry {
     pub nullable: bool,
     /// The child's leaves live in the parent under `<name>.<leaf>` keys.
     pub embed: bool,
+    /// Only once this struct is spliced into a holder do the child's leaves
+    /// live under `<name>.<leaf>` keys; standalone it keeps the child whole.
+    pub leaf: bool,
     /// The parent's physical keys of a flattened enum field: tag, then slots.
     pub flat: Option<Vec<Ustr>>,
     pub shape: Option<Shape>,
@@ -385,12 +388,17 @@ pub fn struct_entries(
             }
             _ => (reflect_field_type(ws, f.ty).0, false),
         };
+        let leaf = plan.is_direct()
+            && !crate::lower::struct_field_plan(ws, target, s.name, f.name, true)
+                .map_err(|e| plan_error(e.message))?
+                .is_direct();
         let factory = |op| factories.get(&(s.name, f.name, op)).cloned();
         fields.push(FieldEntry {
             name: f.name,
             ty,
             nullable: plan.nullable(),
             embed,
+            leaf,
             flat: plan.flat_storage_keys(f.name),
             shape: type_shape(ws, f.ty),
             json_name: bone_core::annotations::json_field_name(&f.annotations),

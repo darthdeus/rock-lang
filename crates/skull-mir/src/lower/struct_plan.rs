@@ -314,11 +314,20 @@ pub fn struct_field_plan(
     };
     // Only a cdata parent nests a child whole; a table parent keys an inline
     // child's leaves by dotted path. Leaf-table storage and a value spliced into
-    // its holder keep every planned nested value in leaves as well.
+    // its holder keep every planned nested value, enums included, in leaves.
     let nested_leaves = parent_is_value
         && (spliced || parent_storage == Some(ValueStorage::LeafTable))
-        && child.is_some()
         && super::shape::planned_field_is_nested(ws, sname, field);
+    if (nested_leaves || !parent_is_value)
+        && let Some(shape) =
+            EnumPlan::for_name(ws, child_name).and_then(|plan| plan.flat().cloned())
+    {
+        return Ok(StructFieldPlan::Inline {
+            child: child_name,
+            nullable: false,
+            flat: Some(shape),
+        });
+    }
     if (fdef.is_embed || child.is_some_and(|s| s.is_nobox) || nested_leaves)
         && (spliced || !parent_is_value || parent_storage != Some(ValueStorage::CData))
     {
@@ -327,17 +336,6 @@ pub fn struct_field_plan(
             nullable,
             flat: None,
         });
-    }
-    if !parent_is_value {
-        if let Some(shape) =
-            EnumPlan::for_name(ws, child_name).and_then(|plan| plan.flat().cloned())
-        {
-            return Ok(StructFieldPlan::Inline {
-                child: child_name,
-                nullable: false,
-                flat: Some(shape),
-            });
-        }
     }
     Ok(StructFieldPlan::Direct {
         child: Some(child_name),

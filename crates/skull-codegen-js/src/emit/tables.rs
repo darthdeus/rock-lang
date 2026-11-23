@@ -495,7 +495,7 @@ pub(super) fn nested_field_struct_name(
         .filter(|child| ws.nominals.struct_id(*child).is_some()))
 }
 
-fn nested_field_nominal_name(
+pub(super) fn nested_field_nominal_name(
     ws: &Workspace,
     parent: ustr::Ustr,
     field: &str,
@@ -609,15 +609,20 @@ fn embed_view_expr(
     ty_name: ustr::Ustr,
     nullable: bool,
 ) -> Result<String, CompilerError> {
+    let mut parts = vec![format!(
+        "__ty: {}",
+        js_string_lit(skull_mir::mangle::type_symbol(ws, ty_name).as_str())
+    )];
+    if let Some(view) = enum_leaf_view(ws, ty_name, |leaf| {
+        format!("t[{}]", js_string_lit(&format!("{prefix}.{leaf}")))
+    }) {
+        return Ok(view);
+    }
     let sid = ws
         .nominals
         .struct_id(ty_name)
         .ok_or_else(|| err(format!("embed view `{ty_name}` has no declared struct")))?;
     let s = &ws.module(sid.module).structs[sid.def];
-    let mut parts = vec![format!(
-        "__ty: {}",
-        js_string_lit(skull_mir::mangle::type_symbol(ws, ty_name).as_str())
-    )];
     for f in &s.fields {
         let key = format!("{prefix}.{}", f.name);
         let plan = skull_mir::lower::struct_field_plan(
@@ -651,31 +656,51 @@ fn inline_view_expr(
         return embed_view_expr(ws, prefix, child, nullable).map(Some);
     }
     let skull_mir::lower::StructFieldPlan::Inline {
-        flat: Some(shape), ..
+        child,
+        flat: Some(_),
+        ..
     } = plan
     else {
         return Ok(None);
     };
-    let tag = format!("t[{}]", js_string_lit(&format!("{prefix}.#")));
+    Ok(enum_leaf_view(ws, *child, |leaf| {
+        format!("t[{}]", js_string_lit(&format!("{prefix}.{leaf}")))
+    }))
+}
+
+/// An inline enum rebuilt from its holder's leaves, each read by `leaf`: a
+/// cdata enum as its slot object, a flat enum through `__rock_make_enum`.
+pub(super) fn enum_leaf_view(
+    ws: &Workspace,
+    name: ustr::Ustr,
+    leaf: impl Fn(&str) -> String,
+) -> Option<String> {
+    let plan = skull_mir::lower::EnumPlan::for_name(ws, name)?;
+    let symbol = js_string_lit(skull_mir::mangle::type_symbol(ws, name).as_str());
+    if let Some(cdata) = plan.cdata() {
+        let mut parts = vec![format!("__ty: {symbol}")];
+        for slot in cdata.field_names() {
+            parts.push(format!("{}: {}", js_string_lit(slot.as_str()), leaf(&slot)));
+        }
+        return Some(format!("{{{}}}", parts.join(", ")));
+    }
+    let shape = plan.flat()?;
+    let tag = leaf("#");
     let mut payload = Vec::new();
     for i in 0..shape.tuple_width() {
-        payload.push(format!(
-            "{i}, t[{}]",
-            js_string_lit(&format!("{prefix}.{i}"))
-        ));
+        payload.push(format!("{i}, {}", leaf(&i.to_string())));
     }
     for field in shape.record_fields() {
         payload.push(format!(
-            "{}, t[{}]",
+            "{}, {}",
             js_string_lit(field.as_str()),
-            js_string_lit(&format!("{prefix}.{field}"))
+            leaf(field.as_str())
         ));
     }
-    Ok(Some(format!(
-        "({tag} == null ? null : __rock_make_enum({tag}, {}, [{}]))",
-        js_string_lit(skull_mir::mangle::type_symbol(ws, shape.name()).as_str()),
+    Some(format!(
+        "({tag} == null ? null : __rock_make_enum({tag}, {symbol}, [{}]))",
         payload.join(", ")
-    )))
+    ))
 }
 
 fn build_inspect_ty_defs(

@@ -144,6 +144,31 @@ fn test_inspect_flat_enum_fields() {
     print("{inspect_opaque(e)}")
 }
 
+// A value spliced into its holder keeps nested values and enums as leaves of
+// the holder; reflection rebuilds each one from those leaves.
+value InspectV2 { x: int, y: int }
+enum InspectMode { Idle, Walk(int, int), Run { speed: int } }
+value InspectWrap { inner: InspectV2, mode: InspectMode, sig: InspectSignal, k: int }
+value InspectHost { name: string, embed w: InspectWrap }
+
+@test(output = "InspectHost {{ name = \"a\", w = InspectWrap {{\n  inner = InspectV2 {{ x = 1, y = 2 }},\n  k = 3,\n  mode = InspectMode::Walk {{ [1] = 4, [2] = 5 }},\n  sig = InspectSignal::Named {{ count = 6, text = \"t\" }}\n}} }}\nInspectHost {{ name = \"a\", w = InspectWrap {{\n  inner = InspectV2 {{ x = 7, y = 2 }},\n  k = 3,\n  mode = InspectMode::Run {{ speed = 8 }},\n  sig = InspectSignal::Text {{ [1] = \"u\" }}\n}} }}")
+fn test_inspect_rebuilds_values_nested_in_an_embedded_value() {
+    let h = InspectHost {
+        name: "a",
+        w: InspectWrap {
+            inner: InspectV2 { x: 1, y: 2 },
+            mode: InspectMode::Walk(4, 5),
+            sig: InspectSignal::Named { count: 6, text: "t" },
+            k: 3,
+        },
+    }
+    print("{inspect_opaque(h)}")
+    h.w.inner.x = 7
+    h.w.mode = InspectMode::Run { speed: 8 }
+    h.w.sig = InspectSignal::Text("u")
+    print("{inspect_opaque(h)}")
+}
+
 // A nullable embed nested inside an embedded child owns a presence slot at its
 // composed path (`child.inner`), written by literals and whole-field stores alike.
 @lua_named struct Leaf { v: int }

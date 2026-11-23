@@ -728,7 +728,24 @@ impl Emitter<'_> {
             expr.push_str(&format!(" + {}", js_string_lit(&label)));
             let presence = exact.iter().find(|(f, _)| f == fname).map(|(_, vid)| *vid);
             let leaves = groups.iter().find(|(h, _)| h == fname);
-            let rendered = if let Some((_, sub)) = leaves {
+            let enum_view = match leaves {
+                Some((_, sub)) => match nested_field_nominal_name(self.ws, name, fname)? {
+                    Some(child) => {
+                        let rendered = sub
+                            .iter()
+                            .map(|(leaf, vid)| Ok((leaf.as_str(), self.render_val(*vid)?)))
+                            .collect::<Result<HashMap<_, _>, CompilerError>>()?;
+                        enum_leaf_view(self.ws, child, |leaf| {
+                            rendered.get(leaf).cloned().unwrap_or_else(|| "null".into())
+                        })
+                    }
+                    None => None,
+                },
+                None => None,
+            };
+            let rendered = if let Some(view) = enum_view {
+                format!("inspect({view}, {cyc}, {prec})")
+            } else if let Some((_, sub)) = leaves {
                 // A nullable inline child arrives as its presence under the field
                 // name plus its dotted leaves.
                 let sub_name = nested_field_struct_name(self.ws, name, fname)?.ok_or_else(|| {

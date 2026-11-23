@@ -91,13 +91,8 @@ fn struct_shape_hash(
         )
         .map_err(|e| CompilerError::new_no_location(e.message))?;
         plan.embed().is_some().hash(&mut h);
-        if let Some(child_name) = plan.inline_child() {
-            let sid = ws.nominals.struct_id(child_name).ok_or_else(|| {
-                CompilerError::new_no_location(format!(
-                    "struct `{}` field `{}` has no planned child `{child_name}`",
-                    s.name, f.name
-                ))
-            })?;
+        // An inline enum child hashes under its own name like a boxed one.
+        if let Some(sid) = plan.inline_child().and_then(|c| ws.nominals.struct_id(c)) {
             if !visiting.contains(&s.name) {
                 let child = &ws.modules[sid.module.index()].structs[sid.def];
                 visiting.push(s.name);
@@ -1832,7 +1827,13 @@ fn type_entry_lua(entry: &skull_mir::type_table::Entry, out: &mut String) {
             let fields: Vec<String> = fields
                 .iter()
                 .map(|f| {
-                    let embed = if f.embed { ", embed = true" } else { "" };
+                    let embed = if f.embed {
+                        ", embed = true"
+                    } else if f.leaf {
+                        ", leaf = true"
+                    } else {
+                        ""
+                    };
                     let flat = f
                         .flat
                         .as_ref()

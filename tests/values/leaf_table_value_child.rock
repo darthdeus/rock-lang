@@ -124,3 +124,25 @@ fn embedded_value_writes_nested_leaves() {
     assert_eq(b.w.inner, LrV2 { x: 7, y: 6 })
     assert_eq(b.w.k, 6)
 }
+
+// A leaf-table parent keeps a payload enum child in leaves as well.
+enum LrMode { Idle, Walk(int, int), Run { speed: int } }
+value LrMover { tag: LrId? = null, mode: LrMode, k: int }
+
+fn lr_speed(m: LrMover) -> int {
+    match m.mode {
+        LrMode::Run { speed } => return speed,
+        LrMode::Walk(a, b) => return a + b,
+        _ => return -1,
+    }
+}
+
+@test
+fn leaf_table_enum_child_reads_its_writes() {
+    let m = LrMover { tag: LrId { value: 1 }, mode: LrMode::Walk(2, 3), k: 4 }
+    assert_eq(lr_speed(m), 5)
+    m.mode = LrMode::Run { speed: 9 }
+    assert_eq(lr_speed(m), 9)
+    assert_eq("{m}", "LrMover {{ tag: LrId {{ value: 1 }}, mode: LrMode::Run {{ speed: 9 }}, k: 4 }}")
+    assert_eq(inspect(m), "LrMover {{\n  k = 4,\n  mode = LrMode::Run {{ speed = 9 }},\n  tag = LrId {{ value = 1 }}\n}}")
+}
