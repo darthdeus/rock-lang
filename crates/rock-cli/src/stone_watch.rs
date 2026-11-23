@@ -165,24 +165,34 @@ fn wait_for_reload_resume(
 ) -> Result<()> {
     let acknowledged = control.with_extension("held");
     let mut announced: Option<Vec<u8>> = None;
-    crate::runtime_process::exit_after_game_interrupt(game.as_mut())?;
-    while control.exists() {
+    let mut reported_error = false;
+    loop {
         crate::runtime_process::exit_after_game_interrupt(game.as_mut())?;
-        let requested = match fs_err::read(control) {
-            Ok(bytes) => bytes,
+        let result = match fs_err::read(control) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
-            Err(error) => return Err(error.into()),
+            Err(error) => Err(error),
+            Ok(requested) if announced.as_ref() != Some(&requested) => {
+                fs_err::write(&acknowledged, &requested).map(|()| {
+                    info!("Reloads held by the running game; edits wait until resumed");
+                    announced = Some(requested);
+                })
+            }
+            Ok(_) => Ok(()),
         };
-        if announced.as_ref() != Some(&requested) {
-            fs_err::write(&acknowledged, &requested)?;
-            info!("Reloads held by the running game; edits wait until resumed");
-            announced = Some(requested);
+        if let Err(error) = result {
+            if !reported_error {
+                log::error!("Holding reload while the control files are unavailable: {error}");
+            }
+            reported_error = true;
+        } else {
+            reported_error = false;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    if acknowledged.exists() {
-        fs_err::remove_file(acknowledged)?;
-        info!("Reloads resumed");
+    match fs_err::remove_file(acknowledged) {
+        Ok(()) => info!("Reloads resumed"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => log::warn!("Could not clear the reload acknowledgement: {error}"),
     }
     Ok(())
 }
@@ -1117,6 +1127,28 @@ mod watch_reload_tests {
 #[cfg(test)]
 mod reload_hold_tests {
     use bone_core::prelude::{Duration, Instant};
+
+    #[cfg(unix)]
+    #[test]
+    fn hold_waits_during_a_marker_read_error_and_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let control = dir.path().join("reload.hold");
+        std::os::unix::fs::symlink("reload.hold", &control).unwrap();
+        let path = control.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = super::wait_for_reload_resume(&path, &mut None);
+            tx.send(result).unwrap();
+        });
+
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_millis(150)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        std::fs::remove_file(&control).unwrap();
+        rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+        worker.join().unwrap();
+    }
 
     #[test]
     fn hold_acknowledges_and_waits_until_the_game_resumes() {
