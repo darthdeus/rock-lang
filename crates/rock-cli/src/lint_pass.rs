@@ -80,6 +80,16 @@ pub(crate) fn run_build_lints_cached(
     report(found, sources, root, policy())
 }
 
+#[cfg(feature = "backend-js")]
+pub(crate) fn run_build_lints(
+    ws: &Workspace,
+    sources: &SourceFiles,
+    root: &Path,
+    scope: Scope,
+) -> Vec<CompilerError> {
+    report(findings(ws, sources, root, scope), sources, root, policy())
+}
+
 fn report(
     found: Vec<bone_lints::Finding>,
     sources: &SourceFiles,
@@ -190,7 +200,11 @@ fn owned_files(texts: &FxHashMap<Ustr, &str>, root: &Path) -> FxHashSet<Ustr> {
     texts
         .keys()
         .copied()
-        .filter(|f| Path::new(f.as_str()).starts_with(&owned))
+        .filter(|f| {
+            let file = Path::new(f.as_str());
+            file.starts_with(&owned)
+                || (file.is_relative() && file.canonicalize().is_ok_and(|p| p.starts_with(&owned)))
+        })
         .collect()
 }
 

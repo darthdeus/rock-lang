@@ -101,3 +101,58 @@ parity_tests! {
     js_run_modules_v1_bin_package_runs_main: both_backends_project(MODULES_V1_FILES, "17\n");
     js_run_no_main_is_load_effects_only: both_backends(NO_MAIN, "");
 }
+
+#[test]
+fn js_run_reports_build_lints() {
+    if !crate::support::require_node() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    crate::support::write_files(
+        dir.path(),
+        &[
+            (
+                "stick.toml",
+                "[package]\nname = \"lint_probe\"\ntype = \"bin\"\n",
+            ),
+            (
+                "main.rock",
+                "fn main() {\n    let unused = 1\n    print(17)\n}\n",
+            ),
+        ],
+    );
+    for target in ["./main.rock", "."] {
+        for (flags, expect) in [
+            (&[][..], Some("unused variable `unused`")),
+            (&["--lint-summary"][..], Some("1 unused_var")),
+            (&["--no-lints"][..], None),
+        ] {
+            let out = crate::support::invoke(
+                dir.path(),
+                &[&["run", target, "--backend", "js"], flags].concat(),
+            );
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if let Some(needle) = expect {
+                assert!(stderr.contains(needle), "{target} {flags:?}: {stderr}");
+            } else {
+                assert!(!stderr.contains("unused"), "{target} {flags:?}: {stderr}");
+            }
+            assert_eq!(crate::support::success(out), "17\n");
+        }
+    }
+
+    crate::support::write_files(
+        dir.path(),
+        &[(
+            "main.rock",
+            "fn maybe() -> int? { 1 }\nfn main() {\n    let _x: int = cast(maybe())\n}\n",
+        )],
+    );
+    for target in ["./main.rock", "."] {
+        let out = crate::support::invoke(
+            dir.path(),
+            &["run", target, "--backend", "js", "--no-lints"],
+        );
+        crate::support::failure(out, "`cast` strips nullability");
+    }
+}

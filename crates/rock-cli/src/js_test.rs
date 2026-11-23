@@ -254,7 +254,7 @@ pub(crate) fn js_run(path: &str) -> Result<()> {
         emit_js_program_project(path)
     } else {
         emit_js_program_single(path)
-    };
+    }?;
 
     let program = build_run_program(&emitted);
     match crate::js_runner::run_node_code_streaming(&program) {
@@ -267,65 +267,35 @@ pub(crate) fn js_run(path: &str) -> Result<()> {
     }
 }
 
-fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
-    let src = match fs_err::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            log::error!(target: "JS", "cannot read {}: {}", path, e);
-            crate::invocation_log::exit(1);
-        }
+fn emit_js_program_single(path: &str) -> Result<skull_codegen_js::emit::JsProgram> {
+    let src = fs_err::read_to_string(path)?;
+    let render = |errors: &[rock_core::CompilerError]| {
+        anyhow::anyhow!(
+            "{}",
+            crate::skull_backend::render_file_errs(path, &src, errors)
+        )
     };
-    let user = match skull_parser::parse_module(&src, ustr::Ustr::from(path)) {
-        Ok(u) => u,
-        Err(e) => {
-            eprintln!(
-                "{}",
-                crate::skull_backend::render_file_errs(path, &src, &[e])
-            );
-            crate::invocation_log::exit(1);
-        }
-    };
+    let user =
+        skull_parser::parse_module(&src, ustr::Ustr::from(path)).map_err(|e| render(&[e]))?;
     let user_file = user.file;
-    let mut ws = match crate::bone_backend::check_with_stdlib([user]) {
-        Ok(ws) => ws,
-        Err(errs) => {
-            eprintln!(
-                "{}",
-                crate::skull_backend::render_file_errs(path, &src, &errs)
-            );
-            crate::invocation_log::exit(1);
-        }
-    };
-    // Single-file runs resolve from the file's enclosing project (walk-up), so
-    // a file inside a [build.vars] project behaves the same on both backends.
-    if let Err(e) = crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(path)) {
-        log::error!(target: "JS", "build var resolution failed for {}: {:#}", path, e);
-        crate::invocation_log::exit(1);
+    let mut ws =
+        crate::bone_backend::check_with_stdlib([user]).map_err(|errors| render(&errors))?;
+    crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(path))?;
+    let (sources, root) = crate::lint_pass::single_file_scope(path, &src);
+    let errors = crate::lint_pass::run_build_lints(
+        &ws,
+        &sources,
+        &root,
+        crate::lint_pass::Scope::WholeProject,
+    );
+    if !errors.is_empty() {
+        return Err(render(&errors));
     }
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
-    match skull_codegen_js::emit::emit_program(&ws, user_mid) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!(
-                "{}",
-                crate::skull_backend::render_file_errs(path, &src, &[e])
-            );
-            crate::invocation_log::exit(1);
-        }
-    }
+    skull_codegen_js::emit::emit_program(&ws, user_mid).map_err(|e| render(&[e]))
 }
 
-fn emit_js_program_project(dir: &str) -> skull_codegen_js::emit::JsProgram {
-    match try_emit_js_program_project(dir) {
-        Ok(emitted) => emitted,
-        Err(e) => {
-            eprintln!("{e}");
-            crate::invocation_log::exit(1);
-        }
-    }
-}
-
-fn try_emit_js_program_project(dir: &str) -> Result<skull_codegen_js::emit::JsProgram> {
+fn emit_js_program_project(dir: &str) -> Result<skull_codegen_js::emit::JsProgram> {
     // A game builds without its tests, like the luajit compile.
     let is_game =
         rock_engine_host::project::is_game_project(std::path::Path::new(dir)).unwrap_or(false);
@@ -338,6 +308,18 @@ fn try_emit_js_program_project(dir: &str) -> Result<skull_codegen_js::emit::JsPr
         )
     })?;
     crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(dir))?;
+    let scope = if is_game {
+        crate::lint_pass::Scope::ProductionOnly
+    } else {
+        crate::lint_pass::Scope::WholeProject
+    };
+    let errors = crate::lint_pass::run_build_lints(&ws, &sources, std::path::Path::new(dir), scope);
+    if !errors.is_empty() {
+        anyhow::bail!(
+            "{}",
+            crate::skull_backend::render_project_errs(&sources, &errors)
+        );
+    }
     let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
     skull_codegen_js::emit::emit_program(&ws, user_mid)
         .map_err(|e| anyhow::anyhow!("{}", crate::skull_backend::render_project_err(&sources, &e)))
