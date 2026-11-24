@@ -392,3 +392,39 @@ fn flat_enum_presence_only_reads_the_tag() {
     assert(!signal_is_absent(holder))
     assert(signal_is_present(holder))
 }
+
+enum SignalWithList { Quiet, Active([int]) }
+struct ListSignalHolder { sig: SignalWithList? }
+
+global LIST_SIGNAL_READS: int = 0
+
+@noalloc
+fn read_list_signal(holder: ListSignalHolder) -> ListSignalHolder {
+    LIST_SIGNAL_READS += 1
+    return holder
+}
+
+@noalloc
+fn signal_is_quiet(holder: ListSignalHolder) -> bool {
+    return SignalWithList::Quiet == read_list_signal(holder).sig
+}
+
+@noalloc
+fn signal_is_not_quiet(holder: ListSignalHolder) -> bool {
+    return read_list_signal(holder).sig != SignalWithList::Quiet
+}
+
+@test
+fn flat_enum_unit_equality_only_reads_the_tag() {
+    LIST_SIGNAL_READS = 0
+    let holder = ListSignalHolder { sig: null }
+    assert(!signal_is_quiet(holder))
+    assert(signal_is_not_quiet(holder))
+    holder.sig = SignalWithList::Quiet
+    assert(signal_is_quiet(holder))
+    assert(!signal_is_not_quiet(holder))
+    holder.sig = SignalWithList::Active([123])
+    assert(!signal_is_quiet(holder))
+    assert(signal_is_not_quiet(holder))
+    assert_eq(LIST_SIGNAL_READS, 6)
+}

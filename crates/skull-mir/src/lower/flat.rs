@@ -235,6 +235,24 @@ impl<'a> Builder<'a> {
         Ok(self.struct_field_plan(owner, field, false)?.flat_shape())
     }
 
+    pub(super) fn lower_flat_enum_field_tag(
+        &mut self,
+        expr: Idx<Expr>,
+        expected_layout: Option<Ustr>,
+    ) -> Result<Option<Idx<Inst>>, CompilerError> {
+        let Expr::FieldAccess { base, field } = self.body.expr_arena[expr] else {
+            return Ok(None);
+        };
+        let Some(shape) = self.flat_enum_field(base, field)? else {
+            return Ok(None);
+        };
+        if expected_layout.is_some_and(|layout| layout != shape.name) {
+            return Ok(None);
+        }
+        let parent = self.lower_expr(base)?;
+        Ok(Some(self.read_field(parent, flat_tag_slot(field))))
+    }
+
     pub(crate) fn flat_enum_value_shape_of(
         &self,
         e: Idx<Expr>,

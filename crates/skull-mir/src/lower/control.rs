@@ -480,11 +480,8 @@ impl<'a> Builder<'a> {
                         return Ok(self.lower_presence_test(op, present, condition));
                     }
                     if self.expr_is_flat_enum(v) {
-                        let tag = if let Expr::FieldAccess { base, field } = self.body.expr_arena[v]
-                            && self.flat_enum_field(base, field)?.is_some()
-                        {
-                            let parent = self.lower_expr(base)?;
-                            self.read_field(parent, flat_tag_slot(field))
+                        let tag = if let Some(tag) = self.lower_flat_enum_field_tag(v, None)? {
+                            tag
                         } else {
                             match self.lower_expr_repr(v)?.into_value() {
                                 ValueRepr::Group { parts, .. } => self.pack(
@@ -506,6 +503,9 @@ impl<'a> Builder<'a> {
                     }
                 }
                 if let Some(test) = self.cdata_enum_unit_eq(op, lhs, rhs)? {
+                    return Ok(test);
+                }
+                if let Some(test) = self.flat_enum_field_unit_eq(op, lhs, rhs)? {
                     return Ok(test);
                 }
                 if let (Some(ln), Some(rn)) =
@@ -697,6 +697,37 @@ impl<'a> Builder<'a> {
             BinOp::Or => self.lower_short_circuit(lhs, rhs, condition, false),
             BinOp::NullCoalesce => self.lower_nullcoalesce(lhs, rhs),
         }
+    }
+
+    fn flat_enum_field_unit_eq(
+        &mut self,
+        op: BinOp,
+        lhs: Idx<Expr>,
+        rhs: Idx<Expr>,
+    ) -> Result<Option<Idx<Inst>>, CompilerError> {
+        let unit = |e: Idx<Expr>| match self.body.expr_arena[e] {
+            Expr::EnumVariant {
+                enum_name,
+                variant,
+                args: VariantArgs::Unit,
+                ..
+            } => Some((self.literal_layout(e, enum_name), variant)),
+            _ => None,
+        };
+        let (value, (layout, variant)) = match (unit(lhs), unit(rhs)) {
+            (_, Some(unit)) => (lhs, unit),
+            (Some(unit), None) => (rhs, unit),
+            (None, None) => return Ok(None),
+        };
+        let Some(tag) = self.lower_flat_enum_field_tag(value, Some(layout))? else {
+            return Ok(None);
+        };
+        let want = self.emit_cur(Inst::Const(Lit::Str(variant)));
+        Ok(Some(self.emit_cur(if matches!(op, BinOp::Eq) {
+            Inst::Eq(tag, want)
+        } else {
+            Inst::NotEq(tag, want)
+        })))
     }
 
     /// A payload-free variant's cdata has zeroed payload slots, so a value equals
