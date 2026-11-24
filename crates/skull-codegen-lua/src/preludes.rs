@@ -423,7 +423,10 @@ function __rock_nb_alloc(ctype, n)
   -- inherited float can exhaust x86 side-trace register coalescing.
   if not (n * e.size >= __ROCK_NB_OFFHEAP_MIN) then
     local array = e.array(n)
-    __rock_nb_array_bytes[array] = math.max(math.floor(n), 0) * e.size
+    -- Opaque Lua can pass counts that FFI coerces to a different integer.
+    if n >= 0 and n <= 0x7fffffff and n == math.floor(n) then
+      __rock_nb_array_bytes[array] = n * e.size
+    end
     return array
   end
   local bytes = n * e.size
