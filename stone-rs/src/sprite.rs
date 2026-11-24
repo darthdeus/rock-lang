@@ -163,6 +163,7 @@ unsafe fn stream_vertices(gl: &DebugGl, data: &[u8]) -> Result<(), String> {
     gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, data, glow::STREAM_DRAW)
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_sprite_init() -> bool {
     if initialized() {
@@ -220,6 +221,7 @@ pub(crate) fn shutdown() {
     });
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_current_shader_bound() -> bool {
     CURRENT_SHADER.with(|c| c.borrow().is_some())
@@ -271,8 +273,9 @@ fn draw_rect(u0: f32, v0: f32, u1: f32, v1: f32, before_draw: impl FnOnce(&Debug
     })
 }
 
-/// Draw the caller-resolved corner UV mapping. Culling must be disabled because
-/// backends wind their triangles in opposite directions.
+/// Map (u0,v0) to NDC (-1,-1) and (u1,v1) to NDC (+1,+1). Disable
+/// culling because backends wind their triangles in opposite directions.
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_draw_fullscreen_rect(u0: c_float, v0: c_float, u1: c_float, v1: c_float) {
     let uv = [u0 as f64, v0 as f64, u1 as f64, v1 as f64];
