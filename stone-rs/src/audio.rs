@@ -35,6 +35,7 @@ fn audio_device_disabled() -> bool {
     })
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_audio_stub_active() -> bool {
     stub_audio()
@@ -57,6 +58,7 @@ fn output_muted_from(quiet: Option<&str>, headless: Option<&str>, run_sim: Optio
 }
 
 /// Latched at process start, so a mid-run `os_setenv` cannot make a sim audible.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_audio_quiet_env() -> bool {
     output_muted()
@@ -909,6 +911,7 @@ fn open_audio_output() -> Result<MixerDeviceSink, rodio::DeviceSinkError> {
         })
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_audio_init() -> bool {
     AUDIO_STATE.with(|state| {
@@ -943,6 +946,7 @@ pub extern "C" fn stone_audio_init() -> bool {
     })
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_audio_quit() {
     AUDIO_STATE.with(|state| {
@@ -1064,6 +1068,7 @@ fn load_sound_recipe(
     })
 }
 
+/// rock-ffi stone rename:sample_rate=rate
 #[no_mangle]
 pub extern "C" fn stone_load_sound_deferred(
     path: *const c_char,
@@ -1074,6 +1079,7 @@ pub extern "C" fn stone_load_sound_deferred(
     load_sound_recipe(path, frames, sample_rate, channels, false)
 }
 
+/// rock-ffi stone rename:sample_rate=rate
 #[no_mangle]
 pub extern "C" fn stone_load_sound_stream(
     path: *const c_char,
@@ -1084,6 +1090,7 @@ pub extern "C" fn stone_load_sound_stream(
     load_sound_recipe(path, frames, sample_rate, channels, true)
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_sound_admit(handle: u64) -> bool {
     if stub_audio() {
@@ -1102,6 +1109,7 @@ pub extern "C" fn stone_sound_admit(handle: u64) -> bool {
     .unwrap_or(false)
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_service_sound_admissions() -> i64 {
     let completed: Vec<SoundAdmissionResult> = {
@@ -1179,6 +1187,7 @@ pub extern "C" fn stone_service_sound_admissions() -> i64 {
     published
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_sound_decode_sync(handle: u64) -> i64 {
     let path = with_sound(handle, |sound| {
@@ -1214,12 +1223,14 @@ pub extern "C" fn stone_sound_decode_sync(handle: u64) -> i64 {
     }
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_sound_resident(handle: u64) -> bool {
     with_sound(handle, |sound| sound.samples().is_some()).unwrap_or(false)
 }
 
 /// Admitted for playback: resident PCM, or a stream source's encoded file.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_sound_playable(handle: u64) -> bool {
     with_sound(handle, SoundData::playable).unwrap_or(false)
@@ -1227,6 +1238,7 @@ pub extern "C" fn stone_sound_playable(handle: u64) -> bool {
 
 /// Encoded bytes a stream source holds (0 before admission), or -1 for a
 /// handle that is not a live stream source.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_sound_stream_bytes(handle: u64) -> i64 {
     with_sound(handle, |sound| match &sound.state {
@@ -1237,6 +1249,7 @@ pub extern "C" fn stone_sound_stream_bytes(handle: u64) -> i64 {
     .unwrap_or(-1)
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_reload_sound(handle: u64, path: *const c_char) -> bool {
     if handle == 0 {
@@ -1266,6 +1279,7 @@ pub extern "C" fn stone_reload_sound(handle: u64, path: *const c_char) -> bool {
 
 /// How many decoded samples one sound holds NOW. Zero means the recipe exists
 /// without PCM; -1 means the handle is not live.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_sound_sample_count(handle: u64) -> i64 {
     with_sound(handle, |sound| {
@@ -1274,6 +1288,7 @@ pub extern "C" fn stone_sound_sample_count(handle: u64) -> i64 {
     .unwrap_or(-1)
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_music_position_ms() -> i64 {
     with_audio(|audio| {
@@ -1283,6 +1298,7 @@ pub extern "C" fn stone_music_position_ms() -> i64 {
     .unwrap_or(-1)
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_load_music(path: *const c_char) -> u64 {
     let Some(path_str) = (unsafe { crate::filesystem::cstr(path) }) else {
@@ -1331,6 +1347,7 @@ pub(crate) fn live_music_ids() -> Vec<u64> {
 
 /// Encoded bytes one music track holds, for the asset report's CPU column.
 /// -1 for a handle that is not live.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_music_byte_len(handle: u64) -> i64 {
     with_audio(|audio| audio.music.get(&handle).map(|bytes| bytes.len() as i64)).unwrap_or(-1)
@@ -1341,6 +1358,7 @@ pub(crate) fn live_voice_ids() -> Vec<u64> {
     with_audio(|audio| Some(audio.voices.keys().copied().collect())).unwrap_or_default()
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_music_playing_handle() -> u64 {
     with_audio(|audio| audio.music_playback.as_ref().map(|p| p.handle)).unwrap_or(0)
@@ -1352,6 +1370,7 @@ fn stop_music_playback(playback: &mut Option<MusicPlayback>) {
     }
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_unload_music(handle: u64) -> bool {
     with_audio_mut(|audio| {
@@ -1373,6 +1392,7 @@ pub extern "C" fn stone_unload_music(handle: u64) -> bool {
 
 /// Free a loaded sound, stopping its playing voices first so a hot-reloaded
 /// file does not keep playing the old samples. False if the handle was absent.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_unload_sound(handle: u64) -> bool {
     with_audio_mut(|audio| {
@@ -1534,6 +1554,7 @@ fn stop_voices_of(voices: &mut HashMap<u64, Voice>, sound: u64) {
 
 /// Returns the voice id, or 0. Nonzero ids are never reused, so a stale id cannot address
 /// a later voice.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_play_sound(
     handle: u64,
@@ -1590,6 +1611,7 @@ pub extern "C" fn stone_play_sound(
     .unwrap_or(0)
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_get_sound_duration(handle: u64) -> c_float {
     with_sound(handle, SoundData::duration_seconds).unwrap_or(0.0)
@@ -1600,6 +1622,7 @@ pub extern "C" fn stone_get_sound_duration(handle: u64) -> c_float {
 ///
 /// # Safety
 /// `out` must point to at least `buckets` writable `f32`s.
+/// rock-ffi stone
 #[no_mangle]
 pub unsafe extern "C" fn stone_get_sound_peaks(
     handle: u64,
@@ -1636,6 +1659,7 @@ pub unsafe extern "C" fn stone_get_sound_peaks(
     .unwrap_or(0)
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_stop_sound(handle: u64) {
     with_audio_mut(|audio| stop_voices_of(&mut audio.voices, handle));
@@ -1643,6 +1667,7 @@ pub extern "C" fn stone_stop_sound(handle: u64) {
 
 /// Map membership, not `Player::empty()`: rodio's `stop()` drains on the audio thread
 /// later, so an empty()-based answer would race our own stops.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_voice_active(voice: u64) -> bool {
     with_voice(voice, |_| ()).is_some()
@@ -1650,6 +1675,7 @@ pub extern "C" fn stone_voice_active(voice: u64) -> bool {
 
 /// Stop one voice, leaving every sibling voice of the same asset playing.
 /// False if the voice was already gone (idempotent).
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_voice_stop(voice: u64) -> bool {
     with_audio_mut(|audio| {
@@ -1665,12 +1691,14 @@ pub extern "C" fn stone_voice_stop(voice: u64) -> bool {
 
 /// Per-voice gain, composed with the global SFX volume. Takes effect within
 /// rodio's 5ms control tick. False for an unknown/dead voice.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_voice_set_gain(voice: u64, gain: c_float) -> bool {
     with_voice(voice, |v| v.player.set_volume(gain.max(0.0))).is_some()
 }
 
 /// Change a spatial voice at the next stereo frame without restarting it.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_voice_set_pan(voice: u64, pan: c_float) -> bool {
     if !pan.is_finite() {
@@ -1687,11 +1715,13 @@ pub extern "C" fn stone_voice_set_pan(voice: u64, pan: c_float) -> bool {
 
 /// Playback rate: resamples, so pitch and duration move together.
 /// False for an unknown/dead voice.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_voice_set_speed(voice: u64, speed: c_float) -> bool {
     with_voice(voice, |v| v.player.set_speed(speed.max(0.01))).is_some()
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_play_music(handle: u64) {
     with_audio_mut(|audio| {
@@ -1724,22 +1754,26 @@ pub extern "C" fn stone_play_music(handle: u64) {
 
 /// Target gain for a bus. Slewed sample-side over ~10ms, so a per-frame
 /// stepped value from Rock does not zipper. False for an unknown bus.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_bus_set_gain(bus: u32, gain: c_float) -> bool {
     with_bus(bus, |b| b.set_gain(gain))
 }
 
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_bus_samples_pulled(bus: u32) -> u64 {
     read_bus(bus, 0, Bus::samples_pulled)
 }
 
 /// Reading clears the hold, so this is single-consumer.
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_bus_peak(bus: u32) -> c_float {
     read_bus(bus, 0.0, Bus::meter)
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_bus_set_lowpass(bus: u32, cutoff_hz: c_float, q: c_float) -> bool {
     with_bus(bus, |b| b.set_lowpass(cutoff_hz, q))
@@ -1747,11 +1781,13 @@ pub extern "C" fn stone_bus_set_lowpass(bus: u32, cutoff_hz: c_float, q: c_float
 
 /// Distortion insert. `drive` >= 1 into a soft clipper, `mix` 0..1 against
 /// dry -- mix 0 is transparent.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_bus_set_distortion(bus: u32, drive: c_float, mix: c_float) -> bool {
     with_bus(bus, |b| b.set_distortion(drive, mix))
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_bus_set_reverb(
     bus: u32,
@@ -1767,6 +1803,7 @@ pub extern "C" fn stone_bus_set_reverb(
     })
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_bus_duck(
     bus: u32,
@@ -1804,6 +1841,7 @@ fn with_audio_mut<T>(f: impl FnOnce(&mut AudioState) -> T) -> Option<T> {
     AUDIO_STATE.with(|state| state.borrow_mut().as_mut().map(f))
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_set_reverb(
     enabled: bool,
