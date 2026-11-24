@@ -1563,21 +1563,24 @@ fn body_edit_relocates_lua_debug_lines() {
 fn earlier(x: int) -> int { x + 1 }
 fn main() { print(earlier(1), WITHOUT_VALUE) }
 "#;
-    let edited = original.replace("x + 1", "\n    return x + 1\n");
-    let mut live = ProjectFixture::boot(original);
-    live.edit(&edited).unwrap();
-    let fresh_main = live.path("fresh.lua");
-    let fresh_overlay = live.path("fresh-overlay.lua");
-    super::IncrementalProject::init(
-        live.dir.path().to_str().unwrap(),
-        &fresh_main,
-        &fresh_overlay,
-    )
-    .unwrap();
-    assert_eq!(
-        live.main_text(),
-        std::fs::read_to_string(fresh_main).unwrap()
-    );
+    let same_line = original.replace("}\nfn main", "} fn main");
+    for source in [original, same_line.as_str()] {
+        let edited = source.replace("x + 1", "\n    return x + 1\n");
+        let mut live = ProjectFixture::boot(source);
+        live.edit(&edited).unwrap();
+        let fresh_main = live.path("fresh.lua");
+        let fresh_overlay = live.path("fresh-overlay.lua");
+        super::IncrementalProject::init(
+            live.dir.path().to_str().unwrap(),
+            &fresh_main,
+            &fresh_overlay,
+        )
+        .unwrap();
+        assert!(
+            live.main_text() == std::fs::read_to_string(fresh_main).unwrap(),
+            "warm debug positions diverged from a cold build"
+        );
+    }
 }
 
 #[test]

@@ -1552,10 +1552,17 @@ impl Session {
         // function early.
         let at = old_fn_span.offset_range().1;
         let (byte_delta, line_delta) = (edit.byte_delta, edit.line_delta);
-        // Moving spans does not update strings derived from their old line.
-        if line_delta != 0 && self.reads_source_lines_after(mid, at) {
+        let moved_from = (line_delta != 0).then_some(at);
+        let same_line_sibling = self.files[path]
+            .item_prints
+            .get(changed_idx + 1)
+            .is_some_and(|next| next.item_span.line_range().0 == f.span.line_range().1);
+        // The span shift only preserves columns on later lines and does not
+        // update strings derived from an old source line.
+        if same_line_sibling || moved_from.is_some_and(|at| self.reads_source_lines_after(mid, at))
+        {
             let module = self.parse_stored(file)?;
-            return self.rebuild_module(path, module, &[changed_idx], Some(at));
+            return self.rebuild_module(path, module, &[changed_idx], moved_from);
         }
 
         let old_inf = self.take_inference(mid);
