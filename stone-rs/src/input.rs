@@ -237,6 +237,7 @@ impl SdlControllerManager {
     }
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_pad_connected() -> bool {
     with_window(|window| !window.controller_manager.borrow().controllers.is_empty())
@@ -296,6 +297,7 @@ fn drive_virtual_pad(
     }
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_test_virtual_pad_attach() -> c_int {
     if with_window(|_| ()).is_none() {
@@ -318,6 +320,7 @@ pub extern "C" fn stone_test_virtual_pad_attach() -> c_int {
     index
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_test_virtual_pad_button(
     index: c_int,
@@ -334,6 +337,7 @@ pub extern "C" fn stone_test_virtual_pad_button(
     )
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_test_virtual_pad_axis(
     index: c_int,
@@ -350,6 +354,7 @@ pub extern "C" fn stone_test_virtual_pad_axis(
     })
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_test_virtual_pad_detach(index: c_int) -> bool {
     let result = unsafe { sdl2::sys::SDL_JoystickDetachVirtual(index) } == 0;
@@ -439,6 +444,7 @@ pub extern "C" fn stone_scancode_token_for(scancode: c_int) -> *const c_char {
         .unwrap_or(ptr::null())
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_scancode_value(token: *const c_char) -> c_int {
     if token.is_null() {
@@ -477,6 +483,7 @@ pub extern "C" fn stone_scancode_label(token: *const c_char) -> *const c_char {
     })
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_is_key_down(key: *const c_char) -> bool {
     if key.is_null() {
@@ -541,6 +548,7 @@ pub(crate) fn canonical_scancode(name: &str) -> Option<sdl2::keyboard::Scancode>
     })
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_get_mouse_position(x: *mut c_int, y: *mut c_int) {
     with_window(|window: &StoneWindow| {
@@ -551,6 +559,7 @@ pub extern "C" fn stone_get_mouse_position(x: *mut c_int, y: *mut c_int) {
     });
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_get_global_mouse_position(x: *mut c_int, y: *mut c_int) {
     // SDL2 crate wraps this differently, using regular position for now

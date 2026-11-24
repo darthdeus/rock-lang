@@ -120,6 +120,7 @@ static IMGUI_GL_BACKEND_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 static LAST_VTX_COUNT: AtomicI32 = AtomicI32::new(-1);
 
+/// rock-ffi stone-rendering rename:_window=window
 #[no_mangle]
 pub extern "C" fn stone_imgui_init(_window: *mut StoneWindow) -> bool {
     IMGUI_INITIALIZED.store(false, Ordering::SeqCst);
@@ -193,6 +194,7 @@ pub extern "C" fn stone_imgui_shutdown() {
     IMGUI_GL_BACKEND_INITIALIZED.store(false, Ordering::SeqCst);
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_imgui_new_frame() {
     if !IMGUI_INITIALIZED.load(Ordering::SeqCst) {
@@ -237,6 +239,7 @@ unsafe fn feed_window_relative_pointer(window: *mut sdl2::sys::SDL_Window) {
     }
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_imgui_render() {
     let draw_data = stone_imgui_prepare_render();
@@ -250,6 +253,7 @@ pub extern "C" fn stone_imgui_render() {
 
 /// Finish the ImGui frame and return its stable draw-data pointer to the
 /// selected renderer. The pointer remains valid until the next NewFrame.
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_imgui_prepare_render() -> *mut c_void {
     if !IMGUI_INITIALIZED.load(Ordering::SeqCst) {
@@ -276,11 +280,13 @@ unsafe fn record_draw_data(draw_data: *mut ImDrawData) {
     LAST_VTX_COUNT.store((*draw_data).total_vtx_count, Ordering::SeqCst);
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_imgui_last_vtx_count() -> c_int {
     LAST_VTX_COUNT.load(Ordering::SeqCst)
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_imgui_initialized() -> bool {
     IMGUI_INITIALIZED.load(Ordering::SeqCst)

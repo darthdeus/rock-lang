@@ -44,6 +44,7 @@ fn store_cursor(cursor: Cursor) -> u64 {
     id
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_show_cursor(show: bool) {
     CURSOR_VISIBLE.store(show, Ordering::SeqCst);
@@ -76,6 +77,7 @@ pub fn reapply_cursor_state() {
 
 /// Create a cursor from an asset path or image file. Returns cursor_id (0 = error).
 /// hot_x/hot_y is the click point relative to the top-left of the image.
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_create_cursor(path: *const c_char, hot_x: c_int, hot_y: c_int) -> u64 {
     if path.is_null() {
@@ -95,6 +97,7 @@ fn decode_cursor_image(path_str: &str) -> Option<(Vec<u8>, u32, u32)> {
     crate::image_texture::decode_rgba_image(path_str)
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_set_system_cursor(cursor_type: c_int) -> u64 {
     let system = match cursor_type {
@@ -125,6 +128,7 @@ pub extern "C" fn stone_set_system_cursor(cursor_type: c_int) -> u64 {
     }
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_set_cursor(cursor_id: u64) {
     CURSORS.with(|c| {
@@ -137,6 +141,7 @@ pub extern "C" fn stone_set_cursor(cursor_id: u64) {
     });
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_reset_cursor() {
     set_default_cursor();
@@ -149,6 +154,7 @@ pub(crate) fn live_cursor_ids() -> Vec<u64> {
 }
 
 /// Reset the active cursor before freeing it: SDL may still hold its pointer.
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_free_cursor(cursor_id: u64) {
     if DESIRED_CURSOR.load(Ordering::SeqCst) == cursor_id {
