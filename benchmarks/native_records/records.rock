@@ -1,0 +1,293 @@
+enum Kind { Idle, Moving, Sleeping }
+
+struct TableRow {
+    x: float, y: float, vx: float, vy: float,
+    health: int, age: int, team: int, energy: int, id: int,
+    kind: Kind, active: bool, grounded: bool,
+}
+
+value NativeRow {
+    x: float, y: float, vx: float, vy: float,
+    health: int, age: int, team: int, energy: int, id: int,
+    kind: Kind, active: bool, grounded: bool,
+}
+
+fn generation(slot: int) -> int { return 1 + (slot & 3) }
+
+macro row_at(Row: ident, slot: expr, seed: expr) {
+    Row {
+        x: (seed & 127) * 0.5, y: (seed & 63) * 0.25,
+        vx: (1 + (seed & 7)) * 0.125, vy: (seed & 3) * 0.125,
+        health: 50 + (seed & 31), age: seed & 15,
+        team: seed & 3, energy: 100 - (seed & 7),
+        id: slot | ((generation(slot) + (if (slot & 7) == 0 { 1 } else { 0 })) << 17),
+        kind: if (seed & 3) == 0 { Kind::Sleeping } else if (seed & 3) == 1 { Kind::Idle } else { Kind::Moving },
+        active: (seed & 3) != 2, grounded: (seed & 15) < 9,
+    }
+}
+
+fn table_rows(n: int) -> [TableRow] {
+    let rows: [TableRow] = vec_new_with_capacity(n + 1)
+    for i in 0..n { rows.push(row_at(TableRow, i, i)) }
+    return rows
+}
+
+fn native_rows(n: int) -> NativeBuffer<NativeRow> {
+    let rows: NativeBuffer<NativeRow> = native_buffer_alloc(n)
+    for i in 0..n { rows[i] = row_at(NativeRow, i, i) }
+    return rows
+}
+
+fn native_flat(n: int) -> FlatVec<NativeRow> {
+    let rows: FlatVec<NativeRow> = flat_vec_new(n + 1)
+    for i in 0..n { rows.push(row_at(NativeRow, i, i)) }
+    return rows
+}
+
+fn workload_inputs(n: int) -> ([int], [int]) {
+    let indices: [int] = vec_new_with_capacity(n)
+    let generations: [int] = vec_new_with_capacity(n)
+    let rng = 123456789
+    for i in 0..n {
+        rng = rng ^ (rng << 13)
+        rng = rng ^ (rng >> 17)
+        rng = rng ^ (rng << 5)
+        indices.push((rng & 0x7fffffff) % n)
+        generations.push(generation(i))
+    }
+    return (indices, generations)
+}
+
+macro scan_rows(rows: expr, n: expr) {
+    let sum = 0.0
+    for i in 0..n {
+        if rows[i].active && rows[i].kind == Kind::Moving {
+            sum += rows[i].x + rows[i].health
+        }
+    }
+    sum
+}
+
+macro kernels(Container: ident, Row: ident, Length: ident, Scan: ident, Prefix: ident, Random: ident, Update: ident, Step: ident, Digest: ident) {
+    fn Scan(rows: Container<Row>) -> float { return scan_rows(rows, Length(rows)) }
+
+    fn Prefix(rows: Container<Row>, count: int) -> float { return scan_rows(rows, count) }
+
+    fn Random(rows: Container<Row>, indices: [int], count: int) -> float {
+        let sum = 0.0
+        for j in 0..count {
+            let i = indices[j]
+            sum += rows[i].y + rows[i].energy + rows[i].team
+        }
+        return sum
+    }
+
+    fn Update(rows: Container<Row>) -> float {
+        let sum = 0.0
+        for i in 0..Length(rows) {
+            rows[i].x += rows[i].vx
+            rows[i].y += rows[i].vy
+            rows[i].age += 1
+            rows[i].grounded = !rows[i].grounded
+            sum += rows[i].x + rows[i].age
+        }
+        return sum
+    }
+
+    fn Step(rows: Container<Row>, generations: [int]) -> float {
+        let sum = 0.0
+        for i in 0..Length(rows) {
+            let id = rows[i].id
+            if rows[i].active && generations[id & 0x1ffff] == id >> 17 {
+                let x = rows[i].x
+                let energy = rows[i].energy
+                if rows[i].kind == Kind::Moving {
+                    rows[i].x = x + rows[i].vx
+                    rows[i].energy = energy - 1
+                } else {
+                    rows[i].x = x + rows[i].vy
+                    rows[i].energy = energy + 1
+                }
+                sum += x + energy
+            }
+        }
+        return sum
+    }
+
+    fn Digest(rows: Container<Row>, n: int) -> float {
+        let sum = 0.0
+        for i in 0..n {
+            let flags = (if rows[i].active { 1 } else { 0 }) + (if rows[i].grounded { 2 } else { 0 })
+            let kind = if rows[i].kind == Kind::Moving { 1 } else if rows[i].kind == Kind::Idle { 2 } else { 0 }
+            sum += (1 + (i & 31)) * (
+                rows[i].x + 3 * rows[i].y + 5 * rows[i].vx + 7 * rows[i].vy +
+                11 * rows[i].health + 13 * rows[i].age + 17 * rows[i].team +
+                19 * rows[i].energy + 23 * rows[i].id + 29 * kind + 31 * flags)
+        }
+        return sum
+    }
+}
+
+@inline @pure fn table_len(rows: [TableRow]) -> int { return rows.len() }
+@inline @pure fn native_len(rows: NativeBuffer<NativeRow>) -> int { return rows.len }
+
+kernels(Vec, TableRow, table_len, table_scan, table_prefix, table_random, table_update, table_step, table_digest)
+kernels(NativeBuffer, NativeRow, native_len, native_scan, native_prefix, native_random, native_update, native_step, native_digest)
+
+fn table_churn(rows: [TableRow], indices: [int], n: int) -> float {
+    let sum = 0.0
+    for j in 0..n {
+        let i = indices[j]
+        sum += rows[i].x
+        rows.swap_remove(i)
+        rows.push(row_at(TableRow, i, j + n))
+    }
+    return sum
+}
+
+fn native_churn(rows: FlatVec<NativeRow>, indices: [int], n: int) -> float {
+    let sum = 0.0
+    for j in 0..n {
+        let i = indices[j]
+        sum += rows.buf[i].x
+        let last = rows.len - 1
+        if i != last { rows.buf[i] = rows.buf[last] }
+        rows.len = last
+        rows.push(row_at(NativeRow, i, j + n))
+    }
+    return sum
+}
+
+fn native_flat_digest(rows: FlatVec<NativeRow>, n: int) -> float {
+    assert(rows.len == n)
+    return native_digest(rows.buf, n)
+}
+
+fn table_copy(rows: [TableRow]) -> [TableRow] {
+    let n = rows.len()
+    let copy: [TableRow] = vec_new_with_capacity(n)
+    for i in 0..n {
+        let row = rows[i]
+        copy.push(TableRow {
+            x: row.x, y: row.y, vx: row.vx, vy: row.vy,
+            health: row.health, age: row.age, team: row.team, energy: row.energy, id: row.id,
+            kind: row.kind, active: row.active, grounded: row.grounded,
+        })
+    }
+    return copy
+}
+
+fn native_copy(rows: NativeBuffer<NativeRow>) -> NativeBuffer<NativeRow> {
+    let n = rows.len
+    let copy: NativeBuffer<NativeRow> = native_buffer_alloc(n)
+    for i in 0..n { copy[i] = rows[i] }
+    return copy
+}
+
+fn table_bulk(rows: [TableRow]) -> [TableRow] { return deepcopy(rows) }
+
+fn native_bulk(rows: NativeBuffer<NativeRow>) -> NativeBuffer<NativeRow> { return deepcopy(rows) }
+
+fn assert_rows(table_store: [TableRow], native: NativeBuffer<NativeRow>, n: int) {
+    assert(table_store.len() == n)
+    for i in 0..n {
+        let row = table_store[i]
+        assert(row.x == native[i].x && row.y == native[i].y)
+        assert(row.vx == native[i].vx && row.vy == native[i].vy)
+        assert(row.health == native[i].health && row.age == native[i].age)
+        assert(row.team == native[i].team && row.energy == native[i].energy)
+        assert(row.id == native[i].id && row.kind == native[i].kind)
+        assert(row.active == native[i].active && row.grounded == native[i].grounded)
+    }
+}
+
+inline(lua) fn shared_x(ptr: Ptr<NativeRow>) -> float = "return ptr[0].x"
+inline(lua) fn set_shared_x(ptr: Ptr<NativeRow>, x: float) = "ptr[0].x = x"
+
+@nomangle fn verify_records(n: int) {
+    let table_store = table_rows(n)
+    let native = native_rows(n)
+    let (indices, generations) = workload_inputs(n)
+    assert_rows(table_store, native, n)
+    assert(table_scan(table_store) == native_scan(native))
+    assert(table_prefix(table_store, n) == native_prefix(native, n))
+    assert(table_random(table_store, indices, n) == native_random(native, indices, n))
+    for _ in 0..3 {
+        assert(table_update(table_store) == native_update(native))
+        assert_rows(table_store, native, n)
+        assert(table_step(table_store, generations) == native_step(native, generations))
+        assert_rows(table_store, native, n)
+    }
+    let table_snapshot = table_copy(table_store)
+    let native_snapshot = native_copy(native)
+    let table_clone = table_bulk(table_store)
+    let native_clone = native_bulk(native)
+    assert_rows(table_snapshot, native_snapshot, n)
+    assert_rows(table_clone, native_clone, n)
+    assert(table_digest(table_snapshot, n) == table_digest(table_store, n))
+    assert(table_digest(table_clone, n) == table_digest(table_store, n))
+    table_store[0].x += 1.0
+    native[0].x += 1.0
+    assert(shared_x(native.ptr) == table_store[0].x)
+    set_shared_x(native.ptr, table_store[0].x + 1.0)
+    assert(native[0].x == table_store[0].x + 1.0)
+    assert(table_store[0].x != table_snapshot[0].x && native[0].x != native_snapshot[0].x)
+    assert(table_store[0].x != table_clone[0].x && native[0].x != native_clone[0].x)
+    let churn_table = table_rows(n)
+    let churn_native = native_flat(n)
+    for _ in 0..3 {
+        assert(table_churn(churn_table, indices, n) == native_churn(churn_native, indices, n))
+        assert(churn_native.len == n)
+        assert_rows(churn_table, churn_native.buf, n)
+    }
+}
+
+fn table_trial(work: string, n: int) -> (fn() -> float, fn() -> float) {
+    let (indices, generations) = workload_inputs(n)
+    if work == "churn" {
+        let rows = table_rows(n)
+        return (() => table_churn(rows, indices, n), () => table_digest(rows, n))
+    }
+    let rows = table_rows(n)
+    let digest = () => table_digest(rows, n)
+    if work == "scan" { return (() => table_scan(rows), digest) }
+    if work == "prefix" { return (() => table_prefix(rows, n), digest) }
+    if work == "random" { return (() => table_random(rows, indices, n), digest) }
+    if work == "update" { return (() => table_update(rows), digest) }
+    if work == "step" { return (() => table_step(rows, generations), digest) }
+    let snapshot = rows
+    if work == "copy" {
+        return (() => { snapshot = table_copy(rows); 0.0 }, () => table_digest(snapshot, n))
+    }
+    assert(work == "bulk")
+    return (() => { snapshot = table_bulk(rows); 0.0 }, () => table_digest(snapshot, n))
+}
+
+fn native_trial(work: string, n: int) -> (fn() -> float, fn() -> float) {
+    let (indices, generations) = workload_inputs(n)
+    if work == "churn" {
+        let rows = native_flat(n)
+        return (() => native_churn(rows, indices, n), () => native_flat_digest(rows, n))
+    }
+    let rows = native_rows(n)
+    let digest = () => native_digest(rows, n)
+    if work == "scan" { return (() => native_scan(rows), digest) }
+    if work == "prefix" { return (() => native_prefix(rows, n), digest) }
+    if work == "random" { return (() => native_random(rows, indices, n), digest) }
+    if work == "update" { return (() => native_update(rows), digest) }
+    if work == "step" { return (() => native_step(rows, generations), digest) }
+    let snapshot = rows
+    if work == "copy" {
+        return (() => { snapshot = native_copy(rows); 0.0 }, () => native_digest(snapshot, n))
+    }
+    assert(work == "bulk")
+    return (() => { snapshot = native_bulk(rows); 0.0 }, () => native_digest(snapshot, n))
+}
+
+@nomangle fn record_trial(mode: string, work: string, n: int) -> (fn() -> float, fn() -> float) {
+    if mode == "table" { return table_trial(work, n) }
+    assert(mode == "native")
+    return native_trial(work, n)
+}
+
+fn main() {}
