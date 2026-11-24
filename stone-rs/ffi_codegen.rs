@@ -4,7 +4,11 @@ use skull_mir::mangle::type_symbol;
 use skull_parser::parse_module_clean;
 use std::collections::BTreeMap;
 use std::fmt::Write;
-use syn::{Attribute, Expr, FnArg, Item, Lit, Meta, Pat, PointerMutability, ReturnType, Type};
+use syn::parse::{ParseStream, Parser};
+use syn::{
+    token, Attribute, Expr, FnArg, ItemType, Lit, Meta, Pat, PointerMutability, ReturnType,
+    Signature, Token, Type, Visibility,
+};
 
 pub struct Layout {
     pub rock: &'static str,
@@ -83,30 +87,47 @@ impl Module {
             if !source.contains("rock-ffi") {
                 continue;
             }
-            let source = syn::parse_file(source).map_err(|e| format!("{module}: {e}"))?;
-            for item in source.items {
-                if let Item::Type(alias) = &item {
-                    if let Some(prefix) = marker(&alias.attrs, "rock-ffi-array", self.package)? {
-                        if arrays.insert(prefix.clone(), alias.ty.clone()).is_some() {
-                            return Err(format!("{prefix}: duplicate packed array"));
+            let parse = |input: ParseStream<'_>| {
+                while !input.is_empty() {
+                    if !(input.peek(Token![#]) && input.peek2(token::Bracket)) {
+                        skip_token(input)?;
+                        continue;
+                    }
+                    let attrs = input.call(Attribute::parse_outer)?;
+                    let mark =
+                        |key| marker(&attrs, key, self.package).map_err(|error| input.error(error));
+                    if let Some(options) = mark("rock-ffi")? {
+                        let _: Visibility = input.parse()?;
+                        let sig: Signature = input.parse()?;
+                        let name = sig.ident.to_string();
+                        if !attrs.iter().any(|attr| attr.path().is_ident("no_mangle"))
+                            || !input.peek(token::Brace)
+                        {
+                            return Err(input
+                                .error(format!("{name}: expected a fixed, unmangled C export")));
+                        }
+                        skip_token(input)?;
+                        if exports
+                            .insert(name.clone(), (module, sig, options))
+                            .is_some()
+                        {
+                            return Err(input.error(format!("{name}: duplicate FFI export")));
+                        }
+                    } else if let Some(prefix) = mark("rock-ffi-array")? {
+                        let alias: ItemType = input.parse()?;
+                        if arrays.insert(prefix.clone(), alias.ty).is_some() {
+                            return Err(input.error(format!("{prefix}: duplicate packed array")));
                         }
                     }
                 }
-                let Item::Fn(function) = item else { continue };
-                let Some(options) = marker(&function.attrs, "rock-ffi", self.package)? else {
-                    continue;
-                };
-                let name = function.sig.ident.to_string();
-                if exports
-                    .insert(name.clone(), (module, function, options))
-                    .is_some()
-                {
-                    return Err(format!("{name}: duplicate FFI export"));
-                }
-            }
+                Ok(())
+            };
+            parse
+                .parse_str(source)
+                .map_err(|e| format!("{module}: {e}"))?;
         }
-        for (name, (module, function, options)) in exports {
-            self.emit_export(&mut bindings, &name, module, &function, &options)
+        for (name, (module, sig, options)) in exports {
+            self.emit_export(&mut bindings, &name, module, &sig, &options)
                 .map_err(|e| format!("{name}: {e}"))?;
         }
         for (prefix, array) in arrays {
@@ -152,20 +173,15 @@ impl Module {
         out: &mut Bindings,
         name: &str,
         module: &str,
-        function: &syn::ItemFn,
+        sig: &Signature,
         options: &str,
     ) -> Result<(), String> {
         let mut options = ExportOptions::parse(options)?;
-        let sig = &function.sig;
-        if !function
-            .attrs
-            .iter()
-            .any(|a| a.path().is_ident("no_mangle"))
-            || sig
-                .abi
-                .as_ref()
-                .and_then(|abi| abi.name.as_ref())
-                .is_none_or(|abi| abi.value() != "C")
+        if sig
+            .abi
+            .as_ref()
+            .and_then(|abi| abi.name.as_ref())
+            .is_none_or(|abi| abi.value() != "C")
             || sig.variadic.is_some()
             || !sig.generics.params.is_empty()
         {
@@ -326,6 +342,16 @@ impl Module {
         }
         Ok((rust, tests))
     }
+}
+
+// Rust checks the bodies. The generator only needs top-level attributes and signatures.
+fn skip_token(input: ParseStream<'_>) -> syn::Result<()> {
+    input.step(|cursor| {
+        cursor
+            .token_tree()
+            .map(|(_, rest)| ((), rest))
+            .ok_or_else(|| cursor.error("expected a Rust token"))
+    })
 }
 
 fn marker(attrs: &[Attribute], key: &str, package: &str) -> Result<Option<String>, String> {
