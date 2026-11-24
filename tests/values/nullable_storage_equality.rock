@@ -1,0 +1,44 @@
+enum Item<T> { Some(T), Empty }
+
+fn absent(n: int) -> int? {
+    if n == 0 { return null }
+    return n
+}
+
+fn from_vec(value: int?) -> int? {
+    let xs: [Item<int?>] = [Item::Some(value)]
+    return match xs[0] { Item::Some(x) => x, Item::Empty => 99 }
+}
+
+@test
+fn absent_enum_slot_compares_equal_to_an_absent_return() {
+    let left = from_vec(absent(0))
+    let right = absent(0)
+    assert(left == null && right == null)
+    assert(left == right && !(left != right))
+    assert(from_vec(absent(7)) != right)
+}
+
+nobox value N { x: int }
+value Holder<T> { payload: T }
+
+fn n_at(n: int) -> N? {
+    if n == 0 { return null }
+    return N { x: n }
+}
+
+fn read_copy(x: N?, y: N?) -> N? {
+    let original: Holder<N?> = Holder { payload: x }
+    let copy = original
+    original.payload = y
+    return copy.payload
+}
+
+@test
+fn absent_nobox_field_compares_equal_to_an_absent_return() {
+    let left = read_copy(n_at(0), n_at(4))
+    let right = n_at(0)
+    assert(left == null && right == null)
+    assert(left == right && !(left != right))
+    assert(read_copy(n_at(7), n_at(0)) != right)
+}

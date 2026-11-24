@@ -325,7 +325,11 @@ impl<'a> Builder<'a> {
             }
         }
         let lanes = self.value_equality_lanes(shape, lhs)?;
-        let equal = if shape.nullable && self.scx.target() == bone_core::hir::FnBackend::Lua {
+        let equal = if shape.nullable
+            && matches!(
+                self.scx.target(),
+                bone_core::hir::FnBackend::Lua | bone_core::hir::FnBackend::Js
+            ) {
             let left_absent = self.emit_cur(Inst::Not(lhs_leaves[0]));
             let right_absent = self.emit_cur(Inst::Not(rhs_leaves[0]));
             let result = self.f.new_cell(None);
@@ -638,6 +642,19 @@ impl<'a> Builder<'a> {
                 let float = lf == Some(ArithTy::Float) || rf == Some(ArithTy::Float);
                 let lv = self.coerce_numeric_to_float(lv, lf.unwrap_or(ArithTy::Str), float);
                 let rv = self.coerce_numeric_to_float(rv, rf.unwrap_or(ArithTy::Str), float);
+                let [lv, rv] = if self.scx.target() == bone_core::hir::FnBackend::Js
+                    && null_side.is_none()
+                    && (self.expr_is_nullable(lhs) || self.expr_is_nullable(rhs))
+                {
+                    // Reading a missing JS slot yields undefined. Rock has one null.
+                    [lv, rv].map(|value| {
+                        let nil = self.is_nil(value);
+                        let present = self.emit_cur(Inst::Not(nil));
+                        self.emit_cur(Inst::MakeNullableValue { present, value })
+                    })
+                } else {
+                    [lv, rv]
+                };
                 Ok(self.emit_cur(if matches!(op, BinOp::Eq) {
                     Inst::Eq(lv, rv)
                 } else {
