@@ -1126,6 +1126,7 @@ where
     with_window(|w| f(&w.gl))
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_init() -> bool {
     rock_log::init();
@@ -1135,12 +1136,14 @@ pub extern "C" fn stone_init() -> bool {
 }
 
 /// Request quit after the current frame, keeping its window and GL context alive.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_quit() {
     QUIT_REQUESTED.store(true, Ordering::SeqCst);
 }
 
 /// Programmatic quit does not produce an SDL Quit event.
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_quit_requested() -> bool {
     QUIT_REQUESTED.load(Ordering::SeqCst)
@@ -1148,6 +1151,7 @@ pub extern "C" fn stone_quit_requested() -> bool {
 
 /// Release context-owned resources while the context is current. Call after the
 /// main loop, never mid-frame. Safe if already torn down or never initialized.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_teardown() -> bool {
     crate::flow_jobs::shutdown();
@@ -1181,6 +1185,7 @@ pub extern "C" fn stone_teardown() -> bool {
     true
 }
 
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_is_initialized() -> bool {
     INITIALIZED.load(Ordering::SeqCst)
@@ -1824,11 +1829,13 @@ fn track_window_event(window: &mut StoneWindow, win_event: sdl2::event::WindowEv
     }
 }
 
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_start_text_input() {
     unsafe { sdl2::sys::SDL_StartTextInput() };
 }
 
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_stop_text_input() {
     unsafe { sdl2::sys::SDL_StopTextInput() };
@@ -1870,6 +1877,7 @@ pub extern "C" fn stone_gl_swap_count() -> u64 {
 /// Advance a deferred map after each presented frame. X11 map requests remain
 /// pending while another window covers the workspace fullscreen; once viewable,
 /// synchronize SDL state and reassert the saved position.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_show_window_if_deferred() {
     with_window_mut(|window| {
@@ -1950,6 +1958,7 @@ pub extern "C" fn stone_show_window() {
     show_window_impl(None);
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_show_window_mode(mode: c_int) {
     if matches!(mode, 0 | 1) {
@@ -2098,6 +2107,7 @@ fn show_window_impl(requested_mode: Option<c_int>) {
 
 /// Live runtime visibility of the native window. A headless-booted game
 /// reports hidden; hide/show at runtime flips it.
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_is_window_hidden() -> bool {
     with_window(|window| window.runtime_hidden).unwrap_or(true)
@@ -2130,23 +2140,30 @@ fn activate_window_impl(window: &mut StoneWindow) {
 /// GL errors since process start, or 0 in release builds.
 /// u32 avoids boxed uint64_t cdata in LuaJIT.
 /// After swap, pull the driver's vblank wait out of CPU timing spans.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_gl_finish() {
     with_gl(|gl| unsafe { gl.finish() });
 }
 
 /// Flush submits without waiting; finish also waits for GPU or display work.
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_gl_flush() {
     with_gl(|gl| unsafe { gl.flush() });
 }
 
+/// GL errors since process start: buffer allocations in every build, other calls in debug.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_gl_error_count() -> u32 {
     stone_gl::GL_ERROR_COUNT.load(std::sync::atomic::Ordering::Relaxed) as u32
 }
 
 /// Shader compile and link failures since process start, including release builds.
+/// Shader compile/link failures. Counted in release too -- a failed compile sets
+/// no GL error, so this is the only machine-readable signal.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_shader_error_count() -> u32 {
     stone_gl::SHADER_ERROR_COUNT.load(std::sync::atomic::Ordering::Relaxed) as u32
@@ -2154,11 +2171,13 @@ pub extern "C" fn stone_shader_error_count() -> u32 {
 
 /// Begin the GPU timer query for this frame's GL work. No-op if no window /
 /// GL context, or if timer queries are unsupported on this platform.
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_gpu_timer_begin() {
     with_gl(|gl| GPU_TIMER.with(|t| t.borrow_mut().begin(gl)));
 }
 
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_gpu_timer_end() {
     with_gl(|gl| GPU_TIMER.with(|t| t.borrow_mut().end(gl)));
@@ -2167,6 +2186,7 @@ pub extern "C" fn stone_gpu_timer_end() {
 /// Non-blocking read of the oldest ready GPU timer result. Returns elapsed GPU
 /// ms (>= 0), `-1` if no result is ready yet, or `-2` if timer queries are
 /// unsupported (macOS / no GL context).
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_gpu_timer_poll_ms() -> f32 {
     with_gl(|gl| GPU_TIMER.with(|t| t.borrow_mut().poll_ms(gl))).unwrap_or(-2.0)
@@ -2176,12 +2196,14 @@ pub extern "C" fn stone_gpu_timer_poll_ms() -> f32 {
 /// `stone_gpu_timed_pass_end`, available in normal play. No-op when timer
 /// queries are unsupported, another timed pass is open, or too many results
 /// are unread.
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_gpu_timed_pass_begin() {
     with_gl(|gl| GPU_TIMER.with(|t| t.borrow_mut().timed_begin(gl)));
 }
 
 /// Close the open timed pass and queue it for readback under `tag`.
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_gpu_timed_pass_end(tag: u32) {
     with_gl(|gl| GPU_TIMER.with(|t| t.borrow_mut().timed_end(gl, tag)));
@@ -2190,12 +2212,16 @@ pub extern "C" fn stone_gpu_timed_pass_end(tag: u32) {
 /// Non-blocking read of the oldest timed pass, in submission order. Returns
 /// its GPU ms (>= 0), `-1` if none is ready, or `-2` if passes cannot be
 /// timed (macOS / no GL context / `STONE_GPU_SCOPES=finish`).
+/// GPU ms of the oldest finished timed pass; -1 when none is ready, -2 when this
+/// context cannot time passes. Results arrive a few frames after the pass ran.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_gpu_timed_pass_poll_ms() -> f32 {
     with_gl(|gl| GPU_TIMER.with(|t| t.borrow_mut().timed_poll_ms(gl))).unwrap_or(-2.0)
 }
 
 /// The tag of the pass `stone_gpu_timed_pass_poll_ms` last returned.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_gpu_timed_pass_tag() -> u32 {
     GPU_TIMER.with(|t| t.borrow().timed_tag())
@@ -2203,6 +2229,7 @@ pub extern "C" fn stone_gpu_timed_pass_tag() -> u32 {
 
 /// Whether this process records named GPU scopes (`STONE_GPU_SCOPES=1`). The
 /// Rock wrappers read it once so a disabled scope costs no FFI call.
+/// rock-ffi stone private byte-bool
 #[no_mangle]
 pub extern "C" fn stone_gpu_scopes_requested() -> u8 {
     GPU_TIMER.with(|t| t.borrow().status() != gpu_timer::ScopeStatus::Off) as u8
@@ -2210,6 +2237,7 @@ pub extern "C" fn stone_gpu_scopes_requested() -> u8 {
 
 /// Whether the scopes are `glFinish`-bracketed wall time
 /// (`STONE_GPU_SCOPES=finish`) rather than GPU timestamps.
+/// rock-ffi stone byte-bool
 #[no_mangle]
 pub extern "C" fn stone_gpu_scopes_finish() -> u8 {
     GPU_TIMER.with(|t| t.borrow().status() == gpu_timer::ScopeStatus::Finish) as u8
@@ -2220,6 +2248,7 @@ pub extern "C" fn stone_gpu_scopes_finish() -> u8 {
 ///
 /// # Safety
 /// `name` must be a valid NUL-terminated string.
+/// rock-ffi stone private
 #[no_mangle]
 pub unsafe extern "C" fn stone_gpu_scope_begin(name: *const c_char) {
     if name.is_null() {
@@ -2234,6 +2263,7 @@ pub unsafe extern "C" fn stone_gpu_scope_begin(name: *const c_char) {
 ///
 /// # Safety
 /// `shader_name` must be a valid NUL-terminated string.
+/// rock-ffi stone private
 #[no_mangle]
 pub unsafe extern "C" fn stone_gpu_pass_scope_begin(shader_name: *const c_char) {
     if shader_name.is_null() {
@@ -2244,6 +2274,7 @@ pub unsafe extern "C" fn stone_gpu_pass_scope_begin(shader_name: *const c_char) 
     with_gl(|gl| GPU_TIMER.with(|t| t.borrow_mut().scope_begin(gl, &format!("pass:{shader}"))));
 }
 
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_gpu_scope_end() {
     with_gl(|gl| GPU_TIMER.with(|t| t.borrow_mut().scope_end(gl)));
@@ -2255,6 +2286,7 @@ pub extern "C" fn stone_gpu_scope_end() {
 ///
 /// # Safety
 /// `name` must be a valid NUL-terminated string.
+/// rock-ffi stone private
 #[no_mangle]
 pub unsafe extern "C" fn stone_gpu_label_shader(handle: u64, name: *const c_char) {
     if GPU_TIMER.with(|t| t.borrow().status() == gpu_timer::ScopeStatus::Off) {
@@ -2277,6 +2309,7 @@ pub unsafe extern "C" fn stone_gpu_label_shader(handle: u64, name: *const c_char
 }
 
 /// Clear aggregated scope samples (the profiler's warmup transition).
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_gpu_scopes_reset_stats() {
     GPU_TIMER.with(|t| t.borrow_mut().reset_stats());
@@ -2383,6 +2416,7 @@ fn swap_interval_on(interval: sdl2::video::SwapInterval) -> bool {
 /// The vsync state the DRIVER reports, not the one last requested. A
 /// driver can refuse or clamp the swap interval, so a caller that assumes a
 /// `stone_set_vsync(0)` took will mis-attribute the resulting present stall.
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_vsync_active() -> bool {
     #[cfg(target_os = "macos")]
@@ -2392,6 +2426,7 @@ pub extern "C" fn stone_vsync_active() -> bool {
         .unwrap_or(false);
 }
 
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_set_vsync(enabled: c_int) {
     let enabled = if VSYNC_FORCED_OFF.with(|f| f.get()) {
@@ -2402,6 +2437,7 @@ pub extern "C" fn stone_set_vsync(enabled: c_int) {
     apply_swap_interval(enabled);
 }
 
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_force_vsync_off(force: c_int) {
     VSYNC_FORCED_OFF.with(|f| f.set(force != 0));
@@ -2512,6 +2548,7 @@ fn set_fullscreen_impl(window: &mut StoneWindow, mode: c_int) -> bool {
 
 /// Set fullscreen mode at runtime: 0 = windowed, 1 = desktop (borderless)
 /// fullscreen, 2 = exclusive fullscreen. Unknown values are treated as windowed.
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_set_fullscreen(mode: c_int) {
     with_window_mut(|window| {
@@ -2522,12 +2559,14 @@ pub extern "C" fn stone_set_fullscreen(mode: c_int) {
     });
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_delay(ms: u32) {
     std::thread::sleep(std::time::Duration::from_millis(ms as u64));
 }
 
 /// Wall time for a perf deadline passed by the launcher before process spawn.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_wall_time() -> f64 {
     std::time::SystemTime::now()
@@ -2536,6 +2575,7 @@ pub extern "C" fn stone_wall_time() -> f64 {
         .as_secs_f64()
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_get_time() -> f64 {
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
@@ -2563,6 +2603,7 @@ pub extern "C" fn stone_get_drawable_size(width: *mut c_int, height: *mut c_int)
 
 /// The machine config's `imgui_scale` for this window's game, or 0 when the
 /// config names none (or there is no window, or it is headless).
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_get_config_imgui_scale() -> c_float {
     with_window(|window| window.config_imgui_scale)
@@ -2570,6 +2611,7 @@ pub extern "C" fn stone_get_config_imgui_scale() -> c_float {
         .unwrap_or(0.0)
 }
 
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_get_dpi_scale() -> c_float {
     with_window(|window| {
@@ -2604,6 +2646,7 @@ pub extern "C" fn stone_get_window_position(x: *mut c_int, y: *mut c_int) {
     });
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_get_fullscreen() -> c_int {
     with_window(|window| fullscreen_mode(window.window.fullscreen_state())).unwrap_or(0)
@@ -2617,6 +2660,7 @@ fn can_persist_window_geometry(
     !runtime_hidden && !pending_show && fullscreen == sdl2::video::FullscreenType::Off
 }
 
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_save_window_geometry(title: *const c_char) {
     if std::env::var_os("STONE_NO_WINDOW_FIT").is_some() {
@@ -2662,6 +2706,7 @@ pub extern "C" fn stone_save_window_geometry(title: *const c_char) {
     });
 }
 
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_take_window_resized() -> bool {
     take_window_change(WC_RESIZED)
@@ -2669,12 +2714,14 @@ pub extern "C" fn stone_take_window_resized() -> bool {
 
 /// Take-and-clear the "window was moved" flag (drives the debounced geometry
 /// write in the runner).
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_take_window_moved() -> bool {
     take_window_change(WC_MOVED)
 }
 
 /// Take-and-clear the "window changed display" flag.
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_take_window_display_changed() -> bool {
     take_window_change(WC_DISPLAY)
@@ -2682,6 +2729,7 @@ pub extern "C" fn stone_take_window_display_changed() -> bool {
 
 /// Resize the window, clamped to the target display's usable area.
 /// Fires a SIZE_CHANGED event, so the resize flag is set as a side effect.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_set_window_size(width: c_int, height: c_int) {
     with_window_mut(|window| {
@@ -2719,6 +2767,7 @@ fn headless_window_size(game: (i32, i32)) -> (i32, i32) {
 
 /// Move the window to display `index`, centered on that display's usable area
 /// and clamped on-screen. No-op for an unknown index (logged).
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_set_window_display(index: c_int) {
     with_window_mut(|window| {
@@ -2783,6 +2832,7 @@ pub extern "C" fn stone_set_window_display(index: c_int) {
     });
 }
 
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_set_display_mode(width: c_int, height: c_int) {
     with_window_mut(|window| {
@@ -2831,6 +2881,7 @@ pub extern "C" fn stone_set_display_mode(width: c_int, height: c_int) {
     });
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_get_display_count() -> c_int {
     with_window(|window| {
@@ -2845,6 +2896,7 @@ pub extern "C" fn stone_get_display_count() -> c_int {
 }
 
 /// Refresh rate in Hz, or 0 when unknown.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_get_window_refresh_rate() -> c_int {
     with_window(|window| {
@@ -3164,21 +3216,25 @@ pub extern "C" fn stone_get_graphics_stats(stats: *mut GraphicsStats) {
     unsafe { *stats = frame };
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_get_live_texture_bytes() -> u64 {
     live_texture_bytes()
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_get_live_image_bytes() -> u64 {
     live_image_bytes()
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_get_live_mip_bytes() -> u64 {
     live_mip_bytes()
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_reset_frame_stats() {
     FRAME_STATS.with(|fs| *fs.borrow_mut() = GraphicsStats::default());
