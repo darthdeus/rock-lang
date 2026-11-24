@@ -59,10 +59,7 @@ toml = "0.8"
 serde_json = "1"
 
 [dev-dependencies]
-bone-semantic = { workspace = true }
-skull-mir = { workspace = true }
-skull-parser = { workspace = true }
-syn = { version = "3.0.9", features = ["full"] }
+rock-ffi-codegen = { path = "../crates/rock-ffi-codegen" }
 gamelibs = { workspace = true }
 # tests/image_decode.rs bakes its own PNG fixtures rather than depending on a
 # game's assets, so it needs the encoder side of the same crate.
@@ -90,10 +87,7 @@ bundled-sdl2 = ["sdl2/bundled", "sdl2/static-link"]
 [build-dependencies]
 rayon = { workspace = true }
 rock-core = { workspace = true }
-bone-semantic = { workspace = true }
-skull-mir = { workspace = true }
-skull-parser = { workspace = true }
-syn = { version = "3.0.9", features = ["full"] }
+rock-ffi-codegen = { path = "../crates/rock-ffi-codegen" }
 gamelibs = { workspace = true }
 
 [[test]]

@@ -3,7 +3,6 @@ use super::{Module, STONE_WINDOW};
 pub const STONE_RENDERING: Module = Module {
     package: "stone-rendering",
     library: "stone",
-    c_owned_layout: None,
     opaque_pointers: &[STONE_WINDOW],
     layouts: &[],
 };

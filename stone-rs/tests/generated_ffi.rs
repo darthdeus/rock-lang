@@ -2,7 +2,8 @@
 #[allow(dead_code)]
 mod ffi_codegen;
 
-use ffi_codegen::{Bindings, STONE_NATIVE};
+use ffi_codegen::STONE_NATIVE;
+use rock_ffi_codegen::Bindings;
 
 const SOURCES: &[(&str, &str)] = &[
     ("nav::ffi", include_str!("../src/nav/ffi.rs")),
@@ -227,7 +228,7 @@ fn stone_event_text_extent_follows_the_c_layout() {
     let header = include_str!("../../packages/stone/engine/runtime_ffi.h");
     assert!(header.contains("char text[32];"));
     let changed = header.replace("char text[32];", "char text[48];");
-    let generate = ffi_codegen::runtime::STONE_ENGINE.c_owned_layout.unwrap();
+    let generate = ffi_codegen::stone_event_layout;
     let generated = generate(&changed).unwrap();
     assert!(generated.contains("const STONE_TEXT_INPUT_BYTES: usize = 48;"));
 }

@@ -1629,6 +1629,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rock-ffi-codegen"
+version = "0.1.0"
+dependencies = [
+ "bone-semantic",
+ "skull-mir",
+ "skull-parser",
+ "syn 3.0.9",
+]
+
+[[package]]
 name = "rock-host"
 version = "0.1.0"
 dependencies = [
@@ -2205,7 +2215,6 @@ version = "0.1.0"
 name = "stone-rs"
 version = "0.1.0"
 dependencies = [
- "bone-semantic",
  "bytemuck",
  "dirs",
  "fontdue",
@@ -2222,18 +2231,16 @@ dependencies = [
  "once_cell",
  "rayon",
  "rock-core",
+ "rock-ffi-codegen",
  "rock-log",
  "rodio",
  "sdl2",
  "serde_json",
  "serial_test",
- "skull-mir",
- "skull-parser",
  "stone-capture",
  "stone-gl",
  "stone-imgui-abi",
  "stone-texture",
- "syn 3.0.9",
  "tempfile",
  "toml",
  "ttf-parser",
