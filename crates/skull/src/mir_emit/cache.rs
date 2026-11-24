@@ -723,6 +723,7 @@ impl SkullEmitCache {
         for fref in invalidated_candidate_frefs {
             warm_keys.extend(cache.concrete.candidate_keys_for(fref).cloned());
         }
+        let warmed: FxHashSet<Instance> = warm_keys.iter().cloned().collect();
         let warm_keys: Vec<Instance> = warm_keys.into_iter().collect();
         let t_candidate = Instant::now();
         let previous_candidate_table = cache.inline_cache.candidate_table();
@@ -810,6 +811,28 @@ impl SkullEmitCache {
             }
         }
         cache.edit.repair_stats.affected_selection_ns = t_affected.elapsed().as_nanos() as u64;
+
+        // A candidate's lowered body bakes in its callees' parameter demand and
+        // effects, so a re-emitted dependent is reclassified with them.
+        let stale_keys: Vec<Instance> = affected
+            .iter()
+            .map(|body| body.func)
+            .collect::<FxHashSet<_>>()
+            .into_iter()
+            .flat_map(|fref| cache.concrete.candidate_keys_for(fref).cloned())
+            .filter(|key| !warmed.contains(key))
+            .collect();
+        if !stale_keys.is_empty() {
+            let table = update_inline_candidate_table(
+                ws,
+                &cache.scx,
+                &cache.concrete,
+                cache.inline_cache.candidate_table().as_ref(),
+                stale_keys,
+                &BTreeSet::new(),
+            )?;
+            cache.inline_cache.replace_candidate_table(table);
+        }
 
         let t_relow = Instant::now();
         for body in &affected {

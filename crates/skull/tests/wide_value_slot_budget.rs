@@ -10,7 +10,7 @@ fn fixture(leaves: usize, held: usize) -> String {
         "nobox value W {{ {} }}\n\
          fn mk(x: float) -> W {{ return W {{ {} }} }}\n\
          fn tweak(w: W) -> W {{ return W {{ f0: w.f0 + 1.0, {} }} }}\n\
-         fn check(value: W, k: int) -> float {{ let w = value; return w.f0 + w.f{} + float(k) }}\n\
+         fn check(value: W, k: int) -> float {{ let w = value; let s = float(k); for _ in 0..1 {{ s += w.f0 + w.f{} }}; return s }}\n\
          fn run(x: float) -> float {{\n    let v0 = mk(x)\n",
         fields.join(", "),
         inits.join(", "),
@@ -98,14 +98,17 @@ fn walk(name: &str, lo: usize, hi: usize, mk: impl Fn(usize) -> String) {
     assert!(verdicts[flip..].iter().all(|ok| !*ok));
 }
 
+// Loops keep the helpers out-of-line, so each fixture's frame is the caller's own.
+const ONE: &str = "fn one(x: float, k: int) -> float { let r = 1.0; for _ in 0..1 { r += x * float(k) }; return r }\n";
+
 fn wide_decls(leaves: usize) -> String {
     let fields: Vec<String> = (0..leaves).map(|k| format!("f{k}: float")).collect();
     let inits: Vec<String> = (0..leaves).map(|k| format!("f{k}: x + {k}.0")).collect();
     format!(
         "nobox value W {{ {} }}\n\
          fn mk(x: float) -> W {{ return W {{ {} }} }}\n\
-         fn use_w(value: W, k: int) -> float {{ let w = value; return w.f0 + w.f{} + float(k) }}\n\
-         fn one(x: float, k: int) -> float {{ return x * float(k) + 1.0 }}\n",
+         fn use_w(value: W, k: int) -> float {{ let w = value; let s = float(k); for _ in 0..1 {{ s += w.f0 + w.f{} }}; return s }}\n\
+         {ONE}\n",
         fields.join(", "),
         inits.join(", "),
         leaves - 1,
@@ -165,7 +168,7 @@ fn wide_in_closure(pad: usize) -> String {
 }
 
 fn flat_locals(pad: usize) -> String {
-    let mut src = String::from("fn one(x: float, k: int) -> float { return x * float(k) + 1.0 }\n");
+    let mut src = String::from(ONE);
     src.push_str("fn run(x: float) -> float {\n");
     for i in 0..pad {
         src.push_str(&format!("    let a{i} = one(x, {i})\n"));

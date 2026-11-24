@@ -10,6 +10,7 @@ fn assert_before(body: &str, earlier: &str, later: &str) {
     assert!(a < b);
 }
 
+// The helpers loop so they stay real calls that the deferral must respect.
 const READ_ORDER: &str = r#"
 struct Input { x: float }
 nobox value Wide {
@@ -34,7 +35,7 @@ fn sum(w: Wide) -> float {
 }
 
 fn mutate(s: Input) -> bool {
-    s.x = 10.0
+    for _ in 0..1 { s.x = 10.0 }
     return true
 }
 
@@ -45,7 +46,7 @@ fn sample(s: Input) -> float {
 }
 
 fn mark_then_fail() -> bool {
-    MARK = 1
+    for _ in 0..1 { MARK = 1 }
     error("unexpected call")
     return true
 }
@@ -99,11 +100,11 @@ global VALUE: float = 2.0
 fn sum(w: Wide) -> float {
     return w.f0 + w.f1 + w.f2 + w.f3 + w.f4 + w.f5 + w.f6 + w.f7 + w.f8 + w.f9 + w.f10 + w.f11
 }
-fn first() -> float { MARK = 1; return 2.0 }
-fn second() -> bool { assert_eq(MARK, 1); return true }
-fn first_fails() -> float { error("first failed"); return 0.0 }
-fn second_marks() -> bool { MARK = 2; return true }
-fn change_global() -> bool { VALUE = 10.0; return true }
+fn first() -> float { for _ in 0..1 { MARK = 1 }; return 2.0 }
+fn second() -> bool { for _ in 0..1 { assert_eq(MARK, 1) }; return true }
+fn first_fails() -> float { for _ in 0..1 { MARK += 0 }; error("first failed"); return 0.0 }
+fn second_marks() -> bool { for _ in 0..1 { MARK = 2 }; return true }
+fn change_global() -> bool { for _ in 0..1 { VALUE = 10.0 }; return true }
 inline(lua) fn attempt(f: () -> float) = "pcall(f)"
 
 fn ordered() -> float {

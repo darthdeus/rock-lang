@@ -81,17 +81,19 @@ fn assert_input_change_reaches_every_consumer(
     let ws1 = ws_with_inputs(src, before.0);
     let (full, mut incremental_cache) = emit_full_of(&ws1, "emit_full v1");
     let (_, mut overlay_cache) = emit_full_of(&ws1, "emit_full v1");
-    assert_eq!(full.lua.matches(before.1).count(), consumers);
+    // Spliced copies of a consumer bake the value too.
+    let copies = full.lua.matches(before.1).count();
+    assert!(copies >= consumers);
 
     move_input();
     let ws2 = ws_with_inputs(src, after.0);
     let edit = [body_id(&ws2, "other")];
     let incremental = check_incremental(&ws2, &mut incremental_cache, &edit);
-    assert_eq!(incremental.lua.matches(after.1).count(), consumers);
+    assert_eq!(incremental.lua.matches(after.1).count(), copies);
     assert!(!incremental.lua.contains(before.1));
 
     let overlay = emit_overlay(&ws2, &mut overlay_cache, &edit).expect("emit_overlay");
-    assert_eq!(overlay.lua.matches(after.1).count(), consumers);
+    assert_eq!(overlay.lua.matches(after.1).count(), copies);
     assert!(overlay.lua.contains("TAG = "));
 }
 

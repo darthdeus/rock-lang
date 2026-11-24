@@ -4,7 +4,7 @@ const SOURCE: &str = r#"
 struct Buffer { count: int, capacity: int, value: float }
 
 fn prepare(b: Buffer) -> Buffer {
-    if b.count == b.capacity { b.capacity += 1 }
+    for _ in 0..1 { if b.count == b.capacity { b.capacity += 1 } }
     return b
 }
 
@@ -86,7 +86,10 @@ fn main() { let b = Buffer { capacity: 0 }; append(b, 1) }
 fn named_conditional_helper_arguments_follow_preflight() {
     let source = r#"
 struct Buffer { capacity: int, count: int, value: float }
-fn prepare(b: Buffer) -> Buffer { if b.count == b.capacity { b.capacity += 1 }; return b }
+fn prepare(b: Buffer) -> Buffer {
+    for _ in 0..1 { if b.count == b.capacity { b.capacity += 1 } }
+    return b
+}
 fn tail(b: Buffer, point: Vec2, scale: float) {
     b.value = point.x * scale
     b.count += 1
@@ -106,7 +109,7 @@ fn main() {
 "#;
     let lua = emit_module(source);
     let body = function_body(&lua, "call");
-    let preflight = body.find("= b1(c0)").unwrap_or_else(|| panic!("{body}"));
+    let preflight = body.find("(c0)").unwrap_or_else(|| panic!("{body}"));
     let conditional = body.find("if c2 then").unwrap_or_else(|| panic!("{body}"));
     assert!(preflight < conditional);
     assert_eq!(run_main(&lua), "2 1 1");

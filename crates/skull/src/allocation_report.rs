@@ -898,13 +898,13 @@ fn projected(seed: int) -> int {
     let pair = Pair { x: seed, y: seed + 1 }
     return pair.x
 }
-fn consume(pair: Pair) -> int { return pair.x }
+fn consume(pair: Pair) -> int { let s = 0; for _ in 0..1 { s += pair.x }; return s }
 fn passed(seed: int) -> int { return consume(Pair { x: seed, y: seed + 1 }) }
 fn returned(seed: int) -> Pair { return Pair { x: seed, y: seed + 1 } }
 fn retained(seed: int) { RETAINED = Pair { x: seed, y: seed + 1 } }
-fn shared(seed: int) -> [int] { return [seed] }
-fn zebra(seed: int) -> int { return shared(seed).len() }
-fn alpha(seed: int) -> int { return shared(seed).len() }
+fn shared(seed: int) -> [int] { let n = seed; for _ in 0..1 { n += 0 }; return [n] }
+fn zebra(seed: int) -> int { let n = shared(seed).len(); for _ in 0..1 { n += 0 }; return n }
+fn alpha(seed: int) -> int { let n = shared(seed).len(); for _ in 0..1 { n += 0 }; return n }
 @tick fn update_system() {
     let _ = projected(1)
     let _ = passed(6)

@@ -21,6 +21,12 @@ work so each pass has its own loop back edge. Preserve ordering wherever
 one step can observe another. Run `python3 benchmarks/long_trace.py` with
 Rock and LuaJIT on the path to compare the two loop shapes on fixed work.
 
+Every call a trace records spends a budget. A tail call counts against
+`loopunroll` for the rest of the trace, and any other call keeps the caller's
+frame under the 250-slot trace limit while the callee runs. The compiler
+splices small loop-free callees at their call sites, as it does `@inline`
+ones, so short forwarding helpers spend neither.
+
 Values flattened into scalar lanes avoid allocation, but wide values increase
 argument, local and snapshot pressure. Boxing trades that pressure for
 allocation and indirection; neither choice is universally faster. The shared

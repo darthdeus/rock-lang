@@ -151,7 +151,7 @@ fn tally_workspace(marker: &str, use_q: bool) -> Workspace {
         r#"
 value P {{ x: float, y: float }}
 value Q {{ a: float, b: float, c: float }}
-fn tally_of<T>(xs: [T]) -> T {{ print("{marker}") return xs[0] }}
+fn tally_of<T>(xs: [T]) -> T {{ for _ in xs {{ print("{marker}") }} return xs[0] }}
 global G1: float = tally_of([P {{ x: 1.0, y: 0.0 }}]).x
 fn use_it() -> float {{ return {result} }}
 "#
@@ -583,7 +583,7 @@ fn a_failed_graph_added_body_is_rejected_by_every_emit_route() {
     ];
     for (route, result) in routes {
         let err = result.expect_err(route);
-        assert!(err.message.contains("nobox") && err.message.contains("bad"));
+        assert!(err.message.contains("nobox") && err.location.line == 3);
     }
 }
 

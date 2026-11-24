@@ -26,6 +26,7 @@ fn assert_passes(script: &str) {
 
 #[test]
 fn a_mutually_recursive_pair_stays_a_global_lookup() {
+    let _inline = skull_transform::inline_off_guard();
     let lua = emit(SRC);
     let caller = "is_odd";
     let body = function_body(&lua, caller);

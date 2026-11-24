@@ -739,7 +739,7 @@ fn loop_store_checks_follow_callee_effects() {
         fn fill(b: Bag) { for i in 0..b.items.len() { b.items[i] = swap(b) } }"
     ));
     assert!(kept(
-        "fn apply(f: fn() -> int) -> int { return f() }
+        "fn apply(f: fn() -> int) -> int { let n = 0; for _ in 0..2 { n += f() }; return n }
         fn fill(xs: [int]) { for i in 0..xs.len() { xs[i] = apply(() => 1) } }"
     ));
     assert!(kept(

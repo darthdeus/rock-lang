@@ -41,6 +41,7 @@ mod lua_driver_execution;
 mod mixed_enum_boxing;
 mod nomangle_type_symbol;
 mod opaque_declared_type_reach;
+mod small_callee_inlining;
 mod v1_enum_join_scalarize;
 
 mod opaque_container_axes;

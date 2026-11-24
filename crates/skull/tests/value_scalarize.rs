@@ -35,7 +35,7 @@ fn reset() {
     ACTIVE = false
     VIEW = mat4_identity()
 }
-fn with_fn(f: fn() -> ()) { f() }
+fn with_fn(f: fn() -> ()) { for _ in 0..1 { f() } }
 fn with_saved(draw: fn() -> ()) {
     with_fn(() => {
         let was = ACTIVE

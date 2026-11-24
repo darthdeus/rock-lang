@@ -1357,12 +1357,12 @@ mod watch_route_tests {
     #[test]
     fn a_callee_body_edit_reaches_its_bound_caller() {
         let v0 = "global SCORE: int = 0\n\
-                  fn leaf(a: int) -> int { a + 1 }\n\
+                  fn leaf(a: int) -> int { let r = a; for _ in 0..1 { r += 1 }; r }\n\
                   @nomangle fn bump() { SCORE = leaf(SCORE) }\n";
         let mut fx = ProjectFixture::boot(v0);
         let before = fx.main_text();
         assert!(before.contains("__rock_mk_bump"), "bump binds its callee");
-        let reload = fx.edit(&v0.replace("a + 1", "a + 10")).unwrap();
+        let reload = fx.edit(&v0.replace("r += 1", "r += 10")).unwrap();
         assert!(
             matches!(reload, SkullReload::Incremental { .. }),
             "{reload:?}"

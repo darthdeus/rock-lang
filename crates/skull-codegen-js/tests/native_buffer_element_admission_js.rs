@@ -23,12 +23,13 @@ fn uint_buffer(n: int) -> NativeBuffer<uint> { return native_buffer_alloc(n) }
 fn float_buffer(n: int) -> NativeBuffer<float> { return native_buffer_alloc(n) }
 fn bool_buffer(n: int) -> NativeBuffer<bool> { return native_buffer_alloc(n) }
 fn pair_buffer(n: int) -> NativeBuffer<Pair> { return native_buffer_alloc(n) }
+fn keep<T>(b: NativeBuffer<T>) -> int { let s = 0; for _ in 0..1 { s += b.len }; return s }
 fn main() {
-    let _ = int_buffer(1)
-    let _ = uint_buffer(1)
-    let _ = float_buffer(1)
-    let _ = bool_buffer(1)
-    let _ = pair_buffer(1)
+    print("{keep(int_buffer(1))}")
+    print("{keep(uint_buffer(1))}")
+    print("{keep(float_buffer(1))}")
+    print("{keep(bool_buffer(1))}")
+    print("{keep(pair_buffer(1))}")
 }
 "#;
 

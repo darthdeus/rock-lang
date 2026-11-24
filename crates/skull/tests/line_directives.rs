@@ -5,7 +5,7 @@ const FILE: &str = "/src/game.rock";
 
 #[test]
 fn a_call_keeps_its_own_numbered_statement() {
-    let src = "fn twice(n: int) -> int { return n * 2 }
+    let src = "fn twice(n: int) -> int { let r = 0; for _ in 0..2 { r += n }; return r }
 fn split(n: int) -> int {
     let a = twice(n)
     return a + 1

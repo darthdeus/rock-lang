@@ -54,9 +54,6 @@ enum Kind {
 #[derive(Clone)]
 struct CalleeBody {
     func: MirFunc,
-    /// The raw lowered body shared with emission consumers. Every mutating
-    /// consumer clones it; only this table owns the canonical source.
-    canonical: Arc<MirFunc>,
     /// The concrete body this snapshot was lowered from. A declaration-level
     /// snapshot is not a valid source for a concrete splice.
     subject: Instance,
@@ -71,20 +68,32 @@ struct CalleeBody {
     /// A lambda sub-CFG reads captured cells, so its body cannot forward these reads.
     forwardable_reads: Vec<(usize, Idx<Inst>)>,
     forwards_reads: bool,
+    /// Spliced for its size, not an annotation: a `@noalloc` caller keeps the
+    /// call so the allocation check sees the callee it would reject.
+    small: bool,
 }
 
 /// Rejected candidates are cached too.
 type CacheKey = Instance;
 
+#[derive(Clone, Default)]
+struct Classified {
+    body: Option<Arc<CalleeBody>>,
+    /// The raw lowered body shared with emission consumers, kept for rejected
+    /// candidates too so their emission does not lower them again. Every
+    /// mutating consumer clones it; only this table owns the canonical source.
+    canonical: Option<Arc<MirFunc>>,
+}
+
 pub struct InlineCandidateTable {
-    entries: HashMap<CacheKey, Option<Arc<CalleeBody>>>,
+    entries: HashMap<CacheKey, Classified>,
     removed: HashSet<CacheKey>,
     parent: Option<Arc<InlineCandidateTable>>,
 }
 
 pub struct InlineCandidateWarm {
     key: CacheKey,
-    candidate: Option<Arc<CalleeBody>>,
+    candidate: Classified,
 }
 
 impl InlineCandidateTable {
@@ -158,7 +167,10 @@ impl InlineCandidateTable {
 
     /// Compare the eligibility facts required to reuse a residual caller.
     pub fn residual_eligibility_matches(&self, other: &Self, key: &Instance) -> bool {
-        let (Some(Some(before)), Some(Some(after))) = (self.lookup(key), other.lookup(key)) else {
+        let (Some(before), Some(after)) = (
+            self.lookup(key).and_then(|c| c.body),
+            other.lookup(key).and_then(|c| c.body),
+        ) else {
             return false;
         };
 
@@ -166,6 +178,7 @@ impl InlineCandidateTable {
             && before.abi == after.abi
             && before.func.params.len() == after.func.params.len()
             && before.ret_arity == after.ret_arity
+            && before.small == after.small
     }
 
     pub fn keys(&self) -> Vec<Instance> {
@@ -182,12 +195,10 @@ impl InlineCandidateTable {
     }
 
     pub fn canonical_body(&self, key: &Instance) -> Option<Arc<MirFunc>> {
-        self.lookup(key)
-            .and_then(|candidate| candidate)
-            .map(|candidate| Arc::clone(&candidate.canonical))
+        self.lookup(key).and_then(|candidate| candidate.canonical)
     }
 
-    fn lookup(&self, key: &CacheKey) -> Option<Option<Arc<CalleeBody>>> {
+    fn lookup(&self, key: &CacheKey) -> Option<Classified> {
         if let Some(candidate) = self.entries.get(key) {
             return Some(candidate.clone());
         }
@@ -378,7 +389,7 @@ impl InlineCache {
         inst: Instance,
         concrete_plans: &ConcretePlans,
     ) -> Result<InlineCandidateWarm, CompilerError> {
-        let candidate = classify(ws, scx, &inst, concrete_plans)?.map(Arc::new);
+        let candidate = classify(ws, scx, &inst, concrete_plans)?;
         Ok(InlineCandidateWarm {
             key: inst,
             candidate,
@@ -787,11 +798,11 @@ fn classify(
     scx: &ScalarCtx,
     inst: &Instance,
     concrete_plans: &ConcretePlans,
-) -> Result<Option<CalleeBody>, CompilerError> {
+) -> Result<Classified, CompilerError> {
     let fref = inst.func;
     let f = &ws.module(fref.module).functions[fref.func];
     if f.is_extern || f.inline_body.is_some() || f.is_coroutine {
-        return Ok(None);
+        return Ok(Classified::default());
     }
     let has_inline = f
         .annotations
@@ -800,17 +811,40 @@ fn classify(
     let has_pure = f.annotations.iter().any(|a| a.name.name.as_str() == "pure");
     // Bounded candidates can resolve their witnesses at the call site.
     let has_bounds = f.generic_bounds.iter().any(Option::is_some);
-    if !annotation_gate(has_inline, has_pure) && !has_bounds {
-        return Ok(None);
+    let small = !annotation_gate(has_inline, has_pure) && !has_bounds;
+    if small && (!f.annotations.is_empty() || !small_source(ws, fref)) {
+        return Ok(Classified::default());
     }
     let Some(plan) = concrete_plans.get(inst) else {
-        return Ok(None);
+        return Ok(Classified::default());
     };
-    skull_mir::lower::validate_concrete_bound_plan(f, plan)?;
-    let abi = skull_mir::lower::owner_abi_plan(ws, scx, concrete_plans, inst)?;
-    let mf = skull_mir::lower::lower_instance_with_plans(ws, scx, plan, concrete_plans)?;
+    let lowered = skull_mir::lower::validate_concrete_bound_plan(f, plan).and_then(|()| {
+        Ok((
+            skull_mir::lower::owner_abi_plan(ws, scx, concrete_plans, inst)?,
+            skull_mir::lower::lower_instance_with_plans(ws, scx, plan, concrete_plans)?,
+        ))
+    });
+    // The callee's own emission reports why an unannotated body fails to lower.
+    let (abi, mf) = match lowered {
+        Err(_) if small => return Ok(Classified::default()),
+        lowered => lowered?,
+    };
     let canonical = Arc::new(mf);
-    let mut mf = (*canonical).clone();
+    let body = shape(inst, has_bounds, small, abi, (*canonical).clone())?;
+    Ok(Classified {
+        body: body.map(Arc::new),
+        canonical: Some(canonical),
+    })
+}
+
+fn shape(
+    inst: &Instance,
+    has_bounds: bool,
+    small: bool,
+    abi: BackendFnAbiPlanHandle,
+    mut mf: MirFunc,
+) -> Result<Option<CalleeBody>, CompilerError> {
+    let fref = inst.func;
     crate::cleanup(&mut mf)?;
     let mut has_lambda = false;
     for (_, inst) in mf.insts.iter() {
@@ -841,6 +875,13 @@ fn classify(
         .iter()
         .map(|&b| mf.blocks[b].insts.len())
         .sum();
+    if small
+        && (has_lambda
+            || reachable_insts > SMALL_CALLEE_INSTS
+            || has_back_edge(&mf, &source_reachable))
+    {
+        return Ok(None);
+    }
 
     let mut rebound: HashSet<Idx<Cell>> = HashSet::default();
     for (_, inst) in mf.insts.iter() {
@@ -881,7 +922,6 @@ fn classify(
     };
     Ok(Some(CalleeBody {
         func: mf,
-        canonical,
         subject: inst.clone(),
         abi,
         kind,
@@ -891,7 +931,47 @@ fn classify(
         coalescable_params,
         forwardable_reads,
         forwards_reads: !has_lambda,
+        small,
     }))
+}
+
+/// Unannotated callees at most this many live instructions, with no loop, are
+/// spliced like `@inline` ones. A call costs LuaJIT a trace budget either way:
+/// a tail call counts against `loopunroll` for the rest of the trace, and any
+/// other call keeps the caller's frame under the 250-slot trace limit.
+const SMALL_CALLEE_INSTS: usize = 16;
+
+/// Bodies above this many HIR expressions and statements are never lowered
+/// to measure them; none of them fits `SMALL_CALLEE_INSTS`.
+const SMALL_CALLEE_HIR_NODES: usize = 50;
+
+fn small_source(ws: &Workspace, fref: FuncRef) -> bool {
+    ws.module(fref.module)
+        .bodies
+        .get(&bone_core::hir::BodyOwner::Function(fref.func))
+        .is_some_and(|body| {
+            body.expr_arena.len() + body.statement_arena.len() <= SMALL_CALLEE_HIR_NODES
+        })
+}
+
+fn has_back_edge(mf: &MirFunc, blocks: &[Idx<Block>]) -> bool {
+    let mut order = vec![usize::MAX; mf.blocks.len()];
+    for (i, b) in skull_mir::cfg::reverse_postorder(mf, mf.entry)
+        .into_iter()
+        .enumerate()
+    {
+        order[raw(b)] = i;
+    }
+    blocks.iter().any(|&b| {
+        let back = |target: Idx<Block>| order[raw(target)] <= order[raw(b)];
+        match &mf.blocks[b].term {
+            Term::Goto(target) => back(*target),
+            Term::Branch {
+                then_bb, else_bb, ..
+            } => back(*then_bb) || back(*else_bb),
+            _ => false,
+        }
+    })
 }
 
 fn forward_param_reads(
@@ -976,10 +1056,10 @@ fn get<'a>(
 ) -> Result<Option<&'a CalleeBody>, CompilerError> {
     if !cache.cands.contains_key(inst) {
         if let Some(candidate) = cache.shared.as_ref().and_then(|table| table.lookup(inst)) {
-            cache.cands.insert(inst.clone(), candidate);
+            cache.cands.insert(inst.clone(), candidate.body);
             return Ok(cache.cands[inst].as_deref());
         }
-        let candidate = classify(ws, scx, inst, concrete_plans)?.map(Arc::new);
+        let candidate = classify(ws, scx, inst, concrete_plans)?.body;
         cache.cands.insert(inst.clone(), candidate);
     }
     Ok(cache.cands[inst].as_deref())
@@ -1059,6 +1139,10 @@ fn find_site(
     concrete_plans: &ConcretePlans,
 ) -> Result<Option<Site>, CompilerError> {
     let (first_block, first_inst) = resume.map_or((0, 0), |(block, index)| (raw(block), index));
+    let noalloc_caller = ws.module(self_ref.module).functions[self_ref.func]
+        .annotations
+        .iter()
+        .any(|a| a.name.name.as_str() == "noalloc");
     for (bid, block) in func.blocks.iter().skip(first_block) {
         if !top[raw(bid)] {
             continue;
@@ -1083,6 +1167,9 @@ fn find_site(
             let Some(cand) = get(cache, ws, scx, inst, concrete_plans)? else {
                 continue;
             };
+            if cand.small && noalloc_caller {
+                continue;
+            }
             if &cand.subject != inst
                 || cand.abi.as_ref() != abi.as_ref()
                 || cand.func.params.len() != args.len()

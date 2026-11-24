@@ -29,8 +29,8 @@ fn a_nobox_rejection_names_the_body_it_was_emitting() {
     // to its body.
     const TWO_SINK_FNS: &str = "\
 nobox value NV2 { x: float, y: float }
-fn a(k: float) -> int { let t = (NV2{x:k,y:0.0}, 1); print(\"{t}\"); 0 }
-fn b(k: float) -> int { let t = (NV2{x:0.0,y:k}, 2); print(\"{t}\"); 0 }
+fn a(k: float) -> int { let t = (NV2{x:k,y:0.0}, 1); for _ in 0..1 { print(\"{t}\") }; 0 }
+fn b(k: float) -> int { let t = (NV2{x:0.0,y:k}, 2); for _ in 0..1 { print(\"{t}\") }; 0 }
 fn root(y: float) -> int { a(y) + b(y) }
 ";
     let all = reject_messages(TWO_SINK_FNS);

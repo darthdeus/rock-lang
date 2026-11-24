@@ -5,6 +5,7 @@ use crate::common::{
 
 #[test]
 fn noalloc_preserves_parameter_demand() {
+    let _inline = inline_off_guard();
     let source = r#"
 value Sample { kept: int, unused: int }
 @noalloc fn read(v: Sample) -> int { return v.kept }
