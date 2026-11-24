@@ -174,10 +174,14 @@ impl<'a> Builder<'a> {
         let lambda = self.emit_cur(Inst::Lambda { params, entry });
         self.cur_expr = outer_expr;
         self.cur_span = outer_span;
-        self.f
-            .lambda_abi_fingerprints
-            .insert(lambda, plan.logical_fingerprint(arena));
-        self.f.lambda_abi_representations.insert(lambda, plan);
+        self.f.lambda_abis.insert(
+            lambda,
+            LambdaAbi {
+                fingerprint: plan.logical_fingerprint(arena),
+                representation: plan,
+                source: None,
+            },
+        );
         Ok(lambda)
     }
 

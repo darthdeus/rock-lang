@@ -755,10 +755,14 @@ impl<'a> Builder<'a> {
             entry,
         });
         self.cur_span = span;
-        self.f
-            .lambda_abi_fingerprints
-            .insert(lambda, plan.logical_fingerprint(self.scx.rep_arena()));
-        self.f.lambda_abi_representations.insert(lambda, plan);
+        self.f.lambda_abis.insert(
+            lambda,
+            LambdaAbi {
+                fingerprint: plan.logical_fingerprint(self.scx.rep_arena()),
+                representation: plan,
+                source: Some(body),
+            },
+        );
         let push = self.emit_cur(Inst::Global(crate::names::ustr(crate::mir::DEFER_PUSH)));
         self.emit_cur(Inst::CallValue {
             callee: push,

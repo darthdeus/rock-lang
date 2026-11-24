@@ -1,0 +1,18 @@
+macro closure_pair(seed: expr) {
+    let x = seed
+    return (() => x, () => x + 1)
+}
+
+fn both(pick: bool, seed: int) -> (fn() -> int, fn() -> int) {
+    if pick {
+        return closure_pair(seed)
+    }
+    return closure_pair(seed + 10)
+}
+
+@test
+fn macro_expansions_assign_a_site_to_each_closure() {
+    let (a, b) = both(true, 1)
+    let (c, d) = both(false, 2)
+    assert_eq((a(), b(), c(), d()), (1, 2, 12, 13))
+}

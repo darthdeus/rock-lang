@@ -536,8 +536,7 @@ fn copy_inst_metadata(
         flat_call_lanes,
         fn_value_symbols,
         code_value_identities,
-        lambda_abi_fingerprints,
-        lambda_abi_representations,
+        lambda_abis,
     );
     for (old_id, span) in source.inst_spans.iter() {
         if let Some(&new_id) = inst_map.get(&old_id) {

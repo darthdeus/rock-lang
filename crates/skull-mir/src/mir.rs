@@ -903,14 +903,20 @@ pub fn comptime_value_hash(value: &str) -> u64 {
     h.finish()
 }
 #[derive(Clone, Debug, PartialEq)]
+pub struct LambdaAbi {
+    pub fingerprint: String,
+    pub representation: crate::lower::FunctionRepPlan,
+    /// Copies of one HIR lambda share this origin. Macro siblings may share a span.
+    pub source: Option<Idx<bone_core::hir::Expr>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct MirFunc {
     pub name: Ustr,
     pub code_identity: Option<crate::code_identity::CodeIdentity>,
     /// Contains no backend symbol or build-local `RepId`.
     pub code_abi_fingerprint: Option<String>,
-    pub lambda_abi_fingerprints: bone_core::prelude::FxHashMap<Idx<Inst>, String>,
-    pub lambda_abi_representations:
-        bone_core::prelude::FxHashMap<Idx<Inst>, crate::lower::FunctionRepPlan>,
+    pub lambda_abis: bone_core::prelude::FxHashMap<Idx<Inst>, LambdaAbi>,
     pub code_value_identities:
         bone_core::prelude::FxHashMap<Idx<Inst>, crate::code_identity::CodeIdentity>,
     pub nested_fn_identities:
@@ -1021,8 +1027,7 @@ impl MirFunc {
             name,
             code_identity: None,
             code_abi_fingerprint: None,
-            lambda_abi_fingerprints: Default::default(),
-            lambda_abi_representations: Default::default(),
+            lambda_abis: Default::default(),
             code_value_identities: Default::default(),
             nested_fn_identities: Default::default(),
             code_compatibility: None,

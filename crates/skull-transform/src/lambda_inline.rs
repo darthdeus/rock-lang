@@ -146,7 +146,8 @@ fn movable(mf: &MirFunc, r: &Regions, c: &Candidate, call: Idx<Inst>) -> bool {
     if args.len() != params.len()
         || mf.call_abi_plans.contains_key(&call)
         || mf.flat_call_lanes.contains_key(&call)
-        || mf.call_rep_plans.get(&call) != mf.lambda_abi_representations.get(&c.lambda)
+        || mf.call_rep_plans.get(&call)
+            != mf.lambda_abis.get(&c.lambda).map(|abi| &abi.representation)
     {
         return false;
     }
@@ -202,8 +203,7 @@ fn move_body(mf: &mut MirFunc, body: &[Idx<Block>], lambda: Idx<Inst>, site: (Id
     else {
         unreachable!("candidate is a lambda")
     };
-    mf.lambda_abi_fingerprints.remove(&lambda);
-    mf.lambda_abi_representations.remove(&lambda);
+    mf.lambda_abis.remove(&lambda);
     mf.code_value_identities.remove(&lambda);
 
     let (block, pos) = site;

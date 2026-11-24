@@ -82,6 +82,19 @@ impl FrameInfo<'_> {
     }
 }
 
+pub(crate) type LambdaOrigin = (Ustr, usize, Option<Idx<bone_core::hir::Expr>>);
+
+pub(crate) fn lambda_origin(mf: &MirFunc, lambda: Idx<Inst>) -> Option<LambdaOrigin> {
+    let span = mf.inst_spans.get(lambda)?;
+    (span.file != "<unknown>").then(|| {
+        (
+            span.file,
+            span.offset_range().0,
+            mf.lambda_abis.get(&lambda).and_then(|abi| abi.source),
+        )
+    })
+}
+
 pub(crate) fn lambda_sites(mf: &MirFunc) -> HashMap<Idx<Inst>, LambdaSiteId> {
     use std::cmp::Reverse;
 
@@ -94,47 +107,47 @@ pub(crate) fn lambda_sites(mf: &MirFunc) -> HashMap<Idx<Inst>, LambdaSiteId> {
             if !matches!(inst, Inst::Lambda { .. }) {
                 return None;
             }
-            let span = mf.inst_spans.get(id)?;
-            let (start, end) = span.offset_range();
-            (span.file != "<unknown>").then_some((span.file, start, Reverse(end), id))
+            let origin = lambda_origin(mf, id)?;
+            let end = mf.inst_spans[id].offset_range().1;
+            Some((origin.0, origin.1, Reverse(end), origin.2, id))
         })
         .collect();
     locations.sort_unstable();
 
     let mut sites = HashMap::default();
-    let mut parents: Vec<(usize, Ustr, usize)> = Vec::new();
+    let mut parents: Vec<(usize, usize, Ustr, usize)> = Vec::new();
     let mut previous = None;
     let mut next_root = 0;
     let prefix = match &mf.code_identity {
         Some(CodeIdentity::Nested { site, .. }) => site.path.as_str(),
         _ => "",
     };
-    for (file, start, Reverse(end), id) in locations {
-        if let Some((prev_file, prev_start, path)) = previous {
-            if (file, start) == (prev_file, prev_start) {
+    for (file, start, Reverse(end), expr, id) in locations {
+        let origin = (file, start, expr);
+        if let Some((prev_origin, path)) = previous {
+            if origin == prev_origin {
                 sites.insert(id, LambdaSiteId { file, path });
                 continue;
             }
-            if file != prev_file {
+            if file != prev_origin.0 {
                 parents.clear();
                 next_root = 0;
             }
         }
-        while parents
-            .last()
-            .is_some_and(|(limit, _, _)| start >= *limit || end > *limit)
-        {
+        while parents.last().is_some_and(|&(from, limit, _, _)| {
+            start >= limit || end > limit || (start, end) == (from, limit)
+        }) {
             parents.pop();
         }
         let (parent, next) = match parents.last_mut() {
-            Some((_, path, next)) => (path.as_str(), next),
+            Some((_, _, path, next)) => (path.as_str(), next),
             None => (prefix, &mut next_root),
         };
         let path = format!("{parent}/{next}");
         *next += 1;
         let path = Ustr::from(path.as_str());
-        parents.push((end, path, 0));
-        previous = Some((file, start, path));
+        parents.push((start, end, path, 0));
+        previous = Some((origin, path));
         sites.insert(id, LambdaSiteId { file, path });
     }
     sites
@@ -477,9 +490,9 @@ pub fn convert_closures_framed(
         let capture = capture_schema(mf, env_plans[&sid].captures(), &boxed, frame);
         let compatibility = Some(CodeCompatibility {
             call_abi: mf
-                .lambda_abi_fingerprints
+                .lambda_abis
                 .get(&lambda)
-                .cloned()
+                .map(|abi| abi.fingerprint.clone())
                 .unwrap_or_else(|| "missing-lambda-abi".to_string()),
             capture,
             frame: frame.map(FrameInfo::schema),
@@ -491,10 +504,11 @@ pub fn convert_closures_framed(
         }
         let mut header = MirFunc::new(hoisted_name[&sid]);
         header.code_identity = code_identity;
-        header.code_abi_fingerprint = mf.lambda_abi_fingerprints.get(&lambda).cloned();
+        let lambda_abi = mf.lambda_abis.get(&lambda);
+        header.code_abi_fingerprint = lambda_abi.map(|abi| abi.fingerprint.clone());
         header.code_compatibility = compatibility;
         header.params = params;
-        header.abi_representation = mf.lambda_abi_representations.get(&lambda).cloned();
+        header.abi_representation = lambda_abi.map(|abi| abi.representation.clone());
         header.entry = tree.scopes[sid].entry;
         nested.push(crate::inline::compact_split_body(&header, mf, &facts));
     }

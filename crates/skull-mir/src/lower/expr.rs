@@ -256,12 +256,14 @@ impl<'a> Builder<'a> {
                 params: param_cells,
                 entry,
             });
-            self.f
-                .lambda_abi_fingerprints
-                .insert(id, lam_plan.logical_fingerprint(self.scx.rep_arena()));
-            self.f
-                .lambda_abi_representations
-                .insert(id, lam_plan.clone());
+            self.f.lambda_abis.insert(
+                id,
+                LambdaAbi {
+                    fingerprint: lam_plan.logical_fingerprint(self.scx.rep_arena()),
+                    representation: lam_plan,
+                    source: Some(e),
+                },
+            );
             Ok(id)
         })()
         .map_err(|error| self.located(error));
