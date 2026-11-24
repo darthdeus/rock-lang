@@ -215,6 +215,7 @@ pub(crate) fn publish(site: PublicationSite, publish: impl FnMut(Decoded)) {
 }
 
 /// Begin one host presentation frame, independently of profiler/stat resets.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_begin_image_upload_frame() {
     PUBLICATIONS.with(|p| p.borrow_mut().begin_frame());
@@ -223,6 +224,7 @@ pub extern "C" fn stone_begin_image_upload_frame() {
 pub(crate) fn set_budget(bytes: usize) {
     PUBLICATIONS.with(|p| p.borrow_mut().budget = bytes);
 }
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_set_frame_image_upload_time_budget(microseconds: c_int) {
     PUBLICATIONS.with(|p| {
@@ -240,6 +242,7 @@ pub(crate) fn selection_wait_us() -> c_int {
 
 /// Promote a handle's Deferred request to Required, so the next flush
 /// publishes it. False when the handle has no pending Deferred request.
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_image_require(handle: u64) -> bool {
     PUBLICATIONS.with(|p| p.borrow_mut().require(handle))
@@ -247,12 +250,15 @@ pub extern "C" fn stone_image_require(handle: u64) -> bool {
 
 /// True when no request for the handle is waiting to be published. Says
 /// nothing about whether the handle is live. A failed decode is never ready.
+/// True when no load for the handle waits to be published (not a liveness test).
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_image_ready(handle: u64) -> bool {
     PUBLICATIONS.with(|p| p.borrow().ready(handle))
         && !crate::image_texture::image_decode_failed(handle)
 }
 
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_image_pending_bytes() -> i64 {
     PUBLICATIONS.with(|p| i64::try_from(p.borrow().pending_bytes()).unwrap_or(i64::MAX))

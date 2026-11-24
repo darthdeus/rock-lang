@@ -72,11 +72,13 @@ pub(crate) fn store_owned_rgba(width: usize, height: usize, data: Vec<u8>) -> Op
     }))
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_get_image_data_count() -> c_int {
     IMAGE_DATAS.with(|ids| ids.borrow().len() as c_int)
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_create_image_data(width: c_int, height: c_int) -> u64 {
     if width <= 0 || height <= 0 {
@@ -91,6 +93,7 @@ pub extern "C" fn stone_create_image_data(width: c_int, height: c_int) -> u64 {
     store_owned_rgba(w, h, vec![0u8; data_size]).unwrap_or(0)
 }
 
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_image_data_size(
     handle: u64,
@@ -116,6 +119,7 @@ pub(crate) fn live_image_data_ids() -> Vec<u64> {
     IMAGE_DATAS.with(|ids| ids.borrow().keys().copied().collect())
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_destroy_image_data(handle: u64) {
     IMAGE_DATAS.with(|ids| {
@@ -125,6 +129,7 @@ pub extern "C" fn stone_destroy_image_data(handle: u64) {
     });
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_image_data_set_pixel(
     handle: u64,
@@ -143,6 +148,8 @@ pub extern "C" fn stone_image_data_set_pixel(
     });
 }
 
+/// `rgba` must hold `pixel_count * 4` bytes.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_image_data_fill_rgba(handle: u64, rgba: *const u8, pixel_count: c_int) {
     if rgba.is_null() || pixel_count <= 0 {
@@ -156,6 +163,7 @@ pub extern "C" fn stone_image_data_fill_rgba(handle: u64, rgba: *const u8, pixel
     });
 }
 
+/// rock-ffi stone private c-bool
 #[no_mangle]
 pub extern "C" fn stone_image_data_read_rgba(
     handle: u64,
@@ -176,6 +184,7 @@ pub extern "C" fn stone_image_data_read_rgba(
     .unwrap_or(false)
 }
 
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_image_data_get_pixel(
     handle: u64,
@@ -201,6 +210,7 @@ pub extern "C" fn stone_image_data_get_pixel(
 
 /// Decode a PNG (or any format `image` recognizes) from an asset path into a fresh
 /// ImageData handle. Returns 0 on failure. Pairs with stone_image_data_save_png.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_image_data_load_png(path: *const c_char) -> u64 {
     let Some(path_str) = c_path(path) else {
@@ -219,6 +229,7 @@ pub extern "C" fn stone_image_data_load_png(path: *const c_char) -> u64 {
     })
 }
 
+/// rock-ffi stone private
 #[no_mangle]
 pub unsafe extern "C" fn stone_image_data_load_png_bytes(bytes: *const u8, len: c_int) -> u64 {
     if bytes.is_null() || len <= 0 {
@@ -241,6 +252,7 @@ pub unsafe extern "C" fn stone_image_data_load_png_bytes(bytes: *const u8, len: 
     .unwrap_or(0)
 }
 
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_image_data_save_png(handle: u64, path: *const c_char) -> bool {
     let Some(path_str) = c_path(path) else {
@@ -280,6 +292,7 @@ pub extern "C" fn stone_image_data_save_png(handle: u64, path: *const c_char) ->
 /// Both must already match in size — caller is responsible. Used by the
 /// pixel editor for live brush feedback without allocating a new texture
 /// per stroke.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_image_update_from_data(image_handle: u64, data_handle: u64) -> bool {
     let updated = get(data_handle, |img_data| {
@@ -361,6 +374,7 @@ pub extern "C" fn stone_image_update_from_data(image_handle: u64, data_handle: u
     })
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_new_image_from_data(data_handle: u64, filter_mode: i32) -> u64 {
     let gl_filter = match crate::gl_state::gl_filter_for(filter_mode) {
