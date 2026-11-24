@@ -1,0 +1,16 @@
+//=== TEST CASE: bare_yield_requires_absence_to_be_representable_Generic ===
+//! expect: bare `yield` requires a unit or nullable yield type
+co fn missing() -> Coroutine<int> {
+    yield;
+}
+
+//=== TEST CASE: await_checks_resume_arguments_Generic ===
+//! expect: await resume argument
+co fn inner() -> Coroutine<int, string, string> {
+    let arg = yield 1
+    return arg
+}
+
+co fn outer() -> Coroutine<int, string, int> {
+    return await inner()
+}

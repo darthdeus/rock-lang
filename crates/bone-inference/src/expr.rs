@@ -531,6 +531,18 @@ pub(crate) fn infer_expr_used(
             if let Some(e) = opt {
                 let et = infer_expr(c, gamma, e)?;
                 coerce(gamma, et, y, c.body.expr_spans[e])?;
+            } else {
+                let ty = resolve(gamma, y, expr_span);
+                if !matches!(
+                    gamma.get(ty),
+                    TypeExpr::Nullable(_) | TypeExpr::Builtin(BuiltinTy::Unit | BuiltinTy::Any)
+                ) {
+                    comp_error!(
+                        expr_span,
+                        "bare `yield` requires a unit or nullable yield type, got `{}`",
+                        gamma.render(ty)
+                    );
+                }
             }
 
             // Apply the resumer's possible mutations after checking the yielded value.
@@ -548,11 +560,18 @@ pub(crate) fn infer_expr_used(
                 )
             })?;
 
-            let (outer_y, _, _) = coroutine_yrn(gamma, ret, expr_span)?;
+            let (outer_y, _, outer_n) = coroutine_yrn(gamma, ret, expr_span)?;
             let inner_ty = infer_expr(c, gamma, inner)?;
-            let (inner_y, inner_r, _) = coroutine_yrn(gamma, inner_ty, c.body.expr_spans[inner])?;
+            let (inner_y, inner_r, inner_n) =
+                coroutine_yrn(gamma, inner_ty, c.body.expr_spans[inner])?;
 
-            coerce(gamma, inner_y, outer_y, c.body.expr_spans[e])?;
+            coerce(gamma, inner_y, outer_y, expr_span)?;
+            coerce(gamma, outer_n, inner_n, expr_span).map_err(|error| {
+                CompilerError::new_with_label(
+                    expr_span,
+                    format!("await resume argument: {}", error.message),
+                )
+            })?;
 
             gamma.invalidate_mutable_refinements();
 

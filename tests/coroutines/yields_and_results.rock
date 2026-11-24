@@ -415,3 +415,17 @@ fn test_combinator_chain_over_generator() {
         print(v)
     }
 }
+
+co fn bare_nullable_yield() -> Coroutine<int?> {
+    yield;
+    yield 7
+}
+
+@test
+fn bare_yield_suspends_with_null_in_a_nullable_channel() {
+    let c = bare_nullable_yield()
+    assert(c.resume() == null)
+    assert(!c.completed())
+    assert(c.resume() == 7)
+    assert(c.resume() == null && c.completed())
+}
