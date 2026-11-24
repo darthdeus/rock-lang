@@ -45,9 +45,9 @@ pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
     // `_data` is 0-based and may be longer than `len`, hence the slice.
     template("join", 2, "$1._data.slice(0, $1.len).join($2)"),
     // Indices are native units (Lua bytes, JS UTF-16); `find` returns -1 when absent.
-    template("find", 3, "$1.indexOf($2, $3)"),
+    template("find", 3, "__rock_find($1, $2, $3)"),
     template("substring", 3, "__rock_substring($1, $2, $3)"),
-    template("unit_at", 2, "($1.charCodeAt($2) || 0)"),
+    template("unit_at", 2, "__rock_unit_at($1, $2)"),
     template("upper", 1, "$1.replace(/[a-z]+/g, __rock_upper_ascii)"),
     template("lower", 1, "$1.replace(/[A-Z]+/g, __rock_lower_ascii)"),
     template("string_char", 1, "String.fromCharCode($1)"),
@@ -1398,6 +1398,16 @@ function __rock_substring(s, start, end) {
   if (i < 0) i = Math.max(n + i + 1, 1); else if (i === 0) i = 1;
   if (j < 0) j = n + j + 1; else if (j > n) j = n;
   return i > j ? "" : s.slice(i - 1, j);
+}
+// Lua receives i + 1. If that is negative, -1 selects the last unit.
+function __rock_string_offset(s, i) {
+  return i < -1 ? s.length + i + 1 : i;
+}
+function __rock_find(s, needle, from) {
+  return s.indexOf(needle, __rock_string_offset(s, from));
+}
+function __rock_unit_at(s, i) {
+  return s.charCodeAt(__rock_string_offset(s, i)) || 0;
 }
 // C-locale case mapping: ASCII letters only, as Lua `string.upper` / `lower`.
 function __rock_upper_ascii(m) { return m.toUpperCase(); }

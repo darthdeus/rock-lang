@@ -647,6 +647,11 @@ is Lua `string.sub(a + 1, b)` on both backends, so a negative bound
 counts from the end (`"abc".substring(0, -1)` is `"abc"`); pass
 non-negative bounds unless you want that.
 
+`find(needle, from)` and `unit_at(index)` also count from the end for
+offsets below `-1`. An offset of `-2` selects the last unit, so
+`"abca".find("a", -2)` returns `3`. At `-1`, `find` starts at the
+beginning and `unit_at` returns `0`.
+
 `parse_float` accepts decimal and hexadecimal floating-point text.
 For example, `"0x1.8p3".parse_float()` returns `12.0`.
 
