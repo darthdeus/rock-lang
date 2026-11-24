@@ -85,6 +85,7 @@ pub extern "C" fn stone_get_pref_path(
 
 /// Get file modification time as Unix timestamp (seconds since epoch)
 /// Returns -1.0 on error
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_file_modtime(path: *const c_char) -> f64 {
     let Some(path_str) = (unsafe { cstr(path) }) else {
@@ -153,6 +154,7 @@ pub extern "C" fn stone_file_append(path: *const c_char, data: *const c_char, le
 
 /// Delete a single file. Returns true on success, false if the path is
 /// missing or points at a directory.
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_remove_file(path: *const c_char) -> bool {
     let Some(path_str) = (unsafe { cstr(path) }) else {
@@ -162,6 +164,7 @@ pub extern "C" fn stone_remove_file(path: *const c_char) -> bool {
 }
 
 /// Delete a directory and everything under it. Returns true on success.
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_remove_dir(path: *const c_char) -> bool {
     let Some(path_str) = (unsafe { cstr(path) }) else {
@@ -173,6 +176,7 @@ pub extern "C" fn stone_remove_dir(path: *const c_char) -> bool {
 /// Flush a file's data + metadata to stable storage (fsync). Opens the path
 /// for writing (no truncate) so the flush is portable to Windows, which
 /// requires write access for FlushFileBuffers. Returns true on success.
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_file_sync(path: *const c_char) -> bool {
     let Some(path_str) = (unsafe { cstr(path) }) else {
@@ -282,6 +286,7 @@ fn path_status(
     }
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_file_exists_status(path: *const c_char) -> i32 {
     path_status(path, crate::asset_registry::contains_asset, "path", |_| {
@@ -304,6 +309,7 @@ fn is_not_a_directory(_error: &std::io::Error) -> bool {
 
 /// Probe whether a path is a directory: -1 is an inspection error, 0 is not a
 /// directory and 1 is a directory. Embedded directories count as present.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_is_directory_status(path: *const c_char) -> i32 {
     path_status(
@@ -315,6 +321,7 @@ pub extern "C" fn stone_is_directory_status(path: *const c_char) -> i32 {
 }
 
 /// File size in bytes. Returns -1 on error / nonexistent.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_file_size(path: *const c_char) -> i64 {
     let Some(path_str) = (unsafe { cstr(path) }) else {
@@ -330,6 +337,7 @@ pub extern "C" fn stone_file_size(path: *const c_char) -> i64 {
 
 /// Create a directory (creates all parent directories as needed)
 /// Returns true on success
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_create_directory(path: *const c_char) -> bool {
     let Some(path_str) = (unsafe { cstr(path) }) else {
@@ -340,6 +348,7 @@ pub extern "C" fn stone_create_directory(path: *const c_char) -> bool {
 
 /// Copy a single file. Contents always; metadata best-effort
 /// (std::fs::copy semantics). Returns false on any error.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_copy_file(src: *const c_char, dst: *const c_char) -> bool {
     let (Some(src_str), Some(dst_str)) = (unsafe { (cstr(src), cstr(dst)) }) else {
@@ -382,6 +391,7 @@ fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
     }
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_rename(src: *const c_char, dst: *const c_char) -> bool {
     let (Some(src_str), Some(dst_str)) = (unsafe { (cstr(src), cstr(dst)) }) else {
