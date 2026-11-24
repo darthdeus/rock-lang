@@ -361,3 +361,26 @@ fn engine_projection_preserves_visibility_parameter_names_and_defaults() {
         "extern(ffi, \"stone\") fn example(window: StoneWindow, wait: bool = false) -> int\n"
     );
 }
+
+#[test]
+fn generation_reads_top_level_exports_only() {
+    let source = r##"
+        const UNRELATED: &str = r#"
+            /// rock-ffi stone-native
+            #[no_mangle] extern "C" fn in_a_string() {}
+        "#;
+        mod nested {
+            /// rock-ffi stone-native
+            #[no_mangle] pub extern "C" fn in_a_module() {}
+        }
+        fn unrelated() {
+            /// rock-ffi stone-native
+            #[no_mangle] extern "C" fn in_a_body() {}
+        }
+        /// rock-ffi stone-native
+        #[no_mangle] pub extern "C" fn example(sample: f32) -> f32 { sample }
+    "##;
+    let generated = STONE_NATIVE.bindings([("", source)]).unwrap();
+    assert!(generated.cdef.ends_with("float example(float sample);\n"));
+    assert_eq!(generated.rock.matches("extern(ffi,").count(), 1);
+}
