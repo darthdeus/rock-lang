@@ -71,3 +71,20 @@ fn native_image_fill_rejects_invalid_handle() {
     assert(!stone_image_data_fill_rect_rgba8(0, 0, 0, 1, 1, 0, 0, 0, 255),
         "an unowned image handle returns false through the native binding")
 }
+
+@test
+fn navigation_reads_rock_value_layout() {
+    stone_native_load()
+    let layout = native_nav_buffer(6)
+    layout[0] = native_nav_int(1)
+    layout[1] = native_nav_int(-120)
+    layout[2] = native_nav_int(0)
+    layout[3] = native_nav_int(4294967297)
+    layout[4] = native_nav_int(0)
+    layout[5] = native_nav_int(0)
+    assert_eq(stone_nav_layout_valid(layout.ptr, layout.len, 10), 1,
+        "distinct high words keep the space IDs distinct")
+    layout[3] = native_nav_int(1)
+    assert_eq(stone_nav_layout_valid(layout.ptr, layout.len, 10), 0,
+        "Rust reads the updated Rock buffer and rejects the duplicate ID")
+}
