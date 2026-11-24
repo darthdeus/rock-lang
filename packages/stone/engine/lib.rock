@@ -1116,42 +1116,6 @@ fn stone_frame_stream_finish() -> (bool, int, int, int) {
     return (ok, FFI_INT_OUT_1.ptr.read(), FFI_INT_OUT_2.ptr.read(), FFI_INT_OUT_3.ptr.read())
 }
 
-// @nomangle: setup_stone's cdef declares the stats getters over these names.
-pub @nomangle value GraphicsStats {
-    draw_calls: int,
-    text_draw_calls: int,
-    canvas_switches: int,
-    shader_switches: int,
-    stream_upload_calls: int,
-    stream_storage_replacements: int,
-    stream_upload_bytes: int,
-    streamed_vertices: int,
-    retained_upload_calls: int,
-    retained_upload_bytes: int,
-    retained_uploaded_vertices: int,
-    images: int,
-    canvases: int,
-    texture_memory_mib: int,
-    instanced_draws: int,
-}
-
-pub @nomangle value ImageLoadStats {
-    load_calls: int,
-    load_failures: int,
-    decoded_bytes: int,
-    load_us: int,
-    upload_calls: int,
-    upload_bytes: int,
-    wait_us: int,
-    upload_us: int,
-    active_frames: int,
-    max_wait_us: int,
-}
-
-// Allocates a GraphicsStats[1] per call.
-pub extern(ffi, "stone") fn stone_get_graphics_stats() -> GraphicsStats
-pub extern(ffi, "stone") fn stone_get_image_frame_stats() -> ImageLoadStats
-pub extern(ffi, "stone") fn stone_get_image_profile_stats() -> ImageLoadStats
 extern(ffi, "stone") fn stone_reset_image_profile_stats()
 extern(ffi, "stone") fn stone_reset_image_profile_stats_to_frame()
 

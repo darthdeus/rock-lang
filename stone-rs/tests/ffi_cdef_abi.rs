@@ -569,7 +569,7 @@ fn stone_event_cdef_layout_matches_rust() {
         })
         .collect();
     assert_eq!(decls.len(), 3, "StoneEvent cdef types not found");
-    use std::mem::{offset_of, size_of, size_of_val};
+    use std::mem::{align_of, offset_of, size_of, size_of_val};
     use stone_rs::StoneEvent as E;
 
     let fields = [
@@ -590,7 +590,7 @@ fn stone_event_cdef_layout_matches_rust() {
     ];
     let script = format!(
         "local ffi = require('ffi')\nffi.cdef[[{};]]\n\
-         local out = {{ ffi.sizeof('StoneEvent'), ffi.sizeof(ffi.new('StoneEvent').text), \
+         local out = {{ ffi.sizeof('StoneEvent'), ffi.alignof('StoneEvent'), ffi.sizeof(ffi.new('StoneEvent').text), \
          tonumber(ffi.C.STONE_EVENT_TEXTINPUT) }}\n\
          for _, f in ipairs({{ '{}' }}) do out[#out + 1] = ffi.offsetof('StoneEvent', f) end\n\
          print(table.concat(out, ' '))",
@@ -613,6 +613,7 @@ fn stone_event_cdef_layout_matches_rust() {
         .collect();
     let rust = [
         size_of::<E>(),
+        align_of::<E>(),
         size_of_val(&E::default().text),
         stone_rs::StoneEventType::TextInput as usize,
     ]
