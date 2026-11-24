@@ -1,4 +1,4 @@
-use crate::common::{emit_module, function_body};
+use crate::common::{bone_rejections, emit_module, function_body, try_emit_module};
 
 const F32_CTOR_STORE: &str = r#"
 value V2f { x: f32, y: f32 }
@@ -31,4 +31,36 @@ fn an_inlined_f32_ctor_store_rounds_only_in_the_float_view() {
     assert!(!body.contains("fvert("));
     assert!(body.contains(".__vf"));
     assert!(!body.contains("__rock_f32("));
+}
+
+#[test]
+fn native_buffer_copy_requires_a_common_c_layout() {
+    let invalid = try_emit_module(
+        r#"
+@nomangle fn copy(dst: NativeBuffer<string>, src: NativeBuffer<string>) {
+    dst.copy_from(0, src, 0, 1)
+}
+fn main() {}
+"#,
+    )
+    .expect_err("string has no native-buffer element ctype");
+    assert!(
+        invalid
+            .message
+            .contains("valid native-buffer element ctype")
+    );
+
+    let mismatch = bone_rejections(
+        r#"
+@nomangle fn copy(dst: NativeBuffer<int>, src: NativeBuffer<float>) {
+    dst.copy_from(0, src, 0, 1)
+}
+fn main() {}
+"#,
+    );
+    assert!(
+        mismatch
+            .iter()
+            .any(|message| message.contains("type mismatch"))
+    );
 }

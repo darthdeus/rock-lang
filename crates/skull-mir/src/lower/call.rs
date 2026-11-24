@@ -1439,6 +1439,25 @@ impl<'a> Builder<'a> {
         // Identity is independent of delivery: a call the policy declines to
         // specialize still names exactly one concrete instance.
         let callee = self.concrete_callee_entry(e, self.cur_op.clone())?;
+        if let [element] = callee.instance.args.as_slice() {
+            let func = callee.instance.func;
+            let module = self.ws.module(func.module);
+            if module.functions[func.func].name.as_str() == "copy_from"
+                && bone_core::modules::is_stdlib_module_file(module.file.as_str())
+            {
+                self.scx
+                    .rep_arena()
+                    .native_buffer_element_ctype(
+                        self.ws,
+                        self.scx.target,
+                        self.concrete_mono(*element),
+                        "NativeBuffer.copy_from",
+                    )
+                    .map_err(|error| {
+                        CompilerError::new_with_label(self.body.expr_spans[e], error.message)
+                    })?;
+            }
+        }
         Ok(DirectCall {
             tree,
             callee,

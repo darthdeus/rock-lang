@@ -773,7 +773,7 @@ impl<'a> Builder<'a> {
         };
         self.scx
             .rep_arena()
-            .native_buffer_element_ctype(self.ws, self.scx.target, element)
+            .native_buffer_element_ctype(self.ws, self.scx.target, element, "native_buffer_alloc")
             .map_err(|error| CompilerError::new_with_label(span, error.message))
     }
 
