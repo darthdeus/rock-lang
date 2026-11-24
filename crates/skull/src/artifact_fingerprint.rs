@@ -167,7 +167,8 @@ fn write_code_row(h: &mut CanonicalHasher, key: &str, entry: &CodeEntry) {
             h.boolean(true);
             h.len(frame.slots.len());
             for slot in &frame.slots {
-                h.u64(u64::from(*slot));
+                let boxed = frame.boxed_slots.binary_search(slot).is_ok();
+                h.u64(u64::from(*slot) | (u64::from(boxed) << 32));
             }
         }
         None => h.boolean(false),

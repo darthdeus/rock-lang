@@ -273,11 +273,11 @@ impl CaptureSchema {
     }
 }
 
-/// Slot ordinals are the logical layout contract; a changed set or order is
-/// incompatible.
+/// Slot ordinals and the slots that hold shared boxes are the frame's layout contract.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct FrameSchema {
     pub slots: Vec<u32>,
+    pub boxed_slots: Vec<u32>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]

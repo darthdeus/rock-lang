@@ -65,6 +65,7 @@ pub fn prepare_coroutine(
     let frame_info = crate::closure::FrameInfo {
         s_cell: lowered.s_cell,
         slots: lowered.frame_plan.slots(),
+        repeated_captures: &lowered.repeated_captures,
     };
     let defer_entries: Vec<Idx<Block>> = lowered
         .step

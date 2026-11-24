@@ -1,0 +1,181 @@
+@test
+fn each_iteration_has_its_own_mutable_capture() {
+    let callbacks: [fn() -> int] = []
+    for i in 0..2 {
+        let n = i
+        callbacks.push(() => { n += 1; n })
+    }
+    assert_eq(callbacks[0](), 1)
+    assert_eq(callbacks[1](), 2)
+    assert_eq(callbacks[0](), 2)
+}
+
+@test
+fn while_iterations_share_only_outer_bindings() {
+    let reads: [fn() -> int] = []
+    let bumps: [fn()] = []
+    let i = 0
+    let total = 0
+    while i < 4 {
+        let n = i * 10
+        i += 1
+        if i == 2 { continue }
+        reads.push(() => n)
+        bumps.push(() => { n += 1; total += n })
+        if i == 3 { break }
+    }
+    assert_eq(reads.len, 2)
+    bumps[0]()
+    assert_eq(reads[0](), 1)
+    assert_eq(reads[1](), 20)
+    bumps[1]()
+    bumps[0]()
+    assert_eq(reads[0](), 2)
+    assert_eq(reads[1](), 21)
+    assert_eq(total, 24)
+}
+
+@test
+fn nested_foreach_bindings_are_recreated_at_their_own_declarations() {
+    let callbacks: [fn() -> int] = []
+    for i in [0, 10] {
+        let outer = i
+        for j in [1, 2] {
+            let inner = j
+            callbacks.push(() => {
+                outer += 1
+                inner += 1
+                outer * 100 + inner
+            })
+        }
+    }
+    assert_eq(callbacks[0](), 102)
+    assert_eq(callbacks[1](), 203)
+    assert_eq(callbacks[2](), 1102)
+    assert_eq(callbacks[3](), 1203)
+    assert_eq(callbacks[0](), 303)
+}
+
+@test
+fn writes_before_capture_can_snapshot_each_iteration() {
+    let callbacks: [fn() -> int] = []
+    for i in 0..2 {
+        let n = i
+        n += 10
+        callbacks.push(() => n)
+    }
+    assert_eq(callbacks[0](), 10)
+    assert_eq(callbacks[1](), 11)
+}
+
+co fn callbacks() -> Coroutine<fn() -> int> {
+    for i in 0..2 {
+        let n = i
+        yield () => { n += 1; n }
+    }
+}
+
+@test
+fn yielded_closures_keep_iteration_bindings() {
+    let task = callbacks()
+    let first = task.resume().unwrap()
+    let second = task.resume().unwrap()
+    assert_eq(first(), 1)
+    assert_eq(second(), 2)
+    assert_eq(first(), 2)
+}
+
+global cleaned: [int] = []
+
+co fn callbacks_with_cleanup() -> Coroutine<fn() -> int> {
+    for i in 0..2 {
+        let n = i * 10
+        defer { cleaned.push(n) }
+        yield () => { n += 1; n }
+        n += 2
+    }
+}
+
+@test
+fn pending_defer_reads_its_own_iterations_binding() {
+    cleaned = []
+    let task = callbacks_with_cleanup()
+    let first = task.resume().unwrap()
+    assert_eq(first(), 1)
+    let second = task.resume().unwrap()
+    assert_eq(first(), 4)
+    assert_eq(second(), 11)
+    kill(task)
+    assert_eq(cleaned.len, 2)
+    assert_eq(cleaned[0], 3)
+    assert_eq(cleaned[1], 11)
+}
+
+co fn snapshots() -> Coroutine<fn() -> int> {
+    for i in 0..2 {
+        let n = i
+        yield () => n
+    }
+}
+
+@test
+fn yielded_read_only_locals_snapshot_each_iteration() {
+    let task = snapshots()
+    let first = task.resume().unwrap()
+    let second = task.resume().unwrap()
+    assert_eq(first(), 0)
+    assert_eq(second(), 1)
+}
+
+@test
+fn a_pattern_binding_is_shared_with_later_writes_in_its_iteration() {
+    let callbacks: [fn() -> int] = []
+    let values = [10, 0]
+    while let n = values.pop() {
+        callbacks.push(() => n)
+        if n == 0 {
+            n += 2
+        } else {
+            n += 3
+        }
+    }
+    assert_eq(callbacks[0](), 2)
+    assert_eq(callbacks[1](), 13)
+}
+
+global cleanup_callbacks: [fn() -> int] = []
+
+co fn callbacks_from_cleanup() -> Coroutine<fn() -> int> {
+    for i in 0..2 {
+        let n = i * 10
+        defer { cleanup_callbacks.push(() => { n += 2; n }) }
+        yield () => { n += 1; n }
+    }
+}
+
+@test
+fn an_escaping_defer_closure_captures_the_active_box() {
+    cleanup_callbacks = []
+    let task = callbacks_from_cleanup()
+    let first = task.resume().unwrap()
+    let second = task.resume().unwrap()
+    kill(task)
+    assert_eq(cleanup_callbacks[0](), 2)
+    assert_eq(cleanup_callbacks[1](), 12)
+    assert_eq(first(), 3)
+    assert_eq(second(), 13)
+}
+
+value Counter { n: int }
+
+@test
+fn scalarized_fields_follow_the_lexical_binding() {
+    let callbacks: [fn() -> int] = []
+    for i in 0..2 {
+        let count = Counter { n: i * 10 }
+        callbacks.push(() => count.n)
+        count.n += 1
+    }
+    assert_eq(callbacks[0](), 1)
+    assert_eq(callbacks[1](), 11)
+}

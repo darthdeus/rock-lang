@@ -19,7 +19,7 @@ pub struct Scope {
     /// The `Inst::Lambda` that creates this scope (`None` for the root fn).
     pub lambda: Option<Idx<Inst>>,
     pub params: Vec<Idx<Cell>>,
-    creation_block: Option<Idx<Block>>,
+    pub(crate) creation_block: Option<Idx<Block>>,
 }
 
 pub struct ScopeTree {
@@ -70,6 +70,11 @@ impl Ownership {
 
     pub(crate) fn written_outside(&self, cell: Idx<Cell>, scope: ScopeId) -> bool {
         self.cells[raw(cell)].written_outside(scope)
+    }
+
+    pub(crate) fn single_write(&self, cell: Idx<Cell>) -> bool {
+        let row = &self.cells[raw(cell)];
+        !row.is_param && row.writes == 1
     }
 
     pub(crate) fn is_loop_binding(&self, cell: Idx<Cell>) -> bool {
@@ -141,6 +146,14 @@ impl ScopeTree {
     }
 
     pub fn analyze(&self, func: &MirFunc) -> Ownership {
+        self.analyze_with_root_cells(func, std::iter::empty())
+    }
+
+    pub(crate) fn analyze_with_root_cells(
+        &self,
+        func: &MirFunc,
+        root_cells: impl IntoIterator<Item = Idx<Cell>>,
+    ) -> Ownership {
         let mut cells: Vec<_> = func
             .cells
             .values()
@@ -150,6 +163,9 @@ impl ScopeTree {
                 ..CellUse::default()
             })
             .collect();
+        for cell in root_cells {
+            cells[raw(cell)].owner = Some(ROOT);
+        }
         let mut captures = vec![HashSet::default(); self.scopes.len()];
         for (sid, scope) in self.scopes.iter().enumerate() {
             for &cell in &scope.params {

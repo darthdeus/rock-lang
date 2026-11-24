@@ -1,5 +1,6 @@
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
+use crate::capture_lifetime::{RepeatedCapture, is_cyclic, repeated_captures};
 use crate::scope::{Ownership, ScopeId, ScopeTree, non_dominating_by_value_captures};
 use comfy_la_arena::Idx;
 use skull_mir::cfg::reachable_blocks_from;
@@ -72,13 +73,28 @@ pub(crate) fn frame_field(slot: u32) -> Ustr {
 pub(crate) struct FrameInfo<'a> {
     pub s_cell: Idx<Cell>,
     pub slots: &'a HashMap<Idx<Cell>, u32>,
+    pub repeated_captures: &'a HashMap<Idx<Cell>, RepeatedCapture>,
 }
 
 impl FrameInfo<'_> {
+    fn repeated_cells(&self) -> impl Iterator<Item = Idx<Cell>> + '_ {
+        self.repeated_captures
+            .keys()
+            .copied()
+            .filter(|cell| self.slots.contains_key(cell))
+    }
+
+    fn boxed_cells(&self) -> impl Iterator<Item = Idx<Cell>> + '_ {
+        self.repeated_cells()
+            .filter(|cell| matches!(self.repeated_captures[cell], RepeatedCapture::Shared(_)))
+    }
+
     pub fn schema(&self) -> FrameSchema {
         let mut slots: Vec<u32> = self.slots.values().copied().collect();
         slots.sort_unstable();
-        FrameSchema { slots }
+        let mut boxed_slots: Vec<u32> = self.boxed_cells().map(|cell| self.slots[&cell]).collect();
+        boxed_slots.sort_unstable();
+        FrameSchema { slots, boxed_slots }
     }
 }
 
@@ -170,6 +186,7 @@ pub fn convert_closures_framed(
         .insts
         .iter()
         .any(|(_, i)| matches!(i, Inst::Lambda { .. }))
+        && frame.is_none_or(|f| f.boxed_cells().next().is_none())
     {
         refresh_owner_compatibility(mf, None, LambdaTopologyFingerprint::default());
         return;
@@ -189,9 +206,19 @@ pub fn convert_closures_framed(
         Some((t, o)) => (t, o),
         None => {
             owned_tree = ScopeTree::build(mf);
-            owned_own = owned_tree.analyze(mf);
+            owned_own = owned_tree
+                .analyze_with_root_cells(mf, frame.into_iter().flat_map(FrameInfo::repeated_cells));
             (&owned_tree, &owned_own)
         }
+    };
+    // Frame dispatch splits control-flow cycles at yields, so use the plans
+    // computed on the original CFG for the step.
+    let analyzed;
+    let repeated = if let Some(f) = frame.filter(|_| precomputed.is_some()) {
+        f.repeated_captures
+    } else {
+        analyzed = repeated_captures(mf, tree, own, None);
+        &analyzed
     };
     let mut boxed: HashSet<Idx<Cell>> = tree.boxed_cells(own);
     if let Some(f) = frame {
@@ -205,13 +232,30 @@ pub fn convert_closures_framed(
         frame.map(|f| f.slots),
     ));
 
+    let mut seeded_boxes = HashMap::default();
+    for (&cell, &capture) in repeated {
+        match capture {
+            RepeatedCapture::Snapshot => {
+                boxed.remove(&cell);
+            }
+            RepeatedCapture::Shared(init) => {
+                boxed.insert(cell);
+                seeded_boxes.insert(cell, init);
+            }
+        }
+    }
+    if let Some(f) = frame {
+        // Detached regions access the live pointer but never initialize it.
+        boxed.extend(f.boxed_cells());
+    }
+
     let mut lambda_sid: HashMap<Idx<Inst>, ScopeId> = HashMap::default();
     for (sid, s) in tree.scopes.iter().enumerate() {
         if let Some(lid) = s.lambda {
             lambda_sid.insert(lid, sid);
         }
     }
-    let seeded_boxes = seeded_box_initializers(mf, tree, own, &boxed, &lambda_sid);
+    seed_nonrepeating_boxes(mf, tree, own, &boxed, &lambda_sid, frame, &mut seeded_boxes);
     // Keep the names indexed by lambda order in the instruction arena.
     let mut ordered: Vec<(usize, ScopeId)> = Vec::new();
     {
@@ -250,7 +294,7 @@ pub fn convert_closures_framed(
         if let Some(f) = frame {
             let mut via_s = false;
             caps.retain(|c| {
-                if !f.slots.contains_key(c) {
+                if !f.slots.contains_key(c) || f.repeated_captures.contains_key(c) {
                     return true;
                 }
                 let lambda_written = own.written_outside(*c, crate::scope::ROOT);
@@ -344,6 +388,7 @@ pub fn convert_closures_framed(
                             None
                         }
                     } else if s != crate::scope::ROOT
+                        && !boxed
                         && let Some(frame) = frame
                         && let Some(&slot) = frame.slots.get(&c)
                     {
@@ -414,7 +459,7 @@ pub fn convert_closures_framed(
     let mut boxed_sorted: Vec<Idx<Cell>> = boxed.iter().copied().collect();
     boxed_sorted.sort_by_key(|c| raw(*c));
     for c in boxed_sorted {
-        if seeded_boxes.contains_key(&c) {
+        if seeded_boxes.contains_key(&c) || frame.is_some_and(|f| f.slots.contains_key(&c)) {
             continue;
         }
         let owner = own.owner(c).expect("boxed cell has an owner");
@@ -517,13 +562,15 @@ pub fn convert_closures_framed(
 
 /// Delay a local's box until its first store only when no access or capture can
 /// observe the old entry box, and the allocation cannot repeat within the scope.
-fn seeded_box_initializers(
+fn seed_nonrepeating_boxes(
     mf: &MirFunc,
     tree: &ScopeTree,
     own: &Ownership,
     boxed: &HashSet<Idx<Cell>>,
     lambda_sid: &HashMap<Idx<Inst>, ScopeId>,
-) -> HashMap<Idx<Cell>, Idx<Inst>> {
+    frame: Option<&FrameInfo<'_>>,
+    seeded: &mut HashMap<Idx<Cell>, Idx<Inst>>,
+) {
     let locals: HashSet<_> = boxed
         .iter()
         .copied()
@@ -532,10 +579,12 @@ fn seeded_box_initializers(
                 .params
                 .contains(c)
                 && !own.is_loop_binding(*c)
+                && !seeded.contains_key(c)
+                && !frame.is_some_and(|f| f.slots.contains_key(c))
         })
         .collect();
     if locals.is_empty() {
-        return HashMap::default();
+        return;
     }
     let mut accesses: HashMap<Idx<Cell>, Vec<(Idx<Block>, usize, Idx<Inst>)>> = HashMap::default();
     for (b, block) in mf.blocks.iter() {
@@ -556,7 +605,6 @@ fn seeded_box_initializers(
             }
         }
     }
-    let mut seeded = HashMap::default();
     let mut dominators = HashMap::default();
     let mut cyclic = HashMap::default();
     for (c, sites) in accesses {
@@ -581,29 +629,13 @@ fn seeded_box_initializers(
             }
             // Entry allocation already repeats on entry backedges. Moving into
             // any other cycle would split a previously shared cell per iteration.
-            if b != entry
-                && *cyclic.entry(b).or_insert_with(|| {
-                    let mut pending = Vec::new();
-                    skull_mir::cfg::successors(&mf.blocks[b].term, |s| pending.push(s));
-                    let mut seen = HashSet::default();
-                    while let Some(next) = pending.pop() {
-                        if next == b {
-                            return true;
-                        }
-                        if seen.insert(next) {
-                            skull_mir::cfg::successors(&mf.blocks[next].term, |s| pending.push(s));
-                        }
-                    }
-                    false
-                })
-            {
+            if b != entry && *cyclic.entry(b).or_insert_with(|| is_cyclic(mf, b)) {
                 continue;
             }
             seeded.insert(c, id);
             break;
         }
     }
-    seeded
 }
 
 /// State dispatch dominates the coroutine root after rewriting yields.
@@ -652,10 +684,13 @@ fn capture_schema(
             {
                 complete = false;
             }
-            let mode = if frame.is_some_and(|f| f.s_cell == *cell || f.slots.contains_key(cell)) {
-                CaptureMode::Frame
-            } else if boxed.contains(cell) {
+            let mode = if boxed.contains(cell) {
                 CaptureMode::Shared
+            } else if frame.is_some_and(|f| {
+                f.s_cell == *cell
+                    || f.slots.contains_key(cell) && !f.repeated_captures.contains_key(cell)
+            }) {
+                CaptureMode::Frame
             } else {
                 CaptureMode::ByValue
             };

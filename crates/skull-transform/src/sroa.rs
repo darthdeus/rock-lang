@@ -986,6 +986,7 @@ fn expand_stores(
         }
     }
     for (store_i, c, fields) in store_expansions {
+        let initializes_binding = func.binding_initializers.remove(&store_i);
         let mut news = Vec::with_capacity(fields.len());
         for (fname, src) in fields {
             let fval = match src {
@@ -1016,10 +1017,14 @@ fn expand_stores(
             if nn_field.get(&(c, fname)).copied().unwrap_or(false) {
                 func.mark_nonnull_value_struct(fc);
             }
-            news.push(func.alloc_inst(Inst::Store {
+            let store = func.alloc_inst(Inst::Store {
                 cell: fc,
                 value: fval,
-            }));
+            });
+            if initializes_binding {
+                func.binding_initializers.insert(store);
+            }
+            news.push(store);
         }
         replacement.insert(store_i, news);
     }

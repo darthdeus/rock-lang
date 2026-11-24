@@ -122,24 +122,24 @@ fn branch_dependent_initialization_retains_the_entry_box() {
 }
 
 #[test]
-fn repeated_initializer_does_not_split_the_shared_cell() {
+fn repeated_writes_do_not_recreate_an_outer_binding() {
     let (mf, lua) = converted(
         "fn f(input: int, replacement: int, again: bool) -> fn() -> int {\n\
-        let read = () => input\n\
-        while again {\n\
-            let n = input\n\
-            read = () => {\n\
-                n = replacement\n\
-                return n\n\
-            }\n\
+        let n = input\n\
+        let read = () => n\n\
+        let go = again\n\
+        while go {\n\
+            n = replacement\n\
+            go = false\n\
         }\n\
         return read\n\
     }",
         |_| {},
     );
-    assert!(
-        boxes(&mf)[0].is_empty(),
-        "a loop must not recreate a root-owned cell: {lua}"
+    assert_eq!(boxes(&mf).len(), 1, "the outer binding has one box: {lua}");
+    execute(
+        &lua,
+        "assert(f(37, 91, true)() == 91); assert(f(37, 91, false)() == 37)",
     );
 }
 

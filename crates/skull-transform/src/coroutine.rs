@@ -2,6 +2,7 @@
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
+use crate::capture_lifetime::{RepeatedCapture, repeated_captures};
 use crate::detached::detached_region_blocks;
 use crate::visit::{raw, top_level_blocks};
 use comfy_la_arena::Idx;
@@ -65,6 +66,7 @@ pub struct CoroLowered {
     /// Closure conversion uses the same ownership as frame planning.
     pub step_tree: crate::scope::ScopeTree,
     pub step_own: crate::scope::Ownership,
+    pub(crate) repeated_captures: HashMap<Idx<Cell>, RepeatedCapture>,
 }
 
 /// FNV-1a 32 over the canonical layout string. 32-bit so the constant is
@@ -293,12 +295,15 @@ fn live_at_resumes<K: Copy + Eq + std::hash::Hash>(
 
 /// A defer's scope-exit splice shares closure bodies with the detached copy.
 /// Its locals must therefore use the same capture representation.
-fn detached_uses(
-    func: &MirFunc,
-    entries: impl IntoIterator<Item = Idx<Block>>,
-) -> (HashSet<Idx<Cell>>, HashSet<crate::closure::LambdaOrigin>) {
-    let mut cells = HashSet::default();
-    let mut sites = HashSet::default();
+#[derive(Default)]
+struct DetachedUses {
+    cells: HashSet<Idx<Cell>>,
+    sites: HashSet<crate::closure::LambdaOrigin>,
+    writes: HashSet<Idx<Cell>>,
+}
+
+fn detached_uses(func: &MirFunc, entries: impl IntoIterator<Item = Idx<Block>>) -> DetachedUses {
+    let mut uses = DetachedUses::default();
     for block in entries
         .into_iter()
         .flat_map(|entry| detached_region_blocks(func, entry))
@@ -306,16 +311,19 @@ fn detached_uses(
         for &id in &func.blocks[block].insts {
             let inst = &func.insts[id];
             inst.cells_each(&mut |cell| {
-                cells.insert(cell);
+                uses.cells.insert(cell);
+            });
+            inst.cell_writes_each(&mut |cell| {
+                uses.writes.insert(cell);
             });
             if matches!(inst, Inst::Lambda { .. })
                 && let Some(site) = crate::closure::lambda_origin(func, id)
             {
-                sites.insert(site);
+                uses.sites.insert(site);
             }
         }
     }
-    (cells, sites)
+    uses
 }
 
 pub fn transform_coroutine(
@@ -382,16 +390,17 @@ pub fn transform_coroutine(
     // Analyze ownership while the yield edges still connect the root CFG.
     let tree = crate::scope::ScopeTree::build(&step);
     let own = tree.analyze(&step);
+    let detached = detached_uses(
+        &step,
+        step.coro_defers
+            .iter()
+            .map(|(_, entry)| *entry)
+            .chain(hooks.iter().map(|(_, entry)| *entry)),
+    );
+    let repeated_captures = repeated_captures(&step, &tree, &own, Some(&detached.writes));
     let frame_cells: HashSet<Idx<Cell>> = {
         let root = crate::scope::ROOT;
         let root_owned = |cell: &Idx<Cell>| own.owner(*cell) == Some(root);
-        let (detached_cells, detached_sites) = detached_uses(
-            &step,
-            step.coro_defers
-                .iter()
-                .map(|(_, entry)| *entry)
-                .chain(hooks.iter().map(|(_, entry)| *entry)),
-        );
         let captured_by_escaping_lambda = own
             .captures
             .iter()
@@ -399,14 +408,14 @@ pub fn transform_coroutine(
             .filter(|(scope, _)| {
                 tree.scopes[*scope].lambda.is_none_or(|lambda| {
                     !crate::closure::lambda_origin(&step, lambda)
-                        .is_some_and(|site| detached_sites.contains(&site))
+                        .is_some_and(|site| detached.sites.contains(&site))
                 })
             })
             .flat_map(|(_, cells)| cells.iter().copied());
         let mut fields = cells_live_at_yield_resumes(&step, &orig_blocks, &suspension_resumes);
         fields.extend(params.iter().copied());
         fields.extend(captured_by_escaping_lambda);
-        fields.extend(detached_cells);
+        fields.extend(detached.cells);
         fields.retain(|cell| *cell != s_cell && *cell != resume_arg && root_owned(cell));
         fields
     };
@@ -494,13 +503,15 @@ pub fn transform_coroutine(
         use std::fmt::Write as _;
         for (id, cell) in step.cells.iter() {
             if let Some(&slot) = frame_slots.get(&id) {
+                let boxed = matches!(repeated_captures.get(&id), Some(RepeatedCapture::Shared(_)));
                 let _ = write!(
                     canon,
-                    "c{}:{};",
+                    "c{}:{}{};",
                     slot,
                     cell.name
                         .map(|n| n.as_str().to_string())
-                        .unwrap_or_default()
+                        .unwrap_or_default(),
+                    if boxed { ":box" } else { "" }
                 );
             }
         }
@@ -674,6 +685,7 @@ pub fn transform_coroutine(
         hooks,
         step_tree: tree,
         step_own: own,
+        repeated_captures,
     }
 }
 
