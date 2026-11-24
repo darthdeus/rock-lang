@@ -121,8 +121,8 @@ pub(super) fn emit_body_chunk(
         skull_mir::lower::validate_concrete_bound_plan(f, plan)?;
     }
     let started = Instant::now();
-    let lowered = match inline_cache.canonical_body(instance) {
-        Some(body) => Ok((*body).clone()),
+    let lowered = match inline_cache.take_lowered_body(instance) {
+        Some(body) => Ok(body),
         None => skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &concrete.plans),
     };
     let mut mf = if specialized {

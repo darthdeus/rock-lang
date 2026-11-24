@@ -6,11 +6,9 @@ fn warm_candidates(
     concrete: &crate::concrete_body::ConcreteBodies,
     keys: Vec<Instance>,
 ) -> Result<Vec<skull_transform::InlineCandidateWarm>, CompilerError> {
-    par_map_with(
-        keys,
-        skull_transform::InlineCache::default,
-        |inline_cache, inst| inline_cache.warm_candidate(ws, scx, inst, concrete.plans.as_ref()),
-    )
+    par_map(keys, |inst| {
+        skull_transform::InlineCache::warm_candidate(ws, scx, inst, concrete.plans.as_ref())
+    })
     .into_iter()
     .collect()
 }
@@ -21,9 +19,9 @@ pub(super) fn build_inline_candidate_table(
     concrete: &crate::concrete_body::ConcreteBodies,
 ) -> Result<std::sync::Arc<skull_transform::InlineCandidateTable>, CompilerError> {
     let keys: Vec<Instance> = concrete.candidate_keys().cloned().collect();
-    let warms = warm_candidates(ws, scx, concrete, keys.clone())?;
+    let warms = warm_candidates(ws, scx, concrete, keys)?;
     Ok(std::sync::Arc::new(
-        skull_transform::InlineCandidateTable::from_warms_with_base(None, keys, warms),
+        skull_transform::InlineCandidateTable::from_warms(warms),
     ))
 }
 
@@ -42,9 +40,7 @@ pub(super) fn update_inline_candidate_table(
             warms,
             &removed.iter().cloned().collect::<Vec<_>>(),
         ),
-        None => {
-            skull_transform::InlineCandidateTable::from_warms_with_base(None, Vec::new(), warms)
-        }
+        None => skull_transform::InlineCandidateTable::from_warms(warms),
     }))
 }
 

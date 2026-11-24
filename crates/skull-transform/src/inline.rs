@@ -3,11 +3,11 @@
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use smallvec::SmallVec;
 use std::cell::Cell as ThreadCell;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use bone_core::prelude::{BoundTree, CompilerError};
 use bone_core::workspace::Workspace;
-use comfy_la_arena::Idx;
+use comfy_la_arena::{ArenaMap, Idx};
 use skull_mir::concrete::ConcretePlans;
 use skull_mir::instance::Instance;
 use skull_mir::lower::{BackendFnAbiPlanHandle, ScalarCtx};
@@ -68,6 +68,7 @@ struct CalleeBody {
     /// A lambda sub-CFG reads captured cells, so its body cannot forward these reads.
     forwardable_reads: Vec<(usize, Idx<Inst>)>,
     forwards_reads: bool,
+    resolves_bounds: bool,
     /// Spliced for its size, not an annotation: a `@noalloc` caller keeps the
     /// call so the allocation check sees the callee it would reject.
     small: bool,
@@ -76,13 +77,12 @@ struct CalleeBody {
 /// Rejected candidates are cached too.
 type CacheKey = Instance;
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct Classified {
     body: Option<Arc<CalleeBody>>,
-    /// The raw lowered body shared with emission consumers, kept for rejected
-    /// candidates too so their emission does not lower them again. Every
-    /// mutating consumer clones it; only this table owns the canonical source.
-    canonical: Option<Arc<MirFunc>>,
+    /// Emission takes the raw body once. The splice template is independent,
+    /// and emission can lower again if a later caller needs the raw body.
+    lowered: Mutex<Option<Box<MirFunc>>>,
 }
 
 pub struct InlineCandidateTable {
@@ -97,44 +97,24 @@ pub struct InlineCandidateWarm {
 }
 
 impl InlineCandidateTable {
-    pub fn from_warms_with_base(
-        base: Option<&Self>,
-        mut keys: Vec<CacheKey>,
-        warms: Vec<InlineCandidateWarm>,
-    ) -> Self {
-        keys.sort();
-        keys.dedup();
-        let mut warmed = HashMap::default();
-        warmed.reserve(warms.len());
+    pub fn from_warms(warms: Vec<InlineCandidateWarm>) -> Self {
+        Self {
+            entries: Self::warm_entries(warms),
+            removed: HashSet::default(),
+            parent: None,
+        }
+    }
+
+    fn warm_entries(warms: Vec<InlineCandidateWarm>) -> HashMap<CacheKey, Classified> {
+        let mut entries = HashMap::with_capacity_and_hasher(warms.len(), Default::default());
         for warm in warms {
-            let previous = warmed.insert(warm.key, warm.candidate);
+            let previous = entries.insert(warm.key, warm.candidate);
             assert!(
                 previous.is_none(),
                 "inline candidate table received a duplicate key"
             );
         }
-
-        let mut entries = HashMap::default();
-        entries.reserve(keys.len());
-        for key in keys {
-            if let Some(candidate) = warmed.remove(&key) {
-                entries.insert(key, candidate);
-                continue;
-            }
-            let candidate = base
-                .and_then(|table| table.lookup(&key))
-                .expect("inline candidate table omitted an unwarmed key");
-            entries.insert(key, candidate);
-        }
-        assert!(
-            warmed.is_empty(),
-            "inline candidate table warmed an unused key"
-        );
-        Self {
-            entries,
-            removed: HashSet::default(),
-            parent: None,
-        }
+        entries
     }
 
     pub fn from_warms_incremental(
@@ -142,14 +122,7 @@ impl InlineCandidateTable {
         warms: Vec<InlineCandidateWarm>,
         removed: &[Instance],
     ) -> Self {
-        let mut entries = HashMap::default();
-        for warm in warms {
-            let previous = entries.insert(warm.key, warm.candidate);
-            assert!(
-                previous.is_none(),
-                "inline candidate delta received a duplicate key"
-            );
-        }
+        let entries = Self::warm_entries(warms);
         let mut removed_keys = removed.iter().cloned().collect::<HashSet<_>>();
         for key in entries.keys() {
             removed_keys.remove(key);
@@ -168,8 +141,8 @@ impl InlineCandidateTable {
     /// Compare the eligibility facts required to reuse a residual caller.
     pub fn residual_eligibility_matches(&self, other: &Self, key: &Instance) -> bool {
         let (Some(before), Some(after)) = (
-            self.lookup(key).and_then(|c| c.body),
-            other.lookup(key).and_then(|c| c.body),
+            self.lookup(key).and_then(|c| c.body.as_deref()),
+            other.lookup(key).and_then(|c| c.body.as_deref()),
         ) else {
             return false;
         };
@@ -194,13 +167,19 @@ impl InlineCandidateTable {
         keys
     }
 
-    pub fn canonical_body(&self, key: &Instance) -> Option<Arc<MirFunc>> {
-        self.lookup(key).and_then(|candidate| candidate.canonical)
+    fn take_lowered_body(&self, key: &Instance) -> Option<MirFunc> {
+        let body = self
+            .lookup(key)?
+            .lowered
+            .lock()
+            .expect("lowered inline candidate")
+            .take();
+        body.map(|body| *body)
     }
 
-    fn lookup(&self, key: &CacheKey) -> Option<Classified> {
+    fn lookup(&self, key: &CacheKey) -> Option<&Classified> {
         if let Some(candidate) = self.entries.get(key) {
-            return Some(candidate.clone());
+            return Some(candidate);
         }
         if self.removed.contains(key) {
             return None;
@@ -219,12 +198,13 @@ pub struct InlineCache {
 #[derive(Clone, Default)]
 struct InlineScratch {
     inst_map: HashMap<Idx<Inst>, Idx<Inst>>,
-    cell_map: HashMap<Idx<Cell>, Idx<Cell>>,
-    block_map: HashMap<Idx<Block>, Idx<Block>>,
+    cell_map: ArenaMap<Idx<Cell>, Idx<Cell>>,
+    block_map: ArenaMap<Idx<Block>, Idx<Block>>,
     overrides: HashMap<Idx<Cell>, Idx<Cell>>,
     coalesced: Vec<bool>,
     inst_ids: Vec<Idx<Inst>>,
     added_blocks: Vec<Idx<Block>>,
+    replacement: Vec<Idx<Inst>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -371,10 +351,8 @@ impl InlineCache {
         self.shared.clone()
     }
 
-    pub fn canonical_body(&self, key: &Instance) -> Option<Arc<MirFunc>> {
-        self.shared
-            .as_ref()
-            .and_then(|table| table.canonical_body(key))
+    pub fn take_lowered_body(&self, key: &Instance) -> Option<MirFunc> {
+        self.shared.as_ref()?.take_lowered_body(key)
     }
 
     pub fn replace_candidate_table(&mut self, table: Arc<InlineCandidateTable>) {
@@ -383,13 +361,12 @@ impl InlineCache {
     }
 
     pub fn warm_candidate(
-        &mut self,
         ws: &Workspace,
         scx: &ScalarCtx,
         inst: Instance,
         concrete_plans: &ConcretePlans,
     ) -> Result<InlineCandidateWarm, CompilerError> {
-        let candidate = classify(ws, scx, &inst, concrete_plans)?;
+        let candidate = classify(ws, scx, &inst, concrete_plans, true)?;
         Ok(InlineCandidateWarm {
             key: inst,
             candidate,
@@ -401,8 +378,10 @@ impl InlineCache {
     }
 }
 
-fn annotation_gate(has_inline: bool, has_pure: bool) -> bool {
-    has_inline || has_pure
+fn explicit_inline(f: &bone_core::hir::Function) -> bool {
+    f.annotations
+        .iter()
+        .any(|a| matches!(a.name.name.as_str(), "inline" | "pure"))
 }
 
 #[derive(Default)]
@@ -584,7 +563,7 @@ fn copy_projection_metadata(
 fn compact_live_template(
     mut source: MirFunc,
     live: &LiveClosure,
-) -> (MirFunc, HashMap<Idx<Block>, Idx<Block>>) {
+) -> (MirFunc, ArenaMap<Idx<Block>, Idx<Block>>) {
     let nested = std::mem::take(&mut source.nested_fns);
     let facts = ArenaFacts::of(&source);
     compact_region(&source, &source, &facts, nested, live, &[], false)
@@ -598,7 +577,7 @@ fn compact_region(
     live: &LiveClosure,
     extra_cleanup_loads: &[Idx<Cell>],
     split_for_emission: bool,
-) -> (MirFunc, HashMap<Idx<Block>, Idx<Block>>) {
+) -> (MirFunc, ArenaMap<Idx<Block>, Idx<Block>>) {
     let source_inst_span = arena.emit_inst_span();
     let source_cell_span = arena.emit_cell_span();
     let source_block_span = arena.emit_block_span();
@@ -610,13 +589,13 @@ fn compact_region(
     let mut live_insts: Vec<Idx<Inst>> = live.insts.iter().copied().collect();
     live_insts.sort_unstable_by_key(|id| u32::from(id.into_raw()));
 
-    let mut cell_map = HashMap::default();
+    let mut cell_map = ArenaMap::default();
     let mut cells = comfy_la_arena::Arena::with_capacity(live.cells.len());
     for &id in &live_cells {
         cell_map.insert(id, cells.alloc(arena.cells[id].clone()));
     }
 
-    let mut block_map = HashMap::default();
+    let mut block_map = ArenaMap::default();
     let mut blocks = comfy_la_arena::Arena::with_capacity(live.blocks.len());
     for &id in &live_blocks {
         block_map.insert(id, blocks.alloc(Block::new()));
@@ -630,7 +609,7 @@ fn compact_region(
     for (_, inst) in insts.iter_mut() {
         remap_clone(inst, &inst_map, &cell_map, &block_map);
     }
-    for (&old_id, &new_id) in &block_map {
+    for (old_id, &new_id) in block_map.iter() {
         blocks[new_id] = remap_block(&arena.blocks[old_id], &inst_map, &block_map);
     }
 
@@ -640,7 +619,7 @@ fn compact_region(
     template.code_compatibility = header.code_compatibility.clone();
     template.nested_fn_identities = arena.nested_fn_identities.clone();
     template.rep_arena = arena.rep_arena.clone();
-    template.params = header.params.iter().map(|param| cell_map[param]).collect();
+    template.params = header.params.iter().map(|param| cell_map[*param]).collect();
     template.abi_plan = header.abi_plan.clone();
     template.abi_representation = header.abi_representation.clone();
     template.statics = header.statics.clone();
@@ -654,14 +633,14 @@ fn compact_region(
         .loads
         .iter()
         .filter_map(|(block, cell)| {
-            let mapped = cell_map.get(cell).copied()?;
+            let mapped = cell_map.get(*cell).copied()?;
             (!live.blocks.contains(block)).then_some(mapped)
         })
         .collect();
     cleanup_load_cells.extend(
         extra_cleanup_loads
             .iter()
-            .filter_map(|cell| cell_map.get(cell).copied()),
+            .filter_map(|cell| cell_map.get(*cell).copied()),
     );
     cleanup_load_cells.sort_unstable_by_key(|cell| u32::from(cell.into_raw()));
     cleanup_load_cells.dedup();
@@ -686,20 +665,20 @@ fn compact_region(
         next_cells: source_cell_span,
         next_blocks: source_block_span,
     });
-    template.entry = block_map[&header.entry];
+    template.entry = block_map[header.entry];
     template.is_coroutine = header.is_coroutine;
-    template.resume_arg = header.resume_arg.map(|cell| cell_map[&cell]);
+    template.resume_arg = header.resume_arg.map(|cell| cell_map[cell]);
     template.coro_defers = header
         .coro_defers
         .iter()
         .filter(|&(_, block)| live.blocks.contains(block))
-        .map(|(flag, block)| (cell_map[flag], block_map[block]))
+        .map(|(flag, block)| (cell_map[*flag], block_map[*block]))
         .collect();
     template.for_iter_headers = arena
         .for_iter_headers
         .iter()
         .filter(|header| live.blocks.contains(header))
-        .map(|header| block_map[header])
+        .map(|header| block_map[*header])
         .collect();
     template.hoisted_fn_globals = arena.hoisted_fn_globals.clone();
 
@@ -718,8 +697,8 @@ fn compact_region(
         let Some(&new_id) = inst_map.get(old_id) else {
             continue;
         };
-        let captures = plan.captures().iter().map(|cell| cell_map[cell]).collect();
-        let env_cell = plan.env_cell().map(|cell| cell_map[&cell]);
+        let captures = plan.captures().iter().map(|cell| cell_map[*cell]).collect();
+        let env_cell = plan.env_cell().map(|cell| cell_map[cell]);
         template.closure_env_plans.insert(
             new_id,
             skull_mir::mir::ClosureEnvPlan::new(captures, env_cell),
@@ -798,20 +777,15 @@ fn classify(
     scx: &ScalarCtx,
     inst: &Instance,
     concrete_plans: &ConcretePlans,
+    retain_lowered: bool,
 ) -> Result<Classified, CompilerError> {
     let fref = inst.func;
     let f = &ws.module(fref.module).functions[fref.func];
     if f.is_extern || f.inline_body.is_some() || f.is_coroutine {
         return Ok(Classified::default());
     }
-    let has_inline = f
-        .annotations
-        .iter()
-        .any(|a| a.name.name.as_str() == "inline");
-    let has_pure = f.annotations.iter().any(|a| a.name.name.as_str() == "pure");
-    // Bounded candidates can resolve their witnesses at the call site.
-    let has_bounds = f.generic_bounds.iter().any(Option::is_some);
-    let small = !annotation_gate(has_inline, has_pure) && !has_bounds;
+    let has_bounds = fn_has_bounds(f);
+    let small = !has_bounds && !explicit_inline(f);
     if small && (!f.annotations.is_empty() || !small_source(ws, fref)) {
         return Ok(Classified::default());
     }
@@ -829,11 +803,15 @@ fn classify(
         Err(_) if small => return Ok(Classified::default()),
         lowered => lowered?,
     };
-    let canonical = Arc::new(mf);
-    let body = shape(inst, has_bounds, small, abi, (*canonical).clone())?;
+    let (template, lowered) = if retain_lowered {
+        (mf.clone(), Some(Box::new(mf)))
+    } else {
+        (mf, None)
+    };
+    let body = shape(inst, has_bounds, small, abi, template)?;
     Ok(Classified {
         body: body.map(Arc::new),
-        canonical: Some(canonical),
+        lowered: Mutex::new(lowered),
     })
 }
 
@@ -875,11 +853,7 @@ fn shape(
         .iter()
         .map(|&b| mf.blocks[b].insts.len())
         .sum();
-    if small
-        && (has_lambda
-            || reachable_insts > SMALL_CALLEE_INSTS
-            || has_back_edge(&mf, &source_reachable))
-    {
+    if small && (reachable_insts > SMALL_CALLEE_INSTS || has_back_edge(&mf, &source_reachable)) {
         return Ok(None);
     }
 
@@ -897,7 +871,7 @@ fn shape(
     let (kind, ret_arity) = match &mf.blocks[mf.entry].term {
         Term::Return(values) if !has_lambda => (Kind::Straight, values.len()),
         _ => {
-            reachable.extend(source_reachable.iter().map(|block| block_map[block]));
+            reachable.extend(source_reachable.iter().map(|block| block_map[*block]));
             let mut arities = reachable.iter().filter_map(|&b| match &mf.blocks[b].term {
                 Term::Return(vs) => Some(vs.len()),
                 _ => None,
@@ -920,6 +894,11 @@ fn shape(
         };
         forwardable_param_reads(&mf, &coalescable_params, blocks)
     };
+    let resolves_bounds = !mf.bound_trees.is_empty()
+        || mf
+            .insts
+            .iter()
+            .any(|(_, inst)| matches!(inst, Inst::CallBoundMulti { .. }));
     Ok(Some(CalleeBody {
         func: mf,
         subject: inst.clone(),
@@ -931,6 +910,7 @@ fn shape(
         coalescable_params,
         forwardable_reads,
         forwards_reads: !has_lambda,
+        resolves_bounds,
         small,
     }))
 }
@@ -955,6 +935,12 @@ fn small_source(ws: &Workspace, fref: FuncRef) -> bool {
 }
 
 fn has_back_edge(mf: &MirFunc, blocks: &[Idx<Block>]) -> bool {
+    if blocks.len() == 1 {
+        return matches!(
+            mf.blocks[mf.entry].term,
+            Term::Goto(_) | Term::Branch { .. }
+        );
+    }
     let mut order = vec![usize::MAX; mf.blocks.len()];
     for (i, b) in skull_mir::cfg::reverse_postorder(mf, mf.entry)
         .into_iter()
@@ -992,7 +978,7 @@ fn forward_param_reads(
             func.insts[iid].remap_uses(&to);
         }
         for source_block in &cand.reachable {
-            func.blocks[scratch.block_map[source_block]]
+            func.blocks[scratch.block_map[*source_block]]
                 .term
                 .remap_uses(&to);
         }
@@ -1056,10 +1042,10 @@ fn get<'a>(
 ) -> Result<Option<&'a CalleeBody>, CompilerError> {
     if !cache.cands.contains_key(inst) {
         if let Some(candidate) = cache.shared.as_ref().and_then(|table| table.lookup(inst)) {
-            cache.cands.insert(inst.clone(), candidate.body);
+            cache.cands.insert(inst.clone(), candidate.body.clone());
             return Ok(cache.cands[inst].as_deref());
         }
-        let candidate = classify(ws, scx, inst, concrete_plans)?.body;
+        let candidate = classify(ws, scx, inst, concrete_plans, false)?.body;
         cache.cands.insert(inst.clone(), candidate);
     }
     Ok(cache.cands[inst].as_deref())
@@ -1133,16 +1119,13 @@ fn find_site(
     scx: &ScalarCtx,
     cache: &mut InlineCache,
     self_ref: FuncRef,
+    noalloc_caller: bool,
     top: &[bool],
     resume: Option<(Idx<Block>, usize)>,
     splice_chains: &HashMap<Idx<Inst>, SpliceChain>,
     concrete_plans: &ConcretePlans,
 ) -> Result<Option<Site>, CompilerError> {
     let (first_block, first_inst) = resume.map_or((0, 0), |(block, index)| (raw(block), index));
-    let noalloc_caller = ws.module(self_ref.module).functions[self_ref.func]
-        .annotations
-        .iter()
-        .any(|a| a.name.name.as_str() == "noalloc");
     for (bid, block) in func.blocks.iter().skip(first_block) {
         if !top[raw(bid)] {
             continue;
@@ -1164,12 +1147,15 @@ fn find_site(
             let Some((inst, abi)) = call_target(func, iid, fref, ws)? else {
                 continue;
             };
+            if noalloc_caller {
+                let owner = &ws.module(inst.func.module).functions[inst.func.func];
+                if !explicit_inline(owner) && !fn_has_bounds(owner) {
+                    continue;
+                }
+            }
             let Some(cand) = get(cache, ws, scx, inst, concrete_plans)? else {
                 continue;
             };
-            if cand.small && noalloc_caller {
-                continue;
-            }
             if &cand.subject != inst
                 || cand.abi.as_ref() != abi.as_ref()
                 || cand.func.params.len() != args.len()
@@ -1197,8 +1183,7 @@ fn clone_body(caller: &mut MirFunc, callee: &MirFunc, scratch: &mut InlineScratc
     caller
         .cells
         .reserve(callee.cells.len().saturating_sub(scratch.overrides.len()));
-    scratch.cell_map.clear();
-    scratch.cell_map.reserve(callee.cells.len());
+    scratch.cell_map.truncate(0);
     let mut skipped_cells = 0u32;
     for (cid, cell) in callee.cells.iter() {
         let mapped = if let Some(&mapped) = scratch.overrides.get(&cid) {
@@ -1210,7 +1195,7 @@ fn clone_body(caller: &mut MirFunc, callee: &MirFunc, scratch: &mut InlineScratc
         };
         scratch.cell_map.insert(cid, mapped);
     }
-    scratch.block_map.clear();
+    scratch.block_map.truncate(0);
     if kind == Kind::General {
         import_cleanup_load_cells(caller, callee, &scratch.cell_map);
         let forced = map_forced_cells(caller, callee, &scratch.overrides, cell_base, block_base);
@@ -1220,7 +1205,6 @@ fn clone_body(caller: &mut MirFunc, callee: &MirFunc, scratch: &mut InlineScratc
             ids.forced_cell_blocks.push(block);
         }
         caller.blocks.reserve(callee.blocks.len());
-        scratch.block_map.reserve(callee.blocks.len());
         for (bid, _) in callee.blocks.iter() {
             let nbid = caller.alloc_block_with_emit_id(block_base + callee.emit_block_id(bid));
             scratch.block_map.insert(bid, nbid);
@@ -1247,14 +1231,14 @@ fn clone_body(caller: &mut MirFunc, callee: &MirFunc, scratch: &mut InlineScratc
     }
     if kind == Kind::General {
         for (bid, block) in callee.blocks.iter() {
-            caller.blocks[scratch.block_map[&bid]] =
+            caller.blocks[scratch.block_map[bid]] =
                 remap_block(block, &scratch.inst_map, &scratch.block_map);
         }
         caller.for_iter_headers.extend(
             callee
                 .for_iter_headers
                 .iter()
-                .map(|header| scratch.block_map[header]),
+                .map(|header| scratch.block_map[*header]),
         );
     }
     caller.set_emit_nexts((
@@ -1271,7 +1255,7 @@ fn clone_body(caller: &mut MirFunc, callee: &MirFunc, scratch: &mut InlineScratc
 fn import_cleanup_load_cells(
     caller: &mut MirFunc,
     callee: &MirFunc,
-    cell_map: &HashMap<Idx<Cell>, Idx<Cell>>,
+    cell_map: &ArenaMap<Idx<Cell>, Idx<Cell>>,
 ) {
     if callee.inline_cleanup_load_cells.is_empty() {
         return;
@@ -1279,7 +1263,7 @@ fn import_cleanup_load_cells(
     let mut existing: HashSet<Idx<Cell>> =
         caller.inline_cleanup_load_cells.iter().copied().collect();
     for &cell in &callee.inline_cleanup_load_cells {
-        if let Some(&mapped) = cell_map.get(&cell) {
+        if let Some(&mapped) = cell_map.get(cell) {
             if existing.insert(mapped) {
                 caller.inline_cleanup_load_cells.push(mapped);
             }
@@ -1290,31 +1274,31 @@ fn import_cleanup_load_cells(
 fn remap_clone(
     inst: &mut Inst,
     im: &HashMap<Idx<Inst>, Idx<Inst>>,
-    cm: &HashMap<Idx<Cell>, Idx<Cell>>,
-    bm: &HashMap<Idx<Block>, Idx<Block>>,
+    cm: &ArenaMap<Idx<Cell>, Idx<Cell>>,
+    bm: &ArenaMap<Idx<Block>, Idx<Block>>,
 ) {
     inst.remap_uses(&|x| im[&x]);
     match inst {
-        Inst::Load(c) => *c = cm[c],
-        Inst::Store { cell, .. } => *cell = cm[cell],
+        Inst::Load(c) => *c = cm[*c],
+        Inst::Store { cell, .. } => *cell = cm[*cell],
         Inst::CallMulti { dests, .. }
         | Inst::CallBoundMulti { dests, .. }
         | Inst::CallValueMulti { dests, .. } => {
             for d in dests {
-                *d = cm[d];
+                *d = cm[*d];
             }
         }
         Inst::MapNext {
             key_cell, val_cell, ..
         } => {
-            *key_cell = cm[key_cell];
-            *val_cell = cm[val_cell];
+            *key_cell = cm[*key_cell];
+            *val_cell = cm[*val_cell];
         }
         Inst::Lambda { params, entry } => {
             for p in params {
-                *p = cm[p];
+                *p = cm[*p];
             }
-            *entry = bm[entry];
+            *entry = bm[*entry];
         }
         _ => {}
     }
@@ -1323,11 +1307,11 @@ fn remap_clone(
 fn remap_block(
     block: &Block,
     im: &HashMap<Idx<Inst>, Idx<Inst>>,
-    bm: &HashMap<Idx<Block>, Idx<Block>>,
+    bm: &ArenaMap<Idx<Block>, Idx<Block>>,
 ) -> Block {
     let mut term = block.term.clone();
     term.remap_uses(&|x| im[&x]);
-    term.remap_targets(&|x| bm[&x]);
+    term.remap_targets(&|x| bm[x]);
     Block {
         insts: block.insts.iter().map(|id| im[id]).collect(),
         term,
@@ -1709,22 +1693,24 @@ fn splice(
     coalesce_overrides(func, cand, args, (bid, idx), pinned, scratch);
     clone_body(func, callee, scratch, cand.kind);
     let repack_mark = func.insts.len();
-    resolve_cloned_bound_calls(
-        func,
-        callee,
-        &scratch.inst_map,
-        site_tree.as_ref(),
-        site_resolved_tree.as_ref(),
-        ws,
-        scx,
-        concrete_plans,
-    )?;
+    if cand.resolves_bounds || site_tree.as_ref().is_some_and(|tree| !tree.is_empty()) {
+        resolve_cloned_bound_calls(
+            func,
+            callee,
+            &scratch.inst_map,
+            site_tree.as_ref(),
+            site_resolved_tree.as_ref(),
+            ws,
+            scx,
+            concrete_plans,
+        )?;
+    }
     let names = import_nested_fns(func, callee, &scratch.inst_map);
     import_splice_metadata(func, callee, &scratch.inst_map, &names);
     let forwarded = forward_param_reads(func, cand, args, scratch);
     if cand.kind == Kind::General && !forwarded.is_empty() {
         for source in &cand.reachable {
-            func.blocks[scratch.block_map[source]]
+            func.blocks[scratch.block_map[*source]]
                 .insts
                 .retain(|inst| !forwarded.iter().any(|(read, _)| read == inst));
         }
@@ -1750,7 +1736,7 @@ fn bind_params(
     cand: &CalleeBody,
     scratch: &InlineScratch,
     uses: &mut UseIndex,
-    prefix: &mut Vec<Idx<Inst>>,
+    push: &mut impl FnMut(&mut MirFunc, Idx<Inst>),
 ) {
     let args = &site.args;
     for (i, (param, &arg)) in cand.func.params.iter().zip(args).enumerate() {
@@ -1758,12 +1744,12 @@ fn bind_params(
             continue;
         }
         let store = func.alloc_inst(Inst::Store {
-            cell: scratch.cell_map[param],
+            cell: scratch.cell_map[*param],
             value: arg,
         });
         if !copy_unread(cand, i) || !forwards_arg(func, arg) {
             uses.add_inst(func, store);
-            prefix.push(store);
+            push(func, store);
         }
     }
 }
@@ -1772,61 +1758,52 @@ fn splice_straight(
     func: &mut MirFunc,
     site: &Site,
     cand: &CalleeBody,
-    scratch: &InlineScratch,
+    scratch: &mut InlineScratch,
     uses: &mut UseIndex,
     forwarded: &[(Idx<Inst>, Idx<Inst>)],
 ) {
     let callee = &cand.func;
     let (bid, idx) = site.pos;
-    let old = std::mem::take(&mut func.blocks[bid].insts);
-    let mut new_insts = old[..idx].to_vec();
-    bind_params(func, site, cand, scratch, uses, &mut new_insts);
-    new_insts.extend(
-        callee.blocks[callee.entry]
+    let block = &callee.blocks[callee.entry];
+    let mut replacement = std::mem::take(&mut scratch.replacement);
+    bind_params(func, site, cand, scratch, uses, &mut |_, inst| {
+        replacement.push(inst);
+    });
+    replacement.extend(
+        block
             .insts
             .iter()
             .map(|inst| scratch.inst_map[inst])
             .filter(|inst| !forwarded.iter().any(|(read, _)| read == inst)),
     );
 
-    match &site.dests {
-        Some(dests) => {
-            let values = match &callee.blocks[callee.entry].term {
-                Term::Return(values) => values,
-                _ => unreachable!("straight candidate entry must end in Return"),
-            };
-            for (dest, rv) in dests.iter().zip(values.iter()) {
-                let st = func.alloc_inst(Inst::Store {
-                    cell: *dest,
-                    value: forwarded_to(forwarded, scratch.inst_map[rv]),
-                });
-                uses.add_inst(func, st);
-                new_insts.push(st);
-            }
-            new_insts.extend_from_slice(&old[idx + 1..]);
-            func.blocks[bid].insts = new_insts;
+    let Term::Return(values) = &block.term else {
+        unreachable!("straight candidate entry must end in Return");
+    };
+    let mapped = |value: &Idx<Inst>| forwarded_to(forwarded, scratch.inst_map[value]);
+    let mut result = None;
+    if let Some(dests) = &site.dests {
+        for (&cell, value) in dests.iter().zip(values) {
+            let st = func.alloc_inst(Inst::Store {
+                cell,
+                value: mapped(value),
+            });
+            uses.add_inst(func, st);
+            replacement.push(st);
         }
-        None => {
-            let call_id = site.call_id;
-            // Replace the call in all of its users, including successor blocks.
-            let to = match &callee.blocks[callee.entry].term {
-                Term::Return(values) => match values
-                    .first()
-                    .map(|value| forwarded_to(forwarded, scratch.inst_map[value]))
-                {
-                    Some(value) => value,
-                    None => {
-                        func.insts[call_id] = Inst::Const(Lit::Nil);
-                        new_insts.push(call_id);
-                        call_id
-                    }
-                },
-                _ => unreachable!("straight candidate entry must end in Return"),
-            };
-            new_insts.extend_from_slice(&old[idx + 1..]);
-            func.blocks[bid].insts = new_insts;
-            uses.replace(func, call_id, to);
-        }
+    } else if let Some(value) = values.first() {
+        result = Some(mapped(value));
+    } else {
+        func.insts[site.call_id] = Inst::Const(Lit::Nil);
+        replacement.push(site.call_id);
+    }
+
+    func.blocks[bid]
+        .insts
+        .splice(idx..=idx, replacement.drain(..));
+    scratch.replacement = replacement;
+    if let Some(to) = result {
+        uses.replace(func, site.call_id, to);
     }
 }
 
@@ -1839,13 +1816,12 @@ fn splice_general(
 ) {
     let (bid, idx) = site.pos;
     let callee = &cand.func;
-    let entry_clone = scratch.block_map[&callee.entry];
+    let entry_clone = scratch.block_map[callee.entry];
 
-    let old = std::mem::take(&mut func.blocks[bid].insts);
-    let before: Vec<Idx<Inst>> = old[..idx].to_vec();
-    let after: Vec<Idx<Inst>> = old[idx + 1..].to_vec();
-    let orig_term = func.blocks[bid].term.clone();
+    let after = func.blocks[bid].insts.split_off(idx + 1);
+    func.blocks[bid].insts.truncate(idx);
     uses.remove_term(func, bid);
+    let orig_term = std::mem::replace(&mut func.blocks[bid].term, Term::Goto(entry_clone));
 
     let cont = func.new_block();
     func.blocks[cont].insts = after;
@@ -1863,14 +1839,13 @@ fn splice_general(
         Some(_) => None,
     };
 
-    let mut prefix = before;
-    bind_params(func, site, cand, scratch, uses, &mut prefix);
-    func.blocks[bid].insts = prefix;
-    func.blocks[bid].term = Term::Goto(entry_clone);
+    bind_params(func, site, cand, scratch, uses, &mut |func, inst| {
+        func.blocks[bid].insts.push(inst);
+    });
 
     // Only the callee CFG returns to the caller. Lambda returns stay in their sub-CFGs.
     for &source_block in &cand.reachable {
-        let nb = scratch.block_map[&source_block];
+        let nb = scratch.block_map[source_block];
         let vs = match &func.blocks[nb].term {
             Term::Return(vs) => vs.clone(),
             _ => continue,
@@ -1908,7 +1883,7 @@ fn splice_general(
     }
     scratch
         .added_blocks
-        .extend(cand.reachable.iter().map(|b| scratch.block_map[b]));
+        .extend(cand.reachable.iter().map(|b| scratch.block_map[*b]));
     scratch.added_blocks.push(cont);
 }
 
@@ -1935,6 +1910,10 @@ pub(crate) fn inline_functions_with_plans(
     let mut splice_chains: HashMap<Idx<Inst>, SpliceChain> = HashMap::default();
     let mut budget = MAX_INLINES_PER_FN;
     let mut copied_instructions = 0;
+    let noalloc_caller = ws.module(self_ref.module).functions[self_ref.func]
+        .annotations
+        .iter()
+        .any(|a| a.name.name.as_str() == "noalloc");
     while budget > 0 {
         let Some(site) = find_site(
             func,
@@ -1942,6 +1921,7 @@ pub(crate) fn inline_functions_with_plans(
             scx,
             cache,
             self_ref,
+            noalloc_caller,
             &top,
             resume,
             &splice_chains,
