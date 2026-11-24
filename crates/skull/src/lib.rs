@@ -610,10 +610,7 @@ assert(next(_G.__ROCK_LEAF_VIEWS), "__ROCK_LEAF_VIEWS is empty; leaf-view refres
 -- is absent here is storage the compiler does not describe, and every consumer
 -- must fail closed on it.
 --
--- Keyed by `tostring(ffi.typeof(...))` because a ctype cdata hashes by identity
--- as a table key, and because a typedef'd anonymous struct only gets its
--- `struct <n>` spelling from LuaJIT. Registering through the same `ffi.typeof`
--- the lookup uses is what makes the two agree.
+-- Numeric ctype IDs are stable across ctype objects and recordable by LuaJIT.
 -- The write into an `f32` field: round through one reused float cell, so the
 -- field holds the same number in a table, a scalarized local or cdata.
 local __rock_f32_cell = ffi.new("float[1]")
@@ -630,7 +627,7 @@ local function __rock_nb_storage(ctype, elem_size, views)
     error("skull storage drift: sizeof(" .. ctype .. ") = " .. ffi.sizeof(ctype)
           .. ", expected " .. elem_size, 0)
   end
-  _G.__ROCK_NB_STORAGE[tostring(ct)] = { ctype = ctype, elem_size = elem_size, views = views }
+  _G.__ROCK_NB_STORAGE[tonumber(ct)] = { ctype = ctype, elem_size = elem_size, views = views }
 end
 _G.__rock_nb_storage = __rock_nb_storage
 {NB_ALLOC}

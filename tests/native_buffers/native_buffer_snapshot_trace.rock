@@ -1,0 +1,38 @@
+value Row { x: float, generation: int }
+
+@nomangle fn trace_setup(n: int) -> NativeBuffer<Row> { return native_buffer_alloc(n) }
+@nomangle fn trace_snapshot(rows: NativeBuffer<Row>) -> NativeBuffer<Row> { return deepcopy(rows) }
+@nomangle fn trace_generation(rows: NativeBuffer<Row>) -> int { return rows[0].generation }
+
+inline(lua) fn snapshots_trace() -> bool = """
+    local function check(n)
+        local rows = trace_setup(n)
+        rows.ptr[0].generation = 17
+        local storage, stops, aborts = __rock_nb_storage_of, 0, 0
+        local function observe(event, _, fn)
+            if event == "stop" then stops = stops + 1 end
+            if event == "abort" and fn == storage then aborts = aborts + 1 end
+        end
+        jit.flush()
+        jit.attach(observe, "trace")
+        local copy
+        for i = 1, 300 do copy = trace_snapshot(rows) end
+        jit.attach(observe)
+        assert(stops > 0, "snapshot workload did not trace")
+        assert(aborts == 0, "storage lookup aborted recording " .. aborts .. " times")
+        assert(copy.len == n and trace_generation(copy) == 17)
+        copy.ptr[0].generation = 9
+        assert(trace_generation(copy) == 9 and trace_generation(rows) == 17)
+    end
+    check(16)
+    check(10000)
+    local foreign = ffi.new("Row[?]", 2)
+    local desc, bytes = __rock_nb_storage_of(foreign)
+    assert(desc.ctype == "Row" and bytes == ffi.sizeof(foreign))
+    assert(__rock_nb_storage_of(ffi.new("int64_t", 0)) == nil)
+    assert(__rock_nb_storage_of(true) == nil)
+    return true
+"""
+
+@test(backends = "lua")
+fn native_buffer_snapshot_storage_lookup_traces() { assert(snapshots_trace()) }
