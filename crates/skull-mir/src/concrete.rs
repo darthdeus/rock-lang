@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use bone_core::hir::{BindingInfo, Body, BodyOwner, Expr, TypeExpr};
-use bone_core::prelude::{ModuleId, TyId};
+use bone_core::prelude::{CompilerError, ModuleId, Span, TyId};
 use bone_core::workspace::{BodyInference, Workspace};
 use comfy_la_arena::{ArenaMap, Idx};
 use rustc_hash::FxHashMap;
@@ -49,6 +49,7 @@ struct TypeSource {
 pub struct ConcreteTypeTables {
     source: Option<TypeSource>,
     missing_required: Option<TyId>,
+    invalid_map_key: Option<Box<(String, Span)>>,
     expr_types: ArenaMap<Idx<Expr>, TypeRow>,
     binding_types: ArenaMap<Idx<BindingInfo>, TypeRow>,
     ty_types: FxHashMap<TyId, TypeRow>,
@@ -65,10 +66,19 @@ impl ConcreteTypeTables {
         declared_types: impl IntoIterator<Item = TyId>,
     ) -> Result<Self, MonoTyReason> {
         let mut memo = FxHashMap::default();
+        let mut invalid_map_key = None;
         let mut convert = |ty| {
             memo.entry(ty)
                 .or_insert_with(|| match arena.convert(ws, inf, ty, subst) {
-                    Ok(id) => Ok(TypeRow::Concrete(id)),
+                    Ok(id) => {
+                        if invalid_map_key.is_none()
+                            && let Some(why) =
+                                crate::lower::concrete_map_key_rejection(ws, arena.get_ref(id))
+                        {
+                            invalid_map_key = Some((why, ty));
+                        }
+                        Ok(TypeRow::Concrete(id))
+                    }
                     Err(MonoTyReason::UnresolvedInfer(_)) => Ok(TypeRow::Unresolved),
                     Err(reason) => Err(reason),
                 })
@@ -131,6 +141,28 @@ impl ConcreteTypeTables {
             }
         }
         let struct_field_types = concrete_struct_field_types(ws, arena, body, &expr_types)?;
+        let invalid_map_key = invalid_map_key
+            .map(|(why, ty)| {
+                let span = inf
+                    .expr_types
+                    .iter()
+                    .find_map(|(expr, &row)| (row == ty).then(|| body.expr_spans[expr]))
+                    .or_else(|| {
+                        inf.binding_types.iter().find_map(|(binding, &row)| {
+                            (row == ty).then(|| body.binding_arena[binding].span)
+                        })
+                    })
+                    .unwrap_or_default();
+                Box::new((why, span))
+            })
+            .or_else(|| {
+                struct_field_types.iter().find_map(|(expr, fields)| {
+                    fields.values().find_map(|&id| {
+                        let why = crate::lower::concrete_map_key_rejection(ws, arena.get_ref(id))?;
+                        Some(Box::new((why, body.expr_spans[expr])))
+                    })
+                })
+            });
         Ok(Self {
             source: Some(TypeSource {
                 owner,
@@ -138,6 +170,7 @@ impl ConcreteTypeTables {
                 arena: arena.generation(),
             }),
             missing_required,
+            invalid_map_key,
             expr_types,
             binding_types,
             ty_types,
@@ -390,6 +423,16 @@ pub fn select_concrete_plan_closure<'a>(
 }
 
 impl ConcreteBodyPlan {
+    pub(crate) fn validate_map_keys(&self) -> Result<(), CompilerError> {
+        if let Some((why, span)) = std::iter::once(&self.types)
+            .chain(self.foreign_domains.values())
+            .find_map(|tables| tables.invalid_map_key.as_deref())
+        {
+            return Err(crate::lower::map_key_error(why, *span));
+        }
+        Ok(())
+    }
+
     pub fn function_instance(&self) -> Option<&Instance> {
         match &self.owner {
             ConcreteOwner::Function(instance) => Some(instance),

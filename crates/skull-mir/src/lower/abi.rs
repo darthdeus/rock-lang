@@ -1591,6 +1591,7 @@ pub(super) fn callee_abi_plan_for_instance(
         return Ok(plan);
     }
     let selected = selected_abi_instance(ws, scx, inst)?;
+    super::validate_concrete_c_boundary(ws, scx, &selected)?;
     let derived = if !requires_concrete_body_plan(ws, inst) {
         Arc::new(BackendFnAbiPlan::for_boundary_instance(ws, scx, &selected))
     } else {

@@ -2446,6 +2446,7 @@ impl<'a> Builder<'a> {
     }
 
     fn lower_root(&mut self) -> Result<(), CompilerError> {
+        self.concrete_plan.validate_map_keys()?;
         let Some(root) = self.body.root else {
             self.f.set_term(self.cur, Term::Return(vec![]));
             return Ok(());
@@ -2980,23 +2981,7 @@ fn map_key_rejection_reason(
                     format!("`{name}` wraps {why}, and a newtype is keyed as what it wraps")
                 });
             }
-            // A payload-free enum lowers to an int ordinal; one payload variant makes the
-            // type cdata- or table-carrying.
-            if ws.nominals.enum_id(name).is_some() {
-                return (!is_payload_free_enum(ws, name)).then(|| {
-                    format!(
-                        "`{name}` has payload-carrying variants, keyed by cdata or object \
-                             identity (a payload-free enum is an int ordinal and stays allowed)"
-                    )
-                });
-            }
-            if is_value_struct(ws, name) {
-                Some(format!(
-                    "`{name}` is a `value` struct, keyed by cdata identity"
-                ))
-            } else {
-                Some(format!("`{name}` is a struct, keyed by object identity"))
-            }
+            nominal_map_key_rejection(ws, name)
         }
         TypeExpr::Tuple { .. } => {
             Some("a tuple is an aggregate, keyed by object identity".to_string())
@@ -3018,6 +3003,95 @@ fn map_key_rejection_reason(
         }
         TypeExpr::Function { .. } => Some("a function is keyed by identity".to_string()),
     }
+}
+
+fn nominal_map_key_rejection(ws: &Workspace, name: Ustr) -> Option<String> {
+    let name = crate::layout_instance::decl_name(name);
+    if ws.nominals.enum_id(name).is_some() {
+        (!is_payload_free_enum(ws, name)).then(|| {
+            format!(
+                "`{name}` has payload-carrying variants, keyed by cdata or object identity \
+                 (a payload-free enum is an int ordinal and stays allowed)"
+            )
+        })
+    } else if is_value_struct(ws, name) {
+        Some(format!(
+            "`{name}` is a `value` struct, keyed by cdata identity"
+        ))
+    } else {
+        Some(format!("`{name}` is a struct, keyed by object identity"))
+    }
+}
+
+pub(crate) fn concrete_map_key_rejection(ws: &Workspace, ty: &MonoTy) -> Option<String> {
+    match ty {
+        MonoTy::App { ctor, params } => {
+            if *ctor == MonoCtor::Map
+                && let Some(why) = params
+                    .first()
+                    .and_then(|key| concrete_key_rejection(ws, key))
+            {
+                return Some(why);
+            }
+            params
+                .iter()
+                .find_map(|ty| concrete_map_key_rejection(ws, ty))
+        }
+        MonoTy::Nullable(inner) => concrete_map_key_rejection(ws, inner),
+        MonoTy::Tuple(parts) => parts
+            .iter()
+            .find_map(|ty| concrete_map_key_rejection(ws, ty)),
+        MonoTy::Function { params, ret } => params
+            .iter()
+            .chain(std::iter::once(ret.as_ref()))
+            .find_map(|ty| concrete_map_key_rejection(ws, ty)),
+        _ => None,
+    }
+}
+
+fn concrete_key_rejection(ws: &Workspace, key: &MonoTy) -> Option<String> {
+    let reason = match key {
+        MonoTy::Int
+        | MonoTy::Uint
+        | MonoTy::Float
+        | MonoTy::Bool
+        | MonoTy::String
+        | MonoTy::Any
+        | MonoTy::Never => return None,
+        MonoTy::Unit => "a unit key is represented as null",
+        MonoTy::Nullable(_) => "a nullable key cannot be distinguished from a missing entry",
+        MonoTy::Tuple(_) => "a tuple is an aggregate, keyed by object identity",
+        MonoTy::Function { .. } => "a function is keyed by identity",
+        MonoTy::App { ctor, .. } => match *ctor {
+            MonoCtor::Array => "an array is an aggregate, keyed by object identity",
+            MonoCtor::Map => "a `Map` is an aggregate, keyed by object identity",
+            MonoCtor::Ref => "a frame reference cannot be stored as a map key",
+            MonoCtor::Nominal(name) => {
+                if ws.nominals.newtype_id(name).is_some() {
+                    let wrapped = crate::monoty::resolve_newtype_chain(ws, key.clone()).ok()?;
+                    let why = concrete_key_rejection(ws, &wrapped)?;
+                    return Some(format!(
+                        "`{name}` wraps {why}, and a newtype is keyed as what it wraps"
+                    ));
+                }
+                return nominal_map_key_rejection(ws, name);
+            }
+        },
+    };
+    Some(reason.to_string())
+}
+
+pub fn map_key_error(why: &str, span: Span) -> CompilerError {
+    CompilerError::new_with_label(
+        span,
+        format!(
+            "this `Map` key is not value-keyed and would silently miss: {why}. A runtime-built \
+             key does not find the entry stored under an equal-by-value one, so an insert at \
+             an equal key grows the map instead of replacing. Use an int, string, bool or \
+             float key -- or a newtype over one of those -- or derive a string key from the \
+             value's fields."
+        ),
+    )
 }
 
 fn map_key_rejected(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<String> {
@@ -3053,7 +3127,7 @@ pub fn map_key_rejection(ws: &Workspace, mid: ModuleId) -> Option<(String, Span)
 /// A GC-carrying `value` struct has no `ffi.cdef` typedef, so it cannot cross
 /// a C boundary.
 fn nominal_is_gc_value(ws: &Workspace, name: Ustr) -> bool {
-    is_value_struct(ws, name)
+    is_value_struct(ws, crate::layout_instance::decl_name(name))
         && !matches!(
             crate::lower::declared_value_storage(ws, bone_core::hir::FnBackend::Lua, name),
             Some(ValueStorage::CData)
@@ -3065,14 +3139,48 @@ fn gc_value_under_newtypes(
     ty: MonoTy,
 ) -> Result<Option<Ustr>, crate::monoty::NewtypeResolutionError> {
     let ty = crate::monoty::resolve_newtype_chain(ws, ty)?;
-    let MonoTy::App {
-        ctor: MonoCtor::Nominal(name),
-        ..
-    } = ty
-    else {
-        return Ok(None);
-    };
-    Ok(nominal_is_gc_value(ws, name).then_some(name))
+    Ok(ty
+        .peel_nullable()
+        .0
+        .nominal()
+        .filter(|&name| nominal_is_gc_value(ws, name)))
+}
+
+fn gc_value_c_boundary_message(name: Ustr) -> String {
+    format!(
+        "`{name}` is a GC-carrying `value` struct (immutable Lua table) and cannot \
+         cross an `extern` C boundary -- it has no C layout. Use an FFI-clean \
+         value struct (fields int/float/bool or nested FFI-clean value structs), \
+         or pass the fields individually."
+    )
+}
+
+fn validate_concrete_c_boundary(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    instance: &crate::instance::Instance,
+) -> Result<(), CompilerError> {
+    let f = &ws.module(instance.func.module).functions[instance.func.func];
+    if f.ffi_lib.is_none() {
+        return Ok(());
+    }
+    let subst = instance.subst(ws, scx.interner());
+    for ty in f
+        .param_decls
+        .iter()
+        .map(|param| param.ty)
+        .chain(f.return_ty)
+    {
+        if let Ok(ty) = crate::monoty::convert_decl(ws, ty, &subst)
+            && let Ok(Some(name)) = gc_value_under_newtypes(ws, ty)
+        {
+            return Err(CompilerError::new_with_label(
+                f.name_span,
+                gc_value_c_boundary_message(name),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Extern C signatures require value structs that can cross a genuine C boundary.
@@ -3101,15 +3209,7 @@ pub fn gc_value_c_boundary(ws: &Workspace, mid: ModuleId) -> Option<(String, Spa
                         .and_then(|ty| gc_value_under_newtypes(ws, ty));
                 match normalized {
                     Ok(Some(n)) => {
-                        return Some((
-                            format!(
-                                "`{n}` is a GC-carrying `value` struct (immutable Lua table) and cannot \
-                             cross an `extern` C boundary -- it has no C layout. Use an FFI-clean \
-                             value struct (fields int/float/bool or nested FFI-clean value structs), \
-                             or pass the fields individually."
-                            ),
-                            f.name_span,
-                        ));
+                        return Some((gc_value_c_boundary_message(n), f.name_span));
                     }
                     Ok(None) => {}
                     Err(reason) => {

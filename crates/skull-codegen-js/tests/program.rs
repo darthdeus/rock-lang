@@ -75,6 +75,18 @@ fn main() {
         error.message
     );
 
+    let generic = ws_with(include_str!(
+        "../../../tests/errors/generic_map_key.rock.err"
+    ));
+    let roots = [(test_fn_ref(&generic, "main"), "main".to_string())];
+    let error = skull_codegen_js::emit::emit_with_closure(&generic, &roots)
+        .expect_err("a generic body must reject the concrete aggregate key");
+    assert!(
+        error.message.contains("`value` struct"),
+        "{}",
+        error.message
+    );
+
     let unit_key = ws_with(
         r#"
 fn main() {

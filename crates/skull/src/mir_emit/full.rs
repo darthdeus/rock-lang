@@ -69,16 +69,7 @@ fn reject_workspace(ws: &Workspace, user_mid: ModuleId) -> Result<(), CompilerEr
         return Err(err);
     }
     if let Some((why, span)) = skull_mir::lower::map_key_rejection(ws, user_mid) {
-        return Err(CompilerError::new_with_label(
-            span,
-            format!(
-                "this `Map` key is not value-keyed and would silently miss: {why}. A runtime-built \
-                 key does not find the entry stored under an equal-by-value one, so an insert at \
-                 an equal key grows the map instead of replacing. Use an int, string, bool or \
-                 float key -- or a newtype over one of those -- or derive a string key from the \
-                 value's fields."
-            ),
-        ));
+        return Err(skull_mir::lower::map_key_error(&why, span));
     }
     if let Some((msg, span)) = skull_mir::lower::gc_value_c_boundary(ws, user_mid) {
         return Err(CompilerError::new_with_label(span, msg));

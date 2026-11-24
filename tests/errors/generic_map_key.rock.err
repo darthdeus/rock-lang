@@ -1,0 +1,13 @@
+//=== TEST CASE: generic_map_key_Generic ===
+//! expect: `value` struct, keyed by cdata identity
+value Key { x: int }
+
+fn contains_after_insert<K>(inserted: K, query: K) -> bool {
+    let m: Map<K, int> = map_new()
+    m[inserted] = 7
+    return m.contains(query)
+}
+
+fn main() {
+    assert(contains_after_insert(Key { x: 42 }, Key { x: 42 }))
+}

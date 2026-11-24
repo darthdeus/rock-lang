@@ -435,3 +435,10 @@ fn main() {
     m.insert(WrapTuple((1, 2)), "x")
     print("{m.len()}")
 }
+
+//=== TEST CASE: specialized_gc_value_extern_param_Generic ===
+//! expect: `Bag` is a GC-carrying `value` struct (immutable Lua table) and cannot cross an `extern` C boundary
+value Bag { values: [int] }
+extern(ffi, "example") fn consume<T>(v: T) -> int
+fn dispatch<T>(v: T) -> int { return consume(v) }
+fn main() { print(dispatch(Bag { values: [1] })) }
