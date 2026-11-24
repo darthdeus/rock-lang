@@ -225,6 +225,7 @@ pub extern "C" fn stone_native_live_handles(class: *const c_char) -> *const c_ch
     )
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_native_handle_state(class: *const c_char, handle: u64) -> c_int {
     match class_arg(class) {
@@ -233,6 +234,7 @@ pub extern "C" fn stone_native_handle_state(class: *const c_char, handle: u64) -
     }
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_native_destroy(class: *const c_char, handle: u64) -> bool {
     let Some(class) = class_arg(class) else {

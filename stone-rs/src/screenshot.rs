@@ -5,6 +5,7 @@ use stone_capture::RowOrigin;
 
 use crate::with_gl;
 
+/// rock-ffi stone-rendering rename:path=filepath rename:w=width rename:h=height
 #[no_mangle]
 pub extern "C" fn stone_save_screenshot(
     path: *const c_char,
@@ -15,6 +16,7 @@ pub extern "C" fn stone_save_screenshot(
     stone_save_screenshot_sized(path, w, h, max_size, ptr::null_mut(), ptr::null_mut())
 }
 
+/// rock-ffi stone-rendering private rename:path=filepath rename:w=width rename:h=height rename:out_width=out_w rename:out_height=out_h
 #[no_mangle]
 pub extern "C" fn stone_save_screenshot_sized(
     path: *const c_char,

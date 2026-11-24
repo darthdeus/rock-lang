@@ -307,26 +307,27 @@ fn fs_quad_uv(to_window: bool, sx: f32, sy: f32) -> [f32; 4] {
     }
 }
 
-/// `attr_sizes` supplies component counts in location order. Returns -1 when no
-/// draw was submitted, 0 without a resolved texture, and 1 when texture was bound.
+/// `vertex_stride` counts f32 lanes and `attr_sizes` lists component counts in
+/// location order. Returns -1 when skipped, 0 if untextured, 1 if textured.
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_draw_mesh(
-    data: *const c_float,
-    count: c_int,
-    stride: c_int,
+    vertex_data: *const c_float,
+    vertex_count: c_int,
+    vertex_stride: c_int,
     attr_sizes: *const c_int,
     attr_count: c_int,
-    tex_kind: c_int,
-    tex: u64,
+    texture_kind: c_int,
+    texture: u64,
 ) -> c_int {
     draw_mesh(
-        data,
-        count,
-        stride,
+        vertex_data,
+        vertex_count,
+        vertex_stride,
         attr_sizes,
         attr_count,
-        tex_kind,
-        tex,
+        texture_kind,
+        texture,
         &[],
     )
 }
@@ -369,9 +370,8 @@ fn draw_mesh(
         return -1;
     }
 
-    let stride_usize = stride as usize;
     let count_usize = count as usize;
-    if stride_usize > 1024 || count < 0 {
+    if stride > 1024 || count < 0 {
         crate::log_once!(
             "SPRITE",
             "stone_draw_mesh: invalid stride ({}) or count ({})",
@@ -380,11 +380,13 @@ fn draw_mesh(
         );
         return -1;
     }
-    let Some(sizes) =
+    let Some(layout) =
         crate::mesh::validate_layout("stone_draw_mesh", stride, attr_sizes, attr_count)
     else {
         return -1;
     };
+    let stride = layout.stride_floats;
+    let stride_usize = stride as usize;
 
     if crate::ui_submission_probe::windowless() {
         if fan_ranges.is_empty() {
@@ -462,10 +464,10 @@ fn draw_mesh(
                     }
                 }
 
-                let stride_bytes = stride_usize * std::mem::size_of::<f32>();
+                let stride_bytes = layout.stride_bytes();
                 let vertex_data = std::slice::from_raw_parts(data.cast::<u8>(), count_usize * stride_bytes);
                 if indexed {
-                    let Ok(vertex_offset) = stream_mesh_vertices(gl, vertex_data, count_usize, stride, sizes.as_slice()) else { return -1 };
+                    let Ok(vertex_offset) = stream_mesh_vertices(gl, vertex_data, count_usize, stride, layout.as_slice()) else { return -1 };
                     for (offset, count) in stream_draw_chunks(state.triangle_indices.len()) {
                         let indices = &state.triangle_indices[offset..offset + count];
                         let bytes = bytemuck::cast_slice(indices);
@@ -480,7 +482,7 @@ fn draw_mesh(
                         crate::track_stream_upload(0, bytes.len(), range.replaced);
                         if crate::mesh_capture::armed() {
                             crate::mesh_capture::record(gl, vertex_data, vertex_offset, count_usize,
-                                stride_bytes, sizes.as_slice().len(), Some((bytes, range.offset)));
+                                stride_bytes, layout.as_slice().len(), Some((bytes, range.offset)));
                         }
                         gl.draw_elements(glow::TRIANGLES, count as c_int, glow::UNSIGNED_INT, range.offset);
                         if crate::ui_submission_probe::enabled() {
@@ -492,7 +494,7 @@ fn draw_mesh(
                         track_draw_call();
                     }
                 } else {
-                    let result = stream_triangles(gl, vertex_data, count_usize, stride, sizes.as_slice(), |first, count| {
+                    let result = stream_triangles(gl, vertex_data, count_usize, stride, layout.as_slice(), |first, count| {
                         if crate::ui_submission_probe::enabled() {
                             crate::ui_submission_probe::mesh_consumed(
                                 data.add(first * stride_usize), count,
