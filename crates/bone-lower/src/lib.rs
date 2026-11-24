@@ -1347,6 +1347,12 @@ pub(crate) fn lower_expr_value(
         ExprKind::String(val) => Expr::String(*val),
         ExprKind::Ident(name) => {
             if name.name.as_str() == "__SITE__" {
+                if e.span.file == ctx.module.file {
+                    ctx.body.last_source_line_read = ctx
+                        .body
+                        .last_source_line_read
+                        .max(Some(e.span.offset_range().0));
+                }
                 let file =
                     match e.span.file == ctx.module.file && !ctx.module.logical_file.is_empty() {
                         true => ctx.module.logical_file,

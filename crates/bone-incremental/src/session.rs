@@ -771,10 +771,11 @@ impl Session {
         });
         // The in-place body path keeps every other item's spans, so text
         // outside that body (comments, recovered junk) must be unchanged.
-        let body_edit = old.and_then(|old| {
+        let (edit_start, body_edit) = old.map_or((0, None), |old| {
             let (start, end, _) = byte_diff(&old.text, text);
-            let idx = locate_body_edit(&old.item_prints, start, end)?;
-            Some((idx, text_edit_delta(path, &old.text, text)))
+            let body = locate_body_edit(&old.item_prints, start, end)
+                .map(|idx| (idx, text_edit_delta(path, &old.text, text)));
+            (start, body)
         });
         let next = UserFile {
             text_hash: hash,
@@ -792,7 +793,9 @@ impl Session {
                     let (_, edit) = body_edit.expect("located body edit");
                     s.rebuild_body_incremental(path, module, *idx, false, &edit)
                 }
-                _ => s.rebuild_module(path, module, &changed),
+                // A wider edit can move source-line reads even when insertions
+                // and deletions cancel out in the file's total line count.
+                _ => s.rebuild_module(path, module, &changed, Some(edit_start)),
             },
             Some(FileDiff::Interface { only_functions }) if !touches_macros => s.rebuild_interface(
                 module,
@@ -1289,9 +1292,28 @@ impl Session {
         path: &str,
         ast: Ast,
         changed: &[usize],
+        moved_from: Option<usize>,
     ) -> Result<UpdateResult, CompilerError> {
         let file = ast.file;
         let mid = self.ws.module_ids[&file];
+        let mut relocated = FxHashSet::default();
+        if let Some(at) = moved_from {
+            for (owner, body) in &self.ws.module(mid).bodies {
+                if body
+                    .last_source_line_read
+                    .is_some_and(|offset| offset >= at)
+                {
+                    // Default arguments and other declaration-owned expressions
+                    // can be evaluated while lowering otherwise unchanged callers.
+                    if !matches!(owner, BodyOwner::Function(_))
+                        || body.param_defaults.iter().any(Option::is_some)
+                    {
+                        return self.rebuild_users();
+                    }
+                    relocated.insert(*owner);
+                }
+            }
+        }
 
         #[cfg(debug_assertions)]
         let old_iface = interface_snapshot(&self.ws, mid);
@@ -1336,11 +1358,12 @@ impl Session {
 
         let module = self.ws.module_mut(mid);
         let prints = &self.files[path].item_prints;
-        let reinferred: Vec<_> = changed
-            .iter()
-            .filter_map(|&i| Some((mid, module.body_at(prints.get(i)?.offset)?)))
-            .collect();
-        let changed_owners: FxHashSet<_> = reinferred.iter().map(|&(_, owner)| owner).collect();
+        let mut changed_owners = relocated;
+        changed_owners.extend(
+            changed
+                .iter()
+                .filter_map(|&i| module.body_at(prints.get(i)?.offset)),
+        );
         for (fid, _) in module.functions.iter() {
             let owner = BodyOwner::Function(fid);
             if let Some(body) = module.bodies.get_mut(&owner) {
@@ -1363,9 +1386,19 @@ impl Session {
 
         Ok(UpdateResult {
             tier: UpdateTier::BodyOnly,
-            reinferred,
+            reinferred: changed_owners
+                .into_iter()
+                .map(|owner| (mid, owner))
+                .collect(),
             relowered,
             ..UpdateResult::default()
+        })
+    }
+
+    fn reads_source_lines_after(&self, mid: ModuleId, at: usize) -> bool {
+        self.ws.module(mid).bodies.values().any(|body| {
+            body.last_source_line_read
+                .is_some_and(|offset| offset >= at)
         })
     }
 
@@ -1480,11 +1513,11 @@ impl Session {
 
         let owner = match self.ws.module(mid).body_at(new_start) {
             Some(o) => o,
-            None => return self.rebuild_module(path, ast, &[changed_idx]),
+            None => return self.rebuild_module(path, ast, &[changed_idx], None),
         };
 
         let BodyOwner::Function(fid) = owner else {
-            return self.rebuild_module(path, ast, &[changed_idx]);
+            return self.rebuild_module(path, ast, &[changed_idx], None);
         };
 
         let old_fn_span = self.ws.module(mid).functions[fid].span;
@@ -1503,7 +1536,7 @@ impl Session {
         });
         let Some((item, f)) = item else {
             let m = self.parse_stored(ustr(path))?;
-            return self.rebuild_module(path, m, &[changed_idx]);
+            return self.rebuild_module(path, m, &[changed_idx], None);
         };
         let owner = BodyOwner::Function(fid);
         let old_gen = self
@@ -1519,6 +1552,11 @@ impl Session {
         // function early.
         let at = old_fn_span.offset_range().1;
         let (byte_delta, line_delta) = (edit.byte_delta, edit.line_delta);
+        // Moving spans does not update strings derived from their old line.
+        if line_delta != 0 && self.reads_source_lines_after(mid, at) {
+            let module = self.parse_stored(file)?;
+            return self.rebuild_module(path, module, &[changed_idx], Some(at));
+        }
 
         let old_inf = self.take_inference(mid);
         self.ws.phase_timings.clear();

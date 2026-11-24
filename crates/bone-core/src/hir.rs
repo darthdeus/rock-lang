@@ -246,6 +246,8 @@ pub struct Body {
 
     pub expr_arena: Arena<Expr>,
     pub expr_spans: ArenaMap<Idx<Expr>, Span>,
+    /// The last byte offset whose source line is embedded in this body.
+    pub last_source_line_read: Option<usize>,
     /// Name spans kept out of line to keep `Expr` small.
     pub name_spans: Arena<Span>,
 

@@ -45,6 +45,7 @@ pub fn shift_module_after_edit(
         sh.map(&mut body.binding_spans);
         sh.map(&mut body.statement_spans);
         sh.map(&mut body.expr_spans);
+        body.last_source_line_read = body.last_source_line_read.map(|offset| sh.off(offset));
         sh.map(&mut body.lowered_ty_spans);
         for iv in body.node_intervals.iter_mut() {
             iv.start = sh.off(iv.start);

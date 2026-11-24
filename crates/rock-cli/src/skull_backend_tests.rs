@@ -1519,3 +1519,40 @@ fn comment_only_closure_edit_does_not_publish_an_overlay() {
         super::SkullReload::Incremental { .. }
     ));
 }
+
+#[test]
+fn body_edit_relocates_site_literals_in_later_bodies() {
+    let original = r#"macro source_site() { __SITE__ }
+fn earlier(x: int) -> int { x + 1 }
+fn main() { print(earlier(1), source_site(), __SITE__) }
+"#;
+    let edited = original.replace("x + 1", "\n    return x + 1\n");
+    let mut live = ProjectFixture::boot(original);
+    for source in [edited.as_str(), original] {
+        let reload = live.edit(source).unwrap();
+        let fresh_main = live.path("fresh.lua");
+        let fresh_overlay = live.path("fresh-overlay.lua");
+        super::IncrementalProject::init(
+            live.dir.path().to_str().unwrap(),
+            &fresh_main,
+            &fresh_overlay,
+        )
+        .unwrap();
+        if matches!(
+            reload,
+            super::SkullReload::FullRequired { .. } | super::SkullReload::ShapeChanged { .. }
+        ) {
+            live.force_full().unwrap();
+        }
+        let fresh = std::fs::read_to_string(fresh_main).unwrap();
+        let run = |main: String, overlay: &str| {
+            let main = main.replace("\n__rock_main_wrapper(main)\n", "\n");
+            match run_parts(&[&main, SYS_STUB, overlay, "main()"]) {
+                ExecOutcome::Output(out) => out,
+                ExecOutcome::Errored(error) => panic!("{error}"),
+            }
+        };
+        let overlay = std::fs::read_to_string(&live.incremental).unwrap_or_default();
+        assert_eq!(run(live.main_text(), &overlay), run(fresh, ""));
+    }
+}
