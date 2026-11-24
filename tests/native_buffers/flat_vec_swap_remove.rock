@@ -1,0 +1,37 @@
+value Row { x: float, generation: int }
+
+@noalloc fn discard(rows: FlatVec<Row>, i: int) {
+    rows.swap_remove(i)
+}
+
+@test(backends = "lua")
+fn swap_remove_moves_the_last_live_row() {
+    let rows: FlatVec<Row> = flat_vec_new(4)
+    rows.push(Row { x: 1.0, generation: 1 })
+    rows.push(Row { x: 2.0, generation: 2 })
+    rows.push(Row { x: 3.0, generation: 3 })
+
+    let removed = rows.swap_remove(0) ?? Row { x: -1.0, generation: -1 }
+    assert_eq(removed.x, 1.0)
+    assert_eq(removed.generation, 1)
+    assert_eq(rows.len, 2)
+    assert_eq(rows[0].x, 3.0)
+    assert_eq(rows[0].generation, 3)
+    assert_eq(rows[1].generation, 2)
+
+    assert(rows.swap_remove(-1) == null)
+    assert(rows.swap_remove(2) == null)
+    assert_eq(rows.len, 2)
+    assert_eq(rows[0].generation, 3)
+    assert_eq(rows[1].generation, 2)
+
+    let last = rows.swap_remove(1) ?? Row { x: -1.0, generation: -1 }
+    assert_eq(last.generation, 2)
+    assert_eq(rows.len, 1)
+    assert_eq(rows[0].generation, 3)
+
+    discard(rows, 0)
+    assert_eq(rows.len, 0)
+    assert(rows.swap_remove(0) == null)
+    assert_eq(rows.buf.len, 4)
+}

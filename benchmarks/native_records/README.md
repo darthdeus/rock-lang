@@ -37,7 +37,7 @@ checksum outside the window.
 | `random:4096` | One indexed lookup and three field reads. |
 | `update:4096` | Four field updates and a sum using the updated row. |
 | `step:4096` | One simulation row, including the active and generation checks, a kind branch, and two writes on valid rows. |
-| `churn:4096` | One swap-remove followed by an append, with capacity reserved. The native arm uses a FlatVec and assigns the last row into the removed slot. |
+| `churn:4096` | One swap-remove followed by an append, with capacity reserved. The native arm discards the result of `FlatVec.swap_remove`. |
 | `copy:1000`, `:10000`, `:100000` | One row of a fresh independent snapshot. The table arm creates a new record and the native arm assigns all row leaves. |
 | `bulk:1000`, `:10000`, `:100000` | One row of a fresh independent snapshot made by `deepcopy`. The native data is copied by `ffi.copy`. |
 

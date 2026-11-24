@@ -150,9 +150,7 @@ fn native_churn(rows: FlatVec<NativeRow>, indices: [int], n: int) -> float {
     for j in 0..n {
         let i = indices[j]
         sum += rows.buf[i].x
-        let last = rows.len - 1
-        if i != last { rows.buf[i] = rows.buf[last] }
-        rows.len = last
+        rows.swap_remove(i)
         rows.push(row_at(NativeRow, i, j + n))
     }
     return sum

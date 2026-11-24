@@ -312,6 +312,15 @@ fn metric_recent(m: Metric, i: int) -> float {
     fv.buf[i] = v
 }
 
+@inline fn FlatVec<T>.swap_remove(fv, i: int) -> T? {
+    if i < 0 || i >= fv.len { return null }
+    let removed = fv.buf[i]
+    let last = fv.len - 1
+    if i != last { fv.buf[i] = fv.buf[last] }
+    fv.len = last
+    return removed
+}
+
 // Keeps the allocated capacity; a later push reuses it.
 @inline fn FlatVec<T>.clear(fv) {
     fv.len = 0
