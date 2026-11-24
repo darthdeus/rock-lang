@@ -1,0 +1,47 @@
+value Point { x: int }
+enum Choice { Number(int), Text(string) }
+value Holder<T> { payload: T }
+
+fn point(n: int) -> Point? {
+    if n == 0 { return null }
+    return Point { x: n }
+}
+
+fn choice(n: int) -> Choice? {
+    if n == 0 { return null }
+    return Choice::Number(n)
+}
+
+fn wrap<T>(x: T) -> Holder<T> { return Holder { payload: x } }
+
+@test
+fn generic_nullable_value_fields_compare_by_contents() {
+    let left = wrap(point(1))
+    let same = wrap(point(1))
+    let different = wrap(point(2))
+    let absent = wrap(point(0))
+    assert(left == same && !(left != same))
+    assert(left != different && left != absent)
+    assert(absent == wrap(point(0)))
+}
+
+@test
+fn generic_nullable_enum_fields_compare_by_contents() {
+    let left = wrap(choice(1))
+    let same = wrap(choice(1))
+    let different = wrap(choice(2))
+    let absent = wrap(choice(0))
+    assert(left == same && !(left != same))
+    assert(left != different && left != absent)
+    assert(absent == wrap(choice(0)))
+}
+
+struct Row { x: int }
+
+@test
+fn generic_nullable_reference_fields_keep_identity() {
+    let first: Row? = Row { x: 1 }
+    let other: Row? = Row { x: 1 }
+    assert(wrap(first) == wrap(first))
+    assert(wrap(first) != wrap(other))
+}

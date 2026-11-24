@@ -1681,6 +1681,17 @@ fn nominal_gc_eq(ws: &Workspace, name: Ustr) -> GcFieldEq {
     }
 }
 
+/// A generic slot can keep its physical layout while changing how a value box
+/// compares that slot. Scalar keys and reference-identity fields can share the
+/// declaration's comparator.
+pub(super) fn shares_boxed_field_equality(ws: &Workspace, ty: TyId, subst: &MonoSubst) -> bool {
+    let Some(child) = substituted(ws, ty, subst).and_then(|ty| ty.peel_nullable().0.nominal())
+    else {
+        return true;
+    };
+    is_payload_free_enum(ws, child) || nominal_gc_eq(ws, child) == gc_field_eq(ws, ty)
+}
+
 /// Flattened Lua table layout for a boxed non-cdata enum; the variant name
 /// remains the discriminant.
 #[derive(Clone, Debug, PartialEq, Eq)]

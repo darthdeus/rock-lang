@@ -356,9 +356,8 @@ pub fn struct_field_plan(
     })
 }
 
-/// Whether a struct instance lays out exactly like its declaration, which then
-/// serves it under the declaration's name. A boxed child's type is not layout,
-/// and a `@lua_named` struct's keys are a Lua contract, never respecialized.
+/// Whether a struct instance shares its declaration's layout and value
+/// comparator. A `@lua_named` struct's layout is a Lua contract.
 pub(crate) fn struct_instance_matches_declaration(ws: &Workspace, name: Ustr) -> bool {
     let base = crate::layout_instance::decl_name(name);
     let Some(sid) = ws.nominals.struct_id(base) else {
@@ -376,10 +375,20 @@ pub(crate) fn struct_instance_matches_declaration(ws: &Workspace, name: Ustr) ->
     let value = |owner: Ustr| {
         super::shape::planned_value(ws, owner).map(|plan| (plan.storage, plan.shape.fields.clone()))
     };
-    sd.fields
+    if !sd
+        .fields
         .iter()
         .all(|field| physical(name, field.name) == physical(base, field.name))
-        && value(name) == value(base)
+        || value(name) != value(base)
+    {
+        return false;
+    }
+    !super::shape::has_value_plan(sd)
+        || crate::layout_instance::layout_subst(ws, name).is_none_or(|subst| {
+            sd.fields
+                .iter()
+                .all(|field| super::shape::shares_boxed_field_equality(ws, field.ty, &subst))
+        })
 }
 
 /// One declared field of a `<Name>_vt` box: a single key, or an inline child
