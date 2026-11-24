@@ -5,12 +5,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 // Two signed words preserve Rock's exact integer range without exposing i64
 // cdata to Lua arithmetic. Lengths count values, not words.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct NativeNavIntWire {
-    lo: i32,
-    hi: i32,
-}
+include!(concat!(env!("OUT_DIR"), "/stone_nav_ffi.rs"));
+
 impl NativeNavIntWire {
     pub(super) fn value(self) -> int {
         ((self.hi as int) << 32) | (self.lo as u32 as int)

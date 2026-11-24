@@ -3,9 +3,57 @@
 //! Configures SDL2 to link against our prebuilt libraries.
 //! Uses CARGO_CFG_TARGET_* for correct cross-compilation support.
 
-use std::env;
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
+
+mod nav_ffi_codegen;
+
+fn navigation_ffi() {
+    let rock = Path::new("../packages/stone-native");
+    let rust = "src/nav/ffi.rs";
+    let header = "../packages/stone-native/stone_native.h";
+    for path in [
+        rust,
+        "nav_ffi_codegen.rs",
+        "../packages/stone-native",
+        "../packages/stone-core",
+    ] {
+        println!("cargo:rerun-if-changed={path}");
+    }
+
+    let out = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo OUT_DIR"));
+    let read = |path| fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    let sources = nav_ffi_codegen::load_rock(rock)
+        .unwrap_or_else(|e| panic!("load Stone native package: {e}"));
+    let generated = nav_ffi_codegen::generate(&sources, &read(rust))
+        .unwrap_or_else(|e| panic!("navigation FFI: {e}"));
+
+    let existing = read(header);
+    let marker = "// Generated navigation declarations. See stone-rs/build.rs.\n";
+    let (legacy, declarations) = existing
+        .split_once(marker)
+        .expect("navigation declaration marker in stone_native.h");
+    if declarations != generated.cdef {
+        let updated = out.join("stone_native.h");
+        fs::write(&updated, format!("{legacy}{marker}{}", generated.cdef)).unwrap();
+        panic!(
+            "stale navigation FFI declarations in {header}; copy {} over the header",
+            updated.display()
+        );
+    }
+    fs::write(out.join("stone_nav_ffi.rs"), generated.rust).unwrap();
+}
 
 fn main() {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .stack_size(rock_core::nesting::COMPILER_STACK_BYTES)
+        .build()
+        .expect("compiler worker")
+        .install(navigation_ffi);
+
     // Target (not host) platform, for cross-compilation: CARGO_CFG_TARGET_OS is
     // set by Cargo to the platform being compiled FOR.
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
