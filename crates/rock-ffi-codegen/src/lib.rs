@@ -3,7 +3,7 @@
 use bone_semantic::prelude::{Ustr, Workspace};
 use skull_mir::lower::{CFieldType, value_c_layout};
 use skull_mir::mangle::type_symbol;
-use skull_parser::parse_module_clean;
+use skull_parser::{EnumDef, EnumVariantKind, ItemKind, parse_module_clean};
 use std::collections::BTreeMap;
 use std::fmt::Write;
 use syn::parse::{ParseStream, Parser};
@@ -353,14 +353,30 @@ impl Module {
         Ok(Wire::new(wire.c, canonical_rust(&name), wire.rock))
     }
 
-    /// Generate Rust wire types and LuaJIT layout tests from Rock value declarations.
+    /// Generate Rust wire types and LuaJIT layout tests from Rock values,
+    /// and Rust tags from payload-free Rock enums.
     pub fn layouts(&self, file: &str, source: &str) -> Result<(String, String), String> {
         let mut ast = [parse_module_clean(source, Ustr::from(file)).map_err(|e| e.message)?];
-        let ws = bone_semantic::semantic_passes::semantic_pass(&mut ast).map_err(|e| e.message)?;
         let mut rust = String::new();
         let mut tests = String::new();
+        let mut values = Vec::new();
         for layout in self.layouts {
-            emit_layout(&ws, layout, &mut rust, &mut tests)?;
+            let tag = ast[0].items.iter().find_map(|item| match &item.kind {
+                ItemKind::Enum(tag) if tag.name.name.as_str() == layout.rock => Some(tag),
+                _ => None,
+            });
+            if let Some(tag) = tag {
+                emit_enum(tag, layout.rust, &mut rust)?;
+            } else {
+                values.push(layout);
+            }
+        }
+        if !values.is_empty() {
+            let ws =
+                bone_semantic::semantic_passes::semantic_pass(&mut ast).map_err(|e| e.message)?;
+            for layout in values {
+                emit_layout(&ws, layout, self.layouts, &mut rust, &mut tests)?;
+            }
         }
         Ok((rust, tests))
     }
@@ -512,9 +528,42 @@ impl Wire {
     }
 }
 
+fn emit_enum(tag: &EnumDef, ty: &str, rust: &mut String) -> Result<(), String> {
+    if !tag.generics.is_empty()
+        || tag.variants.is_empty()
+        || tag.variants.iter().any(|v| v.kind != EnumVariantKind::Unit)
+    {
+        return Err(format!("{ty}: expected a nonempty payload-free enum"));
+    }
+    writeln!(
+        rust,
+        "#[repr(i32)]\n#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]\npub enum {ty} {{"
+    )
+    .unwrap();
+    for (index, variant) in tag.variants.iter().enumerate() {
+        writeln!(rust, "    r#{} = {index},", variant.name.name).unwrap();
+    }
+    writeln!(
+        rust,
+        "}}\nimpl {ty} {{\n    pub const fn tag(self) -> i32 {{ self as i32 }}\n    pub const fn from_tag(tag: i32) -> Option<Self> {{\n        match tag {{"
+    )
+    .unwrap();
+    for (index, variant) in tag.variants.iter().enumerate() {
+        writeln!(
+            rust,
+            "            {index} => Some(Self::r#{}),",
+            variant.name.name
+        )
+        .unwrap();
+    }
+    rust.push_str("            _ => None,\n        }\n    }\n}\n");
+    Ok(())
+}
+
 fn emit_layout(
     ws: &Workspace,
     layout: &Layout,
+    types: &[Layout],
     rust: &mut String,
     tests: &mut String,
 ) -> Result<(), String> {
@@ -539,6 +588,13 @@ fn emit_layout(
             CFieldType::Scalar("double") => "f64",
             CFieldType::Scalar("float") => "f32",
             CFieldType::Scalar("bool") => "bool",
+            CFieldType::Aggregate(name) => {
+                let symbol = type_symbol(ws, *name);
+                types
+                    .iter()
+                    .find(|ty| ty.rock == symbol.as_str())
+                    .map_or(symbol.as_str(), |ty| ty.rust)
+            }
             _ => return Err(format!("{rock}.{field}: unsupported C field type")),
         };
         writeln!(rust, "    pub r#{field}: {field_ty},").unwrap();
@@ -594,6 +650,44 @@ mod tests {
         layouts: &[],
         opaque_pointers: &[],
     };
+
+    #[test]
+    fn nested_values_use_the_rust_type_and_enum_fields_stay_integers() {
+        let native = Module {
+            layouts: &[
+                Layout {
+                    rock: "Point",
+                    rust: "WirePoint",
+                },
+                Layout {
+                    rock: "Entry",
+                    rust: "Entry",
+                },
+                Layout {
+                    rock: "Kind",
+                    rust: "Kind",
+                },
+            ],
+            ..NATIVE
+        };
+        let (rust, tests) = native
+            .layouts(
+                "example.rock",
+                "
+            pub enum Kind { Empty, Filled }
+            pub @nomangle nobox value Point { x: int, y: int }
+            pub @nomangle nobox value Entry { point: Point, kind: Kind, weight: float }
+        ",
+            )
+            .unwrap();
+        assert!(rust.contains("pub r#point: WirePoint"));
+        assert!(rust.contains("pub r#kind: i32"));
+        assert!(rust.contains("r#Filled = 1"));
+        assert!(rust.contains("1 => Some(Self::r#Filled)"));
+        assert!(rust.contains("_ => None"));
+        assert!(tests.contains("ffi.sizeof('Entry') == 24"));
+        assert!(tests.contains("ffi.offsetof('Entry', 'kind') == 8"));
+    }
 
     #[test]
     fn byte_string_keeps_the_c_abi_and_projects_the_length_in_lua() {
