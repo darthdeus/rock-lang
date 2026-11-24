@@ -3,9 +3,10 @@ use rustc_hash::FxHashSet as HashSet;
 use bone_core::hir::FnBackend;
 use bone_core::prelude::CompilerError;
 use bone_core::workspace::Workspace;
+use comfy_la_arena::Idx;
 use skull_mir::concrete::ConcretePlans;
 use skull_mir::lower::ScalarCtx;
-use skull_mir::mir::{FuncRef, MirFunc};
+use skull_mir::mir::{FuncRef, Inst, MirFunc};
 use skull_mir::verify::Stage;
 
 use crate::InlineCache;
@@ -75,10 +76,10 @@ impl Inliner<'_> {
         pass: BodyPass,
         stage: Stage,
         obs: &mut dyn PassObserver,
-    ) -> Result<HashSet<FuncRef>, ChainError> {
+    ) -> Result<crate::inline::InlineOutcome, ChainError> {
         obs.begin(pass, mf);
         let read_stores = read_stores(mf);
-        let (callees, splices, copied_instructions) = crate::inline_functions_with_plans(
+        let outcome = crate::inline_functions_with_plans(
             ws,
             self.scx,
             self.self_ref,
@@ -87,11 +88,11 @@ impl Inliner<'_> {
             self.plans,
         )
         .map_err(|error| ChainError { pass, error })?;
-        obs.inlined(pass, splices, copied_instructions);
+        obs.inlined(pass, outcome.splices, outcome.copied_instructions);
         obs.end(pass, mf);
         verify_after(ws, self.scx.target(), mf, stage, pass);
         no_lost_writes(mf, read_stores, pass);
-        Ok(callees)
+        Ok(outcome)
     }
 }
 
@@ -136,8 +137,9 @@ pub fn prepare_body(
     obs: &mut dyn PassObserver,
 ) -> Result<HashSet<FuncRef>, ChainError> {
     debug_verify(ws, opts.target, mf, Stage::LOWERED, &"lowering");
-    let mut spliced = inliner.run(ws, mf, BodyPass::Inline, Stage::LOWERED, obs)?;
-    convert(ws, mf, name, opts, obs)?;
+    let outcome = inliner.run(ws, mf, BodyPass::Inline, Stage::LOWERED, obs)?;
+    let mut spliced = outcome.dependencies;
+    convert(ws, mf, name, opts, obs, &outcome.callbacks)?;
     if opts.inline_hoisted {
         inline_hoisted(ws, &mut inliner, &mut mf.nested_fns, &mut spliced, obs)?;
     }
@@ -152,7 +154,7 @@ pub fn convert_body(
     obs: &mut dyn PassObserver,
 ) -> Result<(), ChainError> {
     debug_verify(ws, opts.target, mf, Stage::LOWERED, &"lowering");
-    convert(ws, mf, name, opts, obs)
+    convert(ws, mf, name, opts, obs, &HashSet::default())
 }
 
 fn convert(
@@ -161,14 +163,16 @@ fn convert(
     name: &str,
     opts: &ChainOptions<'_>,
     obs: &mut dyn PassObserver,
+    callbacks: &HashSet<Idx<Inst>>,
 ) -> Result<(), ChainError> {
     cleanup(ws, opts.target, mf, BodyPass::Cleanup, obs)?;
-    if crate::lambda_inline::inline_lambda_calls(mf) {
+    let lambda_sites = (!callbacks.is_empty()).then(|| crate::closure::lambda_sites(mf));
+    if crate::lambda_inline::inline_lambda_calls(mf, callbacks) {
         cleanup(ws, opts.target, mf, BodyPass::Cleanup, obs)?;
     }
     obs.begin(BodyPass::Closure, mf);
     let named = mf.nested_fns.len();
-    crate::convert_closures(mf, name);
+    crate::convert_closures_framed(mf, name, lambda_sites.as_ref(), None, None);
     for nf in &mf.nested_fns[named..] {
         (opts.reserve)(&nf.name);
     }
@@ -237,7 +241,11 @@ fn inline_hoisted(
             spliced.insert(source);
         }
         let pass = BodyPass::HoistedInline;
-        spliced.extend(inliner.run(ws, nf, pass, Stage::CONVERTED, obs)?);
+        spliced.extend(
+            inliner
+                .run(ws, nf, pass, Stage::CONVERTED, obs)?
+                .dependencies,
+        );
         cleanup(ws, inliner.scx.target(), nf, pass, obs)?;
         inline_hoisted(ws, inliner, &mut nf.nested_fns, spliced, obs)?;
     }

@@ -1,0 +1,105 @@
+fn call_twice(f: fn(int) -> int, value: int) -> int {
+    let first = f(value)
+    return f(first)
+}
+
+fn choose_callback(f: fn(int) -> int, value: int, twice: bool) -> int {
+    if twice { return call_twice(f, value) }
+    return f(value)
+}
+
+@noalloc fn count_calls(start: int, twice: bool) -> (int, int) {
+    let count = start
+    let result = choose_callback((arg: int) => {
+        count += 1
+        return arg + count
+    }, 10, twice)
+    return (count, result)
+}
+
+fn call_optional(value: int, f: fn(int)? = null) {
+    if let callback = f { callback(value) }
+}
+
+@noalloc fn optional_call(start: int) -> int {
+    let count = start
+    call_optional(7, arg => { count += arg })
+    return count
+}
+
+fn no_callback_result() -> int { return 0 }
+
+fn escape_or_call(f: fn() -> int, save: bool) -> fn() -> int {
+    if save { return f }
+    let _ = f()
+    return no_callback_result
+}
+
+fn forward_escape(f: fn() -> int, save: bool) -> fn() -> int {
+    return escape_or_call(f, save)
+}
+
+fn make_escaping(start: int) -> fn() -> int {
+    let count = start
+    return forward_escape(() => {
+        count += 1
+        return count
+    }, true)
+}
+
+@noalloc fn descend(depth: int) -> int {
+    if depth == 0 { return 0 }
+    return choose_callback(arg => arg + descend(depth - 1), depth, false)
+}
+
+co fn yield_then_call(f: fn() -> int) -> Coroutine<int> {
+    yield 1
+    yield f()
+}
+
+fn deferred(start: int) -> Coroutine<int> {
+    return yield_then_call(() => start)
+}
+
+@nomangle fn fail_in_callback(start: int) -> int {
+    return call_twice(arg => { error("callback failure"); return arg + start }, 10)
+}
+
+inline(lua) fn callback_error() -> bool = """
+    local ok, err = pcall(fail_in_callback, 2)
+    return not ok and string.find(tostring(err), "callback failure", 1, true) ~= nil
+"""
+
+@test
+fn synchronous_callback_shares_mutation_across_calls() {
+    let (count, result) = count_calls(5, true)
+    assert(count == 7 && result == 23)
+    let (once, single) = count_calls(5, false)
+    assert(once == 6 && single == 16)
+    assert(optional_call(5) == 12)
+}
+
+@test
+fn returned_callbacks_keep_separate_captures() {
+    let first = make_escaping(1)
+    let second = make_escaping(10)
+    assert(first() == 2 && second() == 11 && first() == 3)
+}
+
+@test
+fn callback_can_reenter_its_creator() {
+    assert(descend(4) == 10)
+}
+
+@test
+fn coroutine_keeps_the_callback_after_yield() {
+    let first = deferred(5)
+    let later = deferred(10)
+    assert(first.resume() == 1 && later.resume() == 1)
+    assert(later.resume() == 10 && first.resume() == 5)
+}
+
+@test(backends = "lua")
+fn callback_error_escapes_the_callee() {
+    assert(callback_error())
+}

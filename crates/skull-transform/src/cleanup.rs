@@ -329,7 +329,10 @@ fn fold_known_compares(func: &mut MirFunc) -> bool {
     if skull_mir::pass_disabled("foldcmp") {
         return false;
     }
-    let never_nil = skull_mir::nilness::constructed_never_nil;
+    let never_nil = |func: &MirFunc, id: Idx<Inst>| {
+        matches!(func.insts[id], Inst::Lambda { .. })
+            || skull_mir::nilness::constructed_never_nil(func, id)
+    };
     let is_nil = |func: &MirFunc, v: Idx<Inst>| matches!(&func.insts[v], Inst::Const(Lit::Nil));
     let literal_equality =
         |func: &MirFunc, a: Idx<Inst>, b: Idx<Inst>| match (&func.insts[a], &func.insts[b]) {

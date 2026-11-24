@@ -1,4 +1,4 @@
-//! Move a lambda's body into its only call when the call sits in the scope that
+//! Move a lambda's body into its calls when all calls sit in the scope that
 //! creates the lambda. Inlined iterator combinators reduce `xs.iter().map(f)` to
 //! exactly this shape, so the chain's closures stop allocating environments and
 //! stop dispatching through code slots.
@@ -9,50 +9,8 @@ use comfy_la_arena::Idx;
 use skull_mir::cfg::successors;
 use skull_mir::mir::*;
 
+use crate::scope::{Ownership, ScopeId, ScopeTree};
 use crate::visit::{raw, top_level_blocks_from};
-
-struct Candidate {
-    lambda: Idx<Inst>,
-    region: usize,
-    body: usize,
-}
-
-struct Regions {
-    /// Region 0 is the function's own CFG; each lambda body is one more.
-    of_block: Vec<Option<usize>>,
-    blocks: Vec<Vec<Idx<Block>>>,
-    lambdas: Vec<Candidate>,
-}
-
-fn regions(mf: &MirFunc) -> Regions {
-    let mut r = Regions {
-        of_block: vec![None; mf.blocks.len()],
-        blocks: Vec::new(),
-        lambdas: Vec::new(),
-    };
-    let mut work = vec![(mf.entry, None)];
-    while let Some((entry, lambda)) = work.pop() {
-        let region = r.blocks.len();
-        let blocks = top_level_blocks_from(mf, entry);
-        for &b in &blocks {
-            r.of_block[raw(b)] = Some(region);
-            for &id in &mf.blocks[b].insts {
-                if let Inst::Lambda { entry, .. } = mf.insts[id] {
-                    work.push((entry, Some((id, region))));
-                }
-            }
-        }
-        if let Some((lambda, creator)) = lambda {
-            r.lambdas.push(Candidate {
-                lambda,
-                region: creator,
-                body: region,
-            });
-        }
-        r.blocks.push(blocks);
-    }
-    r
-}
 
 fn callee_and_args(inst: &Inst) -> Option<(Idx<Inst>, &[Idx<Inst>])> {
     match inst {
@@ -63,32 +21,34 @@ fn callee_and_args(inst: &Inst) -> Option<(Idx<Inst>, &[Idx<Inst>])> {
     }
 }
 
-/// Every lambda used exactly once, as the callee of a call in its creating
-/// region, mapped to that call's position.
-fn single_calls(mf: &MirFunc, r: &Regions) -> HashMap<Idx<Inst>, (Idx<Block>, usize)> {
-    let lambdas: HashSet<Idx<Inst>> = r.lambdas.iter().map(|c| c.lambda).collect();
+type CallSite = (Idx<Block>, usize);
+
+/// Every lambda used only as a callee, mapped to its call positions.
+fn lambda_calls(mf: &MirFunc, tree: &ScopeTree) -> HashMap<Idx<Inst>, Vec<CallSite>> {
     let mut uses: HashMap<Idx<Inst>, usize> = HashMap::default();
-    let mut calls: HashMap<Idx<Inst>, (Idx<Block>, usize)> = HashMap::default();
+    let mut calls: HashMap<Idx<Inst>, Vec<CallSite>> = HashMap::default();
+    let is_lambda = |id| matches!(mf.insts[id], Inst::Lambda { .. });
     let mut count = |v: Idx<Inst>| {
-        if lambdas.contains(&v) {
+        if is_lambda(v) {
             *uses.entry(v).or_default() += 1;
         }
     };
-    for blocks in &r.blocks {
-        for &b in blocks {
-            for (pos, &id) in mf.blocks[b].insts.iter().enumerate() {
-                let inst = &mf.insts[id];
-                inst.uses_each(&mut count);
-                if let Some((callee, _)) = callee_and_args(inst)
-                    && lambdas.contains(&callee)
-                {
-                    calls.insert(callee, (b, pos));
-                }
-            }
-            mf.blocks[b].term.uses_each(&mut count);
+    for (b, block) in mf.blocks.iter() {
+        if tree.scope_of_block(b).is_none() {
+            continue;
         }
+        for (pos, &id) in block.insts.iter().enumerate() {
+            let inst = &mf.insts[id];
+            inst.uses_each(&mut count);
+            if let Some((callee, _)) = callee_and_args(inst)
+                && is_lambda(callee)
+            {
+                calls.entry(callee).or_default().push((b, pos));
+            }
+        }
+        block.term.uses_each(&mut count);
     }
-    calls.retain(|lambda, _| uses.get(lambda) == Some(&1));
+    calls.retain(|lambda, sites| uses.get(lambda) == Some(&sites.len()));
     calls
 }
 
@@ -97,7 +57,7 @@ fn single_calls(mf: &MirFunc, r: &Regions) -> HashMap<Idx<Inst>, (Idx<Block>, us
 /// lambda being created again must block the move.
 fn capture_may_change(
     mf: &MirFunc,
-    region: &[Idx<Block>],
+    region: &HashSet<Idx<Block>>,
     captured: &HashSet<Idx<Cell>>,
     lambda: Idx<Inst>,
     call: Idx<Inst>,
@@ -136,76 +96,81 @@ fn capture_may_change(
     false
 }
 
-fn movable(mf: &MirFunc, r: &Regions, c: &Candidate, call: Idx<Inst>) -> bool {
-    let Inst::Lambda { params, .. } = &mf.insts[c.lambda] else {
+fn movable(
+    mf: &MirFunc,
+    tree: &ScopeTree,
+    own: &Ownership,
+    body: ScopeId,
+    sites: &[CallSite],
+    specialized: bool,
+) -> bool {
+    let scope = &tree.scopes[body];
+    let (Some(lambda), Some(creator)) = (scope.lambda, scope.parent) else {
         return false;
     };
-    let Some((_, args)) = callee_and_args(&mf.insts[call]) else {
-        return false;
-    };
-    if args.len() != params.len()
-        || mf.call_abi_plans.contains_key(&call)
-        || mf.flat_call_lanes.contains_key(&call)
-        || mf.call_rep_plans.get(&call)
-            != mf.lambda_abis.get(&c.lambda).map(|abi| &abi.representation)
-    {
-        return false;
-    }
-    let dests = match &mf.insts[call] {
-        Inst::CallValueMulti { dests, .. } => dests.len(),
-        _ => 1,
-    };
-    let body = &r.blocks[c.body];
-    let mut cells: HashSet<Idx<Cell>> = HashSet::default();
-    for &b in body {
-        for &id in &mf.blocks[b].insts {
-            if matches!(mf.insts[id], Inst::Lambda { .. }) {
-                return false;
-            }
-            mf.insts[id].cells_each(&mut |cell| {
-                cells.insert(cell);
-            });
-        }
-        match &mf.blocks[b].term {
-            Term::Yield { .. } => return false,
-            Term::Return(values) if values.len() > dests => return false,
-            _ => {}
-        }
-    }
-    let mut captured: HashSet<Idx<Cell>> = HashSet::default();
-    for (region, blocks) in r.blocks.iter().enumerate() {
-        if region == c.body {
-            continue;
-        }
-        for &b in blocks {
-            for &id in &mf.blocks[b].insts {
-                if id == c.lambda {
-                    continue;
-                }
-                mf.insts[id].cells_each(&mut |cell| {
-                    if cells.contains(&cell) {
-                        captured.insert(cell);
-                    }
-                });
-            }
-        }
-    }
-    // A write through a `ref` alias is invisible to the reachability check.
+    let captured = &own.captures[body];
     if captured.iter().any(|&cell| mf.cells[cell].borrowed) {
         return false;
     }
-    captured.is_empty() || !capture_may_change(mf, &r.blocks[c.region], &captured, c.lambda, call)
+    let mut min_dests = usize::MAX;
+    for &(block, pos) in sites {
+        let call = mf.blocks[block].insts[pos];
+        let Some((_, args)) = callee_and_args(&mf.insts[call]) else {
+            return false;
+        };
+        if tree.scope_of_block(block) != Some(creator)
+            || args.len() != scope.params.len()
+            || mf.call_abi_plans.contains_key(&call)
+            || mf.flat_call_lanes.contains_key(&call)
+            || mf.call_rep_plans.get(&call)
+                != mf.lambda_abis.get(&lambda).map(|abi| &abi.representation)
+        {
+            return false;
+        }
+        let dests = match &mf.insts[call] {
+            Inst::CallValueMulti { dests, .. } => dests.len(),
+            _ => 1,
+        };
+        min_dests = min_dests.min(dests);
+    }
+    for &block in &scope.region {
+        for &id in &mf.blocks[block].insts {
+            if matches!(mf.insts[id], Inst::Lambda { .. }) {
+                return false;
+            }
+            if specialized {
+                // Moving a writer can change a box shared with another lambda.
+                let mut shared_write = false;
+                mf.insts[id].cell_writes_each(&mut |cell| {
+                    shared_write |= captured.contains(&cell)
+                        && own.captures.iter().enumerate().any(|(sid, cells)| {
+                            sid != body && sid != creator && cells.contains(&cell)
+                        });
+                });
+                if shared_write {
+                    return false;
+                }
+            }
+        }
+        match &mf.blocks[block].term {
+            Term::Yield { .. } => return false,
+            Term::Return(values) if values.len() > min_dests => return false,
+            _ => {}
+        }
+    }
+    captured.is_empty()
+        || sites.iter().all(|&(block, pos)| {
+            !capture_may_change(
+                mf,
+                &tree.scopes[creator].region,
+                captured,
+                lambda,
+                mf.blocks[block].insts[pos],
+            )
+        })
 }
 
-fn move_body(mf: &mut MirFunc, body: &[Idx<Block>], lambda: Idx<Inst>, site: (Idx<Block>, usize)) {
-    let Inst::Lambda { params, entry } =
-        std::mem::replace(&mut mf.insts[lambda], Inst::Const(Lit::Nil))
-    else {
-        unreachable!("candidate is a lambda")
-    };
-    mf.lambda_abis.remove(&lambda);
-    mf.code_value_identities.remove(&lambda);
-
+fn move_body(mf: &mut MirFunc, body: &[Idx<Block>], params: Vec<Idx<Cell>>, site: CallSite) {
     let (block, pos) = site;
     let call = mf.blocks[block].insts[pos];
     let (args, dests) = match &mf.insts[call] {
@@ -217,7 +182,7 @@ fn move_body(mf: &mut MirFunc, body: &[Idx<Block>], lambda: Idx<Inst>, site: (Id
     mf.blocks[block].insts.pop();
     let cont = mf.new_block();
     mf.blocks[cont].insts = after;
-    mf.blocks[cont].term = std::mem::replace(&mut mf.blocks[block].term, Term::Goto(entry));
+    mf.blocks[cont].term = std::mem::replace(&mut mf.blocks[block].term, Term::Goto(body[0]));
     let dests = match dests {
         Some(dests) => {
             mf.insts[call] = Inst::Const(Lit::Nil);
@@ -256,39 +221,59 @@ fn move_body(mf: &mut MirFunc, body: &[Idx<Block>], lambda: Idx<Inst>, site: (Id
     }
 }
 
-/// Returns whether any body moved.
-pub(crate) fn inline_lambda_calls(mf: &mut MirFunc) -> bool {
-    if skull_mir::pass_disabled("lambda") {
-        return false;
-    }
-    if !mf
-        .insts
-        .iter()
-        .any(|(_, i)| matches!(i, Inst::Lambda { .. }))
+pub(crate) fn inline_lambda_calls(mf: &mut MirFunc, callbacks: &HashSet<Idx<Inst>>) -> bool {
+    if skull_mir::pass_disabled("lambda")
+        || !mf
+            .insts
+            .iter()
+            .any(|(_, i)| matches!(i, Inst::Lambda { .. }))
     {
         return false;
     }
-    let r = regions(mf);
-    let calls = single_calls(mf, &r);
-    let mut moved: Vec<(usize, Idx<Inst>, (Idx<Block>, usize))> = Vec::new();
-    for c in &r.lambdas {
-        let Some(&site) = calls.get(&c.lambda) else {
-            continue;
-        };
-        if r.of_block[raw(site.0)] != Some(c.region) {
-            continue;
-        }
-        let call = mf.blocks[site.0].insts[site.1];
-        if movable(mf, &r, c, call) {
-            moved.push((c.body, c.lambda, site));
-        }
+    let tree = ScopeTree::build(mf);
+    let calls = lambda_calls(mf, &tree);
+    if calls.is_empty() {
+        return false;
     }
-    let any = !moved.is_empty();
+    let own = tree.analyze(mf);
+    let candidates: Vec<_> = tree
+        .scopes
+        .iter()
+        .enumerate()
+        .filter_map(|(sid, scope)| {
+            let lambda = scope.lambda?;
+            let sites = calls.get(&lambda)?;
+            let specialized = callbacks.contains(&lambda);
+            ((sites.len() == 1 || specialized) && movable(mf, &tree, &own, sid, sites, specialized))
+                .then_some((sid, lambda, sites))
+        })
+        .collect();
+    if candidates.is_empty() {
+        return false;
+    }
+    let mut moved = Vec::new();
+    for (sid, lambda, sites) in candidates {
+        let (first, rest) = sites.split_first().expect("lambda has a call");
+        let Inst::Lambda { params, entry } =
+            std::mem::replace(&mut mf.insts[lambda], Inst::Const(Lit::Nil))
+        else {
+            unreachable!("candidate is a lambda")
+        };
+        mf.lambda_abis.remove(&lambda);
+        mf.code_value_identities.remove(&lambda);
+        let body = top_level_blocks_from(mf, entry);
+        for &site in rest {
+            let (blocks, params) =
+                crate::inline::clone_lambda_region(mf, &body, &params, &own.captures[sid]);
+            moved.push((blocks, params, site));
+        }
+        moved.push((body, params, *first));
+    }
     // Splitting a block shifts the positions after the call, so move the
     // later calls in a block first.
-    moved.sort_by_key(|&(_, _, (b, pos))| (raw(b), std::cmp::Reverse(pos)));
-    for (body, lambda, site) in moved {
-        move_body(mf, &r.blocks[body], lambda, site);
+    moved.sort_by_key(|(_, _, (b, pos))| (raw(*b), std::cmp::Reverse(*pos)));
+    for (body, params, site) in moved {
+        move_body(mf, &body, params, site);
     }
-    any
+    true
 }

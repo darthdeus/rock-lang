@@ -100,3 +100,43 @@ fn main() { install(10); print(first()()); print(second()()) }
     );
     assert_eq!(crate::common::run_luajit(&steps), "ok");
 }
+
+#[test]
+fn edited_callback_forwarding_rebuilds_callers_and_preserves_other_slots() {
+    use crate::common::{body_id, edit, function_body, ws_with_stdlib};
+
+    let source = r#"
+global SAVED: fn() -> int = () => 0
+global OTHER: fn() -> int = () => 0
+fn leaf(f: fn() -> int) -> int { SAVED = f; return f() }
+fn forward(f: fn() -> int) -> int { return leaf(f) }
+@nomangle fn install(x: int) -> int {
+    let result = forward(() => x + 1)
+    OTHER = () => x + 2
+    return result
+}
+fn main() { install(5); print(SAVED(), OTHER()) }
+"#;
+    let escaped = ws_with_stdlib(source);
+    let synchronous = ws_with_stdlib(&source.replace("SAVED = f; return f()", "return f()"));
+    let edit_to = |from, to| edit(from, to, &[body_id(to, "leaf")]);
+    let to_synchronous = edit_to(&escaped, &synchronous);
+    let to_escaped = edit_to(&synchronous, &escaped);
+    for update in [&to_synchronous, &to_escaped] {
+        let before = function_body(&update.base.lua, "install");
+        let after = function_body(&update.incremental.lua, "install");
+        assert_ne!(before, after);
+    }
+    let escaped_body = function_body(&to_synchronous.base.lua, "install");
+    let synchronous_body = function_body(&to_synchronous.incremental.lua, "install");
+    let code_slots = |body: &str| body.matches("__rock_code_slot_ref(").count();
+    assert_eq!(code_slots(escaped_body), 2);
+    assert_eq!(code_slots(synchronous_body), 1);
+    let other_slot = escaped_body
+        .lines()
+        .filter_map(|line| line.split("__rock_code_slot_ref(\"").nth(1))
+        .next_back()
+        .and_then(|rest| rest.split('"').next())
+        .expect("the escaping sibling has a code slot");
+    assert!(synchronous_body.contains(other_slot));
+}

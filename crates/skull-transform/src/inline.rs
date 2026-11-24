@@ -191,6 +191,7 @@ impl InlineCandidateTable {
 #[derive(Clone, Default)]
 pub struct InlineCache {
     cands: HashMap<CacheKey, Option<Arc<CalleeBody>>>,
+    callback_cands: HashMap<CacheKey, Option<Arc<CalleeBody>>>,
     shared: Option<Arc<InlineCandidateTable>>,
     scratch: InlineScratch,
 }
@@ -357,6 +358,7 @@ impl InlineCache {
 
     pub fn replace_candidate_table(&mut self, table: Arc<InlineCandidateTable>) {
         self.cands.clear();
+        self.callback_cands.clear();
         self.shared = Some(table);
     }
 
@@ -366,7 +368,7 @@ impl InlineCache {
         inst: Instance,
         concrete_plans: &ConcretePlans,
     ) -> Result<InlineCandidateWarm, CompilerError> {
-        let candidate = classify(ws, scx, &inst, concrete_plans, true)?;
+        let candidate = classify(ws, scx, &inst, concrete_plans, true, false)?;
         Ok(InlineCandidateWarm {
             key: inst,
             candidate,
@@ -375,6 +377,7 @@ impl InlineCache {
 
     pub fn invalidate(&mut self, fref: FuncRef) {
         self.cands.retain(|inst, _| inst.func != fref);
+        self.callback_cands.retain(|inst, _| inst.func != fref);
     }
 }
 
@@ -783,6 +786,7 @@ fn classify(
     inst: &Instance,
     concrete_plans: &ConcretePlans,
     retain_lowered: bool,
+    callback: bool,
 ) -> Result<Classified, CompilerError> {
     let fref = inst.func;
     let f = &ws.module(fref.module).functions[fref.func];
@@ -790,7 +794,7 @@ fn classify(
         return Ok(Classified::default());
     }
     let has_bounds = fn_has_bounds(f);
-    let small = !has_bounds && !explicit_inline(f);
+    let small = !callback && !has_bounds && !explicit_inline(f);
     if small && (!f.annotations.is_empty() || !small_source(ws, fref)) {
         return Ok(Classified::default());
     }
@@ -805,7 +809,7 @@ fn classify(
     });
     // The callee's own emission reports why an unannotated body fails to lower.
     let (abi, mf) = match lowered {
-        Err(_) if small => return Ok(Classified::default()),
+        Err(_) if small || callback => return Ok(Classified::default()),
         lowered => lowered?,
     };
     let (template, lowered) = if retain_lowered {
@@ -813,7 +817,14 @@ fn classify(
     } else {
         (mf, None)
     };
-    let body = shape(inst, has_bounds, small, abi, template)?;
+    let max_insts = if callback {
+        MAX_CALLBACK_CALLEE_INSTS
+    } else if small {
+        SMALL_CALLEE_INSTS
+    } else {
+        usize::MAX
+    };
+    let body = shape(inst, has_bounds, small, callback, max_insts, abi, template)?;
     Ok(Classified {
         body: body.map(Arc::new),
         lowered: Mutex::new(lowered),
@@ -824,6 +835,8 @@ fn shape(
     inst: &Instance,
     has_bounds: bool,
     small: bool,
+    callback: bool,
+    max_insts: usize,
     abi: BackendFnAbiPlanHandle,
     mut mf: MirFunc,
 ) -> Result<Option<CalleeBody>, CompilerError> {
@@ -858,7 +871,8 @@ fn shape(
         .iter()
         .map(|&b| mf.blocks[b].insts.len())
         .sum();
-    if small && (reachable_insts > SMALL_CALLEE_INSTS || has_back_edge(&mf, &source_reachable)) {
+    if reachable_insts > max_insts || ((small || callback) && has_back_edge(&mf, &source_reachable))
+    {
         return Ok(None);
     }
 
@@ -1050,7 +1064,7 @@ fn get<'a>(
             cache.cands.insert(inst.clone(), candidate.body.clone());
             return Ok(cache.cands[inst].as_deref());
         }
-        let candidate = classify(ws, scx, inst, concrete_plans, false)?.body;
+        let candidate = classify(ws, scx, inst, concrete_plans, false, false)?.body;
         cache.cands.insert(inst.clone(), candidate);
     }
     Ok(cache.cands[inst].as_deref())
@@ -1066,6 +1080,128 @@ struct Site {
     args: Vec<Idx<Inst>>,
     dests: Option<Vec<Idx<Cell>>>,
     inst: Instance,
+    callbacks: SmallVec<[Idx<Inst>; 2]>,
+}
+
+type CallbackParam = (Instance, usize);
+
+// Large wrapper splices increase the caller's LuaJIT trace stack.
+const MAX_CALLBACK_CALLEE_INSTS: usize = 128;
+
+impl CalleeBody {
+    fn callback_forwards(&self, param: usize) -> Option<SmallVec<[CallbackParam; 2]>> {
+        let mf = &self.func;
+        if self.insts > MAX_CALLBACK_CALLEE_INSTS
+            || !self.forwards_reads
+            || !*self.coalescable_params.get(param)?
+            || mf.cells[mf.params[param]].borrowed
+        {
+            return None;
+        }
+        let reads: HashSet<_> = self
+            .forwardable_reads
+            .iter()
+            .filter_map(|&(p, read)| (p == param).then_some(read))
+            .collect();
+        let mut forwards = SmallVec::new();
+        for (id, inst) in mf.insts.iter() {
+            match inst {
+                Inst::Call { args, .. } | Inst::CallMulti { args, .. } => {
+                    for (pos, arg) in args.iter().enumerate() {
+                        if reads.contains(arg) {
+                            forwards.push((mf.callee_instances.get(&id)?.clone(), pos));
+                        }
+                    }
+                }
+                Inst::CallValue { args, .. } | Inst::CallValueMulti { args, .. } => {
+                    if args.iter().any(|arg| reads.contains(arg)) {
+                        return None;
+                    }
+                }
+                Inst::Eq(a, b) | Inst::NotEq(a, b)
+                    if matches!(mf.insts[*a], Inst::Const(Lit::Nil))
+                        || matches!(mf.insts[*b], Inst::Const(Lit::Nil)) => {}
+                _ => {
+                    let mut escapes = false;
+                    inst.uses_each(&mut |v| escapes |= reads.contains(&v));
+                    if escapes {
+                        return None;
+                    }
+                }
+            }
+        }
+        for (_, block) in mf.blocks.iter() {
+            let mut escapes = false;
+            block
+                .term
+                .uses_each(&mut |value| escapes |= reads.contains(&value));
+            if escapes {
+                return None;
+            }
+        }
+        Some(forwards)
+    }
+}
+
+#[derive(Default)]
+struct CallbackProof {
+    summary: HashMap<CallbackParam, bool>,
+    capturing: HashMap<Idx<Inst>, bool>,
+    dependencies: HashSet<FuncRef>,
+}
+
+impl CallbackProof {
+    fn captures(&mut self, mf: &MirFunc, lambda: Idx<Inst>) -> bool {
+        if !self.capturing.contains_key(&lambda) {
+            let tree = crate::scope::ScopeTree::build(mf);
+            let own = tree.analyze(mf);
+            self.capturing.extend(
+                tree.scopes
+                    .iter()
+                    .zip(&own.captures)
+                    .filter_map(|(scope, cells)| Some((scope.lambda?, !cells.is_empty()))),
+            );
+        }
+        self.capturing.get(&lambda).copied().unwrap_or(false)
+    }
+
+    fn proves(
+        &mut self,
+        cache: &mut InlineCache,
+        ws: &Workspace,
+        scx: &ScalarCtx,
+        plans: &ConcretePlans,
+        key: CallbackParam,
+    ) -> Result<bool, CompilerError> {
+        if let Some(&value) = self.summary.get(&key) {
+            return Ok(value);
+        }
+        let (inst, param) = &key;
+        self.dependencies.insert(inst.func);
+        // Inlining cannot discharge a recursive forwarding edge.
+        self.summary.insert(key.clone(), false);
+        let forwards = if let Some(cand) = get(cache, ws, scx, inst, plans)? {
+            cand.callback_forwards(*param)
+        } else {
+            if !cache.callback_cands.contains_key(inst) {
+                let candidate = classify(ws, scx, inst, plans, false, true)?.body;
+                cache.callback_cands.insert(inst.clone(), candidate);
+            }
+            cache.callback_cands[inst]
+                .as_ref()
+                .and_then(|cand| cand.callback_forwards(*param))
+        };
+        let Some(forwards) = forwards else {
+            return Ok(false);
+        };
+        for target in forwards {
+            if !self.proves(cache, ws, scx, plans, target)? {
+                return Ok(false);
+            }
+        }
+        self.summary.insert(key, true);
+        Ok(true)
+    }
 }
 
 /// The delivery record must agree with the concrete owner already on the call.
@@ -1129,7 +1265,9 @@ fn find_site(
     resume: Option<(Idx<Block>, usize)>,
     splice_chains: &HashMap<Idx<Inst>, SpliceChain>,
     concrete_plans: &ConcretePlans,
+    callbacks: &mut CallbackProof,
 ) -> Result<Option<Site>, CompilerError> {
+    let specialize_callbacks = !skull_mir::pass_disabled("lambda");
     let (first_block, first_inst) = resume.map_or((0, 0), |(block, index)| (raw(block), index));
     for (bid, block) in func.blocks.iter().skip(first_block) {
         if !top[raw(bid)] {
@@ -1152,13 +1290,39 @@ fn find_site(
             let Some((inst, abi)) = call_target(func, iid, fref, ws)? else {
                 continue;
             };
-            if noalloc_caller {
+            let allows_normal = !noalloc_caller || {
                 let owner = &ws.module(inst.func.module).functions[inst.func.func];
-                if !explicit_inline(owner) && !fn_has_bounds(owner) {
-                    continue;
+                explicit_inline(owner) || fn_has_bounds(owner)
+            };
+            let mut proven = SmallVec::new();
+            if specialize_callbacks {
+                for (param, &arg) in args.iter().enumerate() {
+                    if matches!(func.insts[arg], Inst::Lambda { .. })
+                        && (noalloc_caller || callbacks.captures(func, arg))
+                        && callbacks.proves(
+                            cache,
+                            ws,
+                            scx,
+                            concrete_plans,
+                            (inst.clone(), param),
+                        )?
+                    {
+                        proven.push(arg);
+                    }
                 }
             }
-            let Some(cand) = get(cache, ws, scx, inst, concrete_plans)? else {
+            let candidate = if !proven.is_empty() {
+                cache
+                    .cands
+                    .get(inst)
+                    .and_then(Option::as_deref)
+                    .or_else(|| cache.callback_cands.get(inst).and_then(Option::as_deref))
+            } else if allows_normal {
+                get(cache, ws, scx, inst, concrete_plans)?
+            } else {
+                None
+            };
+            let Some(cand) = candidate else {
                 continue;
             };
             if &cand.subject != inst
@@ -1174,6 +1338,7 @@ fn find_site(
                 args: args.clone(),
                 dests: dests.cloned(),
                 inst: inst.clone(),
+                callbacks: proven,
             }));
         }
     }
@@ -1321,6 +1486,90 @@ fn remap_block(
         insts: block.insts.iter().map(|id| im[id]).collect(),
         term,
     }
+}
+
+pub(crate) fn clone_lambda_region(
+    mf: &mut MirFunc,
+    blocks: &[Idx<Block>],
+    params: &[Idx<Cell>],
+    captured: &HashSet<Idx<Cell>>,
+) -> (Vec<Idx<Block>>, Vec<Idx<Cell>>) {
+    let mut cell_map = ArenaMap::default();
+    let mut block_map = ArenaMap::default();
+    let mut inst_map = HashMap::default();
+    let mut cells = params.to_vec();
+    for &b in blocks {
+        block_map.insert(b, mf.new_block());
+        for id in mf.blocks[b].insts.clone() {
+            let inst = mf.insts[id].clone();
+            inst.cells_each(&mut |cell| cells.push(cell));
+            inst_map.insert(id, mf.alloc_inst(inst));
+        }
+    }
+    cells.sort_unstable();
+    cells.dedup();
+    for cell in cells {
+        let mapped = if captured.contains(&cell) {
+            cell
+        } else {
+            let mapped = mf.new_cell(None);
+            mf.cells[mapped] = mf.cells[cell].clone();
+            mapped
+        };
+        cell_map.insert(cell, mapped);
+    }
+    for (&old, &new) in &inst_map {
+        remap_clone(&mut mf.insts[new], &inst_map, &cell_map, &block_map);
+        macro_rules! copy_maps {
+            ($($map:ident),+ $(,)?) => {$(
+                if let Some(value) = mf.$map.get(&old).cloned() {
+                    mf.$map.insert(new, value);
+                }
+            )+};
+        }
+        copy_maps!(
+            bound_trees,
+            resolved_bound_trees,
+            spec_bindings,
+            callee_instances,
+            call_abi_plans,
+            call_rep_plans,
+            flat_call_lanes,
+            flat_box_widths,
+            call_sites,
+            fn_value_symbols,
+            code_value_identities,
+        );
+        if let Some(&span) = mf.inst_spans.get(old) {
+            mf.inst_spans.insert(new, span);
+        }
+        macro_rules! copy_sets {
+            ($($set:ident),+ $(,)?) => {$(
+                if mf.$set.contains(&old) {
+                    mf.$set.insert(new);
+                }
+            )+};
+        }
+        copy_sets!(
+            binding_initializers,
+            bound_next_split,
+            materialized_default_guards,
+            synthetic_projections,
+        );
+    }
+    for &b in blocks {
+        mf.blocks[block_map[b]] = remap_block(&mf.blocks[b], &inst_map, &block_map);
+    }
+    let headers = mf
+        .for_iter_headers
+        .iter()
+        .filter_map(|&b| block_map.get(b).copied())
+        .collect::<Vec<_>>();
+    mf.for_iter_headers.extend(headers);
+    (
+        blocks.iter().map(|&block| block_map[block]).collect(),
+        params.iter().map(|&param| cell_map[param]).collect(),
+    )
 }
 
 /// Coalesce only if the argument cell still holds the value its load read.
@@ -1892,6 +2141,14 @@ fn splice_general(
     scratch.added_blocks.push(cont);
 }
 
+#[derive(Default)]
+pub(crate) struct InlineOutcome {
+    pub dependencies: HashSet<FuncRef>,
+    pub callbacks: HashSet<Idx<Inst>>,
+    pub splices: usize,
+    pub copied_instructions: usize,
+}
+
 pub(crate) fn inline_functions_with_plans(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -1899,10 +2156,10 @@ pub(crate) fn inline_functions_with_plans(
     func: &mut MirFunc,
     cache: &mut InlineCache,
     concrete_plans: &ConcretePlans,
-) -> Result<(HashSet<FuncRef>, usize, usize), CompilerError> {
-    let mut spliced = HashSet::default();
+) -> Result<InlineOutcome, CompilerError> {
+    let mut outcome = InlineOutcome::default();
     if inline_off_active() {
-        return Ok((spliced, 0, 0));
+        return Ok(outcome);
     }
     let mut top = vec![false; func.blocks.len()];
     for block in top_level_blocks(func) {
@@ -1914,7 +2171,7 @@ pub(crate) fn inline_functions_with_plans(
     let mut resume: Option<(Idx<Block>, usize)> = None;
     let mut splice_chains: HashMap<Idx<Inst>, SpliceChain> = HashMap::default();
     let mut budget = MAX_INLINES_PER_FN;
-    let mut copied_instructions = 0;
+    let mut callbacks = CallbackProof::default();
     let noalloc_caller = ws.module(self_ref.module).functions[self_ref.func]
         .annotations
         .iter()
@@ -1931,6 +2188,7 @@ pub(crate) fn inline_functions_with_plans(
             resume,
             &splice_chains,
             concrete_plans,
+            &mut callbacks,
         )?
         else {
             break;
@@ -1940,11 +2198,17 @@ pub(crate) fn inline_functions_with_plans(
         let mut chain = splice_chains.remove(&site.call_id).unwrap_or_default();
         chain.push(fref);
         let uses = uses.get_or_insert_with(|| UseIndex::build(func));
-        let (cands, scratch) = (&cache.cands, &mut cache.scratch);
-        let cand = cands[&site.inst]
-            .as_ref()
+        let cand = cache.cands[&site.inst]
+            .as_deref()
+            .or_else(|| {
+                (!site.callbacks.is_empty())
+                    .then(|| cache.callback_cands[&site.inst].as_deref())
+                    .flatten()
+            })
             .expect("site implies a cached candidate");
+        let scratch = &mut cache.scratch;
         let blocks_before = func.blocks.len();
+        outcome.callbacks.extend(site.callbacks.iter().copied());
         splice(
             func,
             site,
@@ -1966,13 +2230,13 @@ pub(crate) fn inline_functions_with_plans(
                 splice_chains.insert(inst, chain.clone());
             }
         }
-        copied_instructions += cand.insts;
+        outcome.copied_instructions += cand.insts;
         func.statics.extend(cand.func.statics.iter().cloned());
         func.comptime_reads
             .extend(cand.func.comptime_reads.iter().cloned());
         func.struct_registry_roots
             .extend(cand.func.struct_registry_roots.iter().copied());
-        spliced.insert(fref);
+        outcome.dependencies.insert(fref);
         resume = Some(pos);
         budget -= 1;
     }
@@ -1984,7 +2248,9 @@ pub(crate) fn inline_functions_with_plans(
     if let Some(uses) = &uses {
         uses.record_drift(func);
     }
-    Ok((spliced, MAX_INLINES_PER_FN - budget, copied_instructions))
+    outcome.dependencies.extend(callbacks.dependencies);
+    outcome.splices = MAX_INLINES_PER_FN - budget;
+    Ok(outcome)
 }
 
 fn fn_has_bounds(f: &bone_core::hir::Function) -> bool {

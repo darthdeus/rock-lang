@@ -31,11 +31,15 @@ fn non_colliding_underscore_field_still_scalarizes() {
 const LEAF_FORM_SAVED_IN_CLOSURE: &str = r#"
 global ACTIVE: bool = true
 global VIEW: Mat4 = mat4_identity()
+global SAVED_DRAW: fn() -> () = () => {}
 fn reset() {
     ACTIVE = false
     VIEW = mat4_identity()
 }
-fn with_fn(f: fn() -> ()) { for _ in 0..1 { f() } }
+fn with_fn(f: fn() -> ()) {
+    SAVED_DRAW = f
+    for _ in 0..1 { f() }
+}
 fn with_saved(draw: fn() -> ()) {
     with_fn(() => {
         let was = ACTIVE
