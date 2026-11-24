@@ -1,0 +1,15 @@
+pub @nomangle nobox value NativeNavInt {
+    lo: int,
+    hi: int,
+}
+
+pub @nomangle nobox value NativeMeadowGrowth {
+    root_x: f32,
+    root_y: f32,
+    width: f32,
+    height: f32,
+    variation: f32,
+    angle: f32,
+    clump: f32,
+    cell: int,
+}

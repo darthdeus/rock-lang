@@ -199,7 +199,7 @@ mod descending;
 use descending::*;
 mod jobs;
 use jobs::*;
-mod ffi;
+pub(super) mod ffi;
 
 #[cfg(test)]
 mod differential;

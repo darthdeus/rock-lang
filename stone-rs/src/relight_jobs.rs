@@ -7,6 +7,13 @@ use std::sync::{Arc, Mutex};
 
 use crate::jobs::{Jobs, Refused, Taken};
 
+/// rock-ffi-array stone-native RELIGHT_REGION
+type RelightRegion = [f32; 4];
+/// rock-ffi-array stone-native RELIGHT_PIXEL
+type RelightPixel = [u8; 4];
+const REGION_LANES: usize = std::mem::size_of::<RelightRegion>() / std::mem::size_of::<f32>();
+const PIXEL_BYTES: usize = std::mem::size_of::<RelightPixel>();
+
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 
 static JOBS: Jobs<Work, ResultData> =
@@ -18,7 +25,7 @@ static SNAPSHOTS: Mutex<HashMap<i64, Arc<Vec<u8>>, BuildHasherDefault<DefaultHas
 struct ResultData {
     snapshot: i64,
     pixels: Vec<u8>,
-    region: [f32; 4],
+    region: RelightRegion,
 }
 struct Work {
     snapshot: i64,
@@ -50,22 +57,22 @@ fn diff(
     old: &[u8],
     next: Vec<u8>,
     cancelled: &AtomicBool,
-) -> Option<(Vec<u8>, [f32; 4])> {
+) -> Option<(Vec<u8>, RelightRegion)> {
     if cancelled.load(Ordering::Acquire) {
         return None;
     }
     if old.len() != next.len() {
         return Some((next, [-1e9, -1e9, 1e9, 1e9]));
     }
-    let height = next.len() / 4 / width;
+    let height = next.len() / PIXEL_BYTES / width;
     let mut region = [1e9f32, 1e9f32, -1e9f32, -1e9f32];
     for y in 0..height {
         if cancelled.load(Ordering::Acquire) {
             return None;
         }
         for x in 0..width {
-            let index = (y * width + x) * 4;
-            if old[index..index + 4] != next[index..index + 4] {
+            let index = (y * width + x) * PIXEL_BYTES;
+            if old[index..index + PIXEL_BYTES] != next[index..index + PIXEL_BYTES] {
                 let gx = (x / samples) as i32 - border;
                 let gz = ((height - 1 - y) / samples) as i32 - border;
                 region[0] = region[0].min(gx as f32);
@@ -78,6 +85,7 @@ fn diff(
     Some((next, region))
 }
 
+/// rock-ffi stone-native
 #[no_mangle]
 pub unsafe extern "C" fn stone_relight_diff_submit(
     snapshot: i64,
@@ -92,9 +100,9 @@ pub unsafe extern "C" fn stone_relight_diff_submit(
         || border < 0
         || len <= 0
         || len as u64 > MAX_BYTES as u64
-        || len % (width as i64 * 4) != 0
+        || len % (width as i64 * PIXEL_BYTES as i64) != 0
         || width % samples != 0
-        || (len / (width as i64 * 4)) % samples as i64 != 0
+        || (len / (width as i64 * PIXEL_BYTES as i64)) % samples as i64 != 0
         || next.is_null()
     {
         return -1;
@@ -122,6 +130,7 @@ pub unsafe extern "C" fn stone_relight_diff_submit(
     }
 }
 
+/// rock-ffi stone-native
 #[no_mangle]
 pub unsafe extern "C" fn stone_relight_diff_publish(handle: u64, region: *mut f32) -> i32 {
     let mut snapshots = SNAPSHOTS.lock().unwrap();
@@ -129,17 +138,19 @@ pub unsafe extern "C" fn stone_relight_diff_publish(handle: u64, region: *mut f3
         Taken::Missing | Taken::Rejected => -1,
         Taken::Pending => 0,
         Taken::Ready(result) => {
-            std::ptr::copy_nonoverlapping(result.region.as_ptr(), region, 4);
+            std::ptr::copy_nonoverlapping(result.region.as_ptr(), region, REGION_LANES);
             snapshots.insert(result.snapshot, Arc::new(result.pixels));
             1
         }
     }
 }
 // The caller cancels the key's pending job first.
+/// rock-ffi stone-native
 #[no_mangle]
 pub extern "C" fn stone_relight_snapshot_drop(snapshot: i64) {
     SNAPSHOTS.lock().unwrap().remove(&snapshot);
 }
+/// rock-ffi stone-native
 #[no_mangle]
 pub extern "C" fn stone_relight_diff_cancel(handle: u64) {
     JOBS.cancel(handle);

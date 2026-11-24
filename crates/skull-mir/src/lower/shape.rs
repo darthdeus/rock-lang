@@ -1570,6 +1570,15 @@ pub enum CFieldType {
     Aggregate(Ustr),
 }
 
+impl From<&CMember> for CFieldType {
+    fn from(member: &CMember) -> Self {
+        match member {
+            CMember::Scalar(ty) => Self::Scalar(ty),
+            CMember::Aggregate(name, _) => Self::Aggregate(*name),
+        }
+    }
+}
+
 pub fn value_c_fields(ws: &Workspace, name: Ustr) -> Option<Vec<(Ustr, CFieldType)>> {
     let plan = planned_value(ws, name)?;
     Some(
@@ -1577,15 +1586,29 @@ pub fn value_c_fields(ws: &Workspace, name: Ustr) -> Option<Vec<(Ustr, CFieldTyp
             .as_ref()?
             .fields
             .iter()
-            .map(|(name, _, member)| {
-                let ty = match member {
-                    CMember::Scalar(ty) => CFieldType::Scalar(ty),
-                    CMember::Aggregate(name, _) => CFieldType::Aggregate(*name),
-                };
-                (*name, ty)
-            })
+            .map(|(name, _, member)| (*name, member.into()))
             .collect(),
     )
+}
+
+pub struct ValueCLayout {
+    pub size: usize,
+    pub align: usize,
+    pub fields: Vec<(Ustr, usize, CFieldType)>,
+}
+
+pub fn value_c_layout(ws: &Workspace, name: Ustr) -> Option<ValueCLayout> {
+    let plan = planned_value(ws, name)?;
+    let layout = plan.cdata.as_ref()?;
+    Some(ValueCLayout {
+        size: layout.size(),
+        align: layout.align,
+        fields: layout
+            .fields
+            .iter()
+            .map(|(name, offset, member)| (*name, *offset, member.into()))
+            .collect(),
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

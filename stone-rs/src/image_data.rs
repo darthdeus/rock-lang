@@ -435,6 +435,7 @@ pub(crate) fn encode_test_png(width: u32, height: u32, pixels: &[u8]) -> Vec<u8>
 }
 
 /// Fill a clipped rectangle without one FFI call per pixel.
+/// rock-ffi stone-native
 #[no_mangle]
 pub extern "C" fn stone_image_data_fill_rect_rgba8(
     handle: u64,
