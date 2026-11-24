@@ -42,7 +42,8 @@ fn emit_coroutine_chunk(
     let tv = Instant::now();
     skull_transform::validate_no_residual_bound_calls(ws, f, mf)?;
     let mut specs = Vec::new();
-    validate_emitted_body(ws, mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
+    let mut literal_globals =
+        validate_emitted_body(ws, mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
     times.validation += tv.elapsed();
     times.validation_work = true;
     skull_codegen_lua::regalloc_time_reset();
@@ -77,7 +78,6 @@ fn emit_coroutine_chunk(
     // what codegen knows, the bodies this chunk's text contains.
     collect_abi_dependencies(mf, &mut abi_deps);
     deps.extend(abi_deps.keys().copied());
-    let mut literal_globals = skull_mir::reach::global_ref_names(mf);
     crate::push_value_ctor_calls(&lua, &mut literal_globals);
     Ok(Chunk {
         name: Ustr::from(name),
@@ -242,7 +242,8 @@ fn finish_body_chunk(
     } else {
         format!("cannot emit specialized `{name}`: ")
     };
-    validate_emitted_body(ws, &mf, &mut specs).map_err(|r| r.into_error(f.name_span, &prefix))?;
+    let mut literal_globals = validate_emitted_body(ws, &mf, &mut specs)
+        .map_err(|r| r.into_error(f.name_span, &prefix))?;
     // A specialization's residual callees count as embedded, so any edit to one
     // rebuilds it.
     let embedded_deps = ordinary.then(|| deps.clone());
@@ -278,8 +279,6 @@ fn finish_body_chunk(
         bind.as_ref(),
         noalloc::marked(f).then_some(f),
     )?;
-    // Read before the nested fns are emitted, which detaches their children.
-    let mut literal_globals = skull_mir::reach::global_ref_names(&mf);
     let mut abi_deps = FxHashMap::default();
     collect_abi_dependencies(&mf, &mut abi_deps);
     // Nested-fn statics fold into this chunk, or hot reload would not see them.

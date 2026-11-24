@@ -360,41 +360,52 @@ pub fn spec_bound_calls(
     mf: &MirFunc,
     out: &mut Vec<Instance>,
 ) -> Result<(), CompilerError> {
+    if mf.spec_bindings.is_empty() {
+        return Ok(());
+    }
     for bid in emitted_blocks(mf) {
         for &iid in &mf.blocks[bid].insts {
-            let Some(inst) = mf.spec_bindings.get(&iid) else {
-                continue;
-            };
-            let fref = match &mf.insts[iid] {
-                Inst::Call { func, .. } | Inst::CallMulti { func, .. } => *func,
-                _ => continue,
-            };
-            // Check the delivery identity first, so a missing bound fact cannot mask an
-            // owner disagreement.
-            let owner_agrees =
-                inst.func == fref && mf.callee_instances.get(&iid).is_some_and(|oi| oi == inst);
-            if !owner_agrees {
-                return Err(CompilerError::new_no_location(format!(
-                    "specialized call to `{}` in `{}` has no concrete owner agreeing with its \
-                     delivery instance",
-                    ws.module(fref.module).functions[fref.func].name,
-                    mf.name,
-                )));
-            }
-            if !mf.resolved_bound_trees.contains_key(&iid)
-                && mf
-                    .bound_trees
-                    .get(&iid)
-                    .is_some_and(|tree| !tree.is_empty())
-            {
-                return Err(CompilerError::new_no_location(
-                    "concrete specialized call has no resolved bound plan".to_string(),
-                ));
-            }
-            out.push(inst.clone());
+            out.extend(spec_bound_call(ws, mf, iid)?.cloned());
         }
     }
     Ok(())
+}
+
+pub fn spec_bound_call<'a>(
+    ws: &bone_core::workspace::Workspace,
+    mf: &'a MirFunc,
+    iid: Idx<Inst>,
+) -> Result<Option<&'a Instance>, CompilerError> {
+    let Some(inst) = mf.spec_bindings.get(&iid) else {
+        return Ok(None);
+    };
+    let fref = match &mf.insts[iid] {
+        Inst::Call { func, .. } | Inst::CallMulti { func, .. } => *func,
+        _ => return Ok(None),
+    };
+    // Check the delivery identity first, so a missing bound fact cannot mask an
+    // owner disagreement.
+    let owner_agrees =
+        inst.func == fref && mf.callee_instances.get(&iid).is_some_and(|oi| oi == inst);
+    if !owner_agrees {
+        return Err(CompilerError::new_no_location(format!(
+            "specialized call to `{}` in `{}` has no concrete owner agreeing with its \
+             delivery instance",
+            ws.module(fref.module).functions[fref.func].name,
+            mf.name,
+        )));
+    }
+    if !mf.resolved_bound_trees.contains_key(&iid)
+        && mf
+            .bound_trees
+            .get(&iid)
+            .is_some_and(|tree| !tree.is_empty())
+    {
+        return Err(CompilerError::new_no_location(
+            "concrete specialized call has no resolved bound plan".to_string(),
+        ));
+    }
+    Ok(Some(inst))
 }
 
 #[cfg(test)]

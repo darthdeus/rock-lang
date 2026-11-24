@@ -23,37 +23,6 @@ impl Rejections {
     }
 }
 
-fn validate_no_whole_element_column_access(mf: &skull_mir::mir::MirFunc) -> Result<(), String> {
-    use skull_mir::mir::{
-        ContainerKind::{VecValueColumns, VecValueStrided},
-        Inst,
-    };
-    for (_, block) in mf.blocks.iter() {
-        for &iid in &block.insts {
-            let elem = match &mf.insts[iid] {
-                Inst::Index {
-                    kind: VecValueColumns(e) | VecValueStrided(e),
-                    ..
-                }
-                | Inst::StoreIndex {
-                    kind: VecValueColumns(e) | VecValueStrided(e),
-                    ..
-                }
-                | Inst::ArrayPush {
-                    kind: VecValueColumns(e) | VecValueStrided(e),
-                    ..
-                } => e,
-                _ => continue,
-            };
-            return Err(format!(
-                "whole-element access to a flat-stored `[{elem}]` survived lowering \
-                 (column and strided storage have no element table, so there is no slot to name)"
-            ));
-        }
-    }
-    Ok(())
-}
-
 #[derive(Default)]
 pub(super) struct BodyRejection {
     findings: Vec<Finding>,
@@ -127,28 +96,106 @@ pub(super) fn validate_emitted_body(
     ws: &Workspace,
     mf: &MirFunc,
     specs: &mut Vec<Instance>,
+) -> Result<Vec<Ustr>, BodyRejection> {
+    let mut globals = GlobalRefs::default();
+    validate_body(ws, mf, specs, Some(&mut globals))?;
+    Ok(globals.names)
+}
+
+#[derive(Default)]
+struct GlobalRefs {
+    names: Vec<Ustr>,
+    seen: FxHashSet<Ustr>,
+}
+
+fn validate_body(
+    ws: &Workspace,
+    mf: &MirFunc,
+    specs: &mut Vec<Instance>,
+    mut globals: Option<&mut GlobalRefs>,
 ) -> Result<(), BodyRejection> {
+    use skull_mir::mir::ContainerKind::{VecValueColumns, VecValueStrided};
+    let mut column = None;
+    let mut has_ctors = false;
+    for (_, block) in mf.blocks.iter() {
+        for &iid in &block.insts {
+            match &mf.insts[iid] {
+                Inst::Index {
+                    kind: VecValueColumns(e) | VecValueStrided(e),
+                    ..
+                }
+                | Inst::StoreIndex {
+                    kind: VecValueColumns(e) | VecValueStrided(e),
+                    ..
+                }
+                | Inst::ArrayPush {
+                    kind: VecValueColumns(e) | VecValueStrided(e),
+                    ..
+                } => {
+                    column.get_or_insert(e);
+                }
+                Inst::MakeValueStruct { .. } => has_ctors = true,
+                Inst::Global(name) | Inst::StoreGlobal { name, .. } => {
+                    if let Some(globals) = globals.as_deref_mut()
+                        && globals.seen.insert(*name)
+                    {
+                        globals.names.push(*name);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
     let mut acc = BodyRejection::default();
-    // A demand the body cannot state self-contained is a rejection, not a dropped
-    // demand whose call site would name a missing definition.
-    if let Err(e) = skull_mir::reach::spec_bound_calls(ws, mf, specs) {
-        acc.absorb(BodyRejection::gap(e.message));
+    let mut spec_error = None;
+    let has_specs = !mf.spec_bindings.is_empty();
+    if has_specs || has_ctors {
+        for bid in skull_mir::reach::emitted_blocks(mf) {
+            for &iid in &mf.blocks[bid].insts {
+                match mf.insts[iid] {
+                    Inst::Call { .. } | Inst::CallMulti { .. }
+                        if has_specs && spec_error.is_none() =>
+                    {
+                        match skull_mir::reach::spec_bound_call(ws, mf, iid) {
+                            Ok(inst) => specs.extend(inst.cloned()),
+                            Err(e) => spec_error = Some(e.message),
+                        }
+                    }
+                    Inst::MakeValueStruct { name, .. } => {
+                        if let Some((message, site)) =
+                            skull_transform::nobox_materialization_violation(ws, mf, iid, name)
+                        {
+                            acc.findings.push(Finding {
+                                // An inlined violation can point into a different source body.
+                                message: format!("{message}, while emitting `{}`", mf.name),
+                                guarantee: true,
+                                site,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
-    if let Err(r) = validate_no_whole_element_column_access(mf).map_err(BodyRejection::gap) {
-        acc.absorb(r);
+    // Keep each diagnostic category in its original order, even though the
+    // instruction walk collects them together.
+    if column.is_some() || spec_error.is_some() {
+        let mut gaps = BodyRejection::default();
+        if let Some(message) = spec_error {
+            gaps.absorb(BodyRejection::gap(message));
+        }
+        if let Some(elem) = column {
+            gaps.absorb(BodyRejection::gap(format!(
+                "whole-element access to a flat-stored `[{elem}]` survived lowering \
+                 (column and strided storage have no element table, so there is no slot to name)"
+            )));
+        }
+        gaps.absorb(acc);
+        acc = gaps;
     }
-    acc.findings.extend(
-        skull_transform::nobox_materialization_violations(ws, mf)
-            .into_iter()
-            .map(|(message, site)| Finding {
-                // The span often points into an inlined stdlib body, so name the caller.
-                message: format!("{message}, while emitting `{}`", mf.name),
-                guarantee: true,
-                site,
-            }),
-    );
     for nested in &mf.nested_fns {
-        if let Err(rejection) = validate_emitted_body(ws, nested, specs) {
+        if let Err(rejection) = validate_body(ws, nested, specs, globals.as_deref_mut()) {
             acc.absorb(rejection.prefixed(&format!("in nested body `{}`", nested.name)));
         }
     }
@@ -163,7 +210,7 @@ pub(super) fn check_unit_spec_bindings(
     span: bone_semantic::prelude::Span,
     out_specs: &mut Vec<Instance>,
 ) -> Result<(), CompilerError> {
-    match validate_emitted_body(ws, mf, out_specs) {
+    match validate_body(ws, mf, out_specs, None) {
         Ok(()) => Ok(()),
         // Stdlib emit gaps are the known parity list; a user definition that cannot
         // emit is a hard error.

@@ -16,39 +16,40 @@ pub fn nobox_materialization_violations(
     // Closure conversion retains cloned, unreachable parent/sibling blocks.
     // Follow the emission oracle, including unhoisted coroutine lambdas/hooks.
     for bid in skull_mir::reach::emitted_blocks(func) {
-        let block = &func.blocks[bid];
-        for &iid in &block.insts {
+        for &iid in &func.blocks[bid].insts {
             let Inst::MakeValueStruct { name, .. } = &func.insts[iid] else {
                 continue;
             };
-            // Cdata enums share the value-struct constructor opcode.
-            let Some(sid) = ws.nominals.struct_id(*name) else {
-                if skull_mir::lower::EnumPlan::for_name(ws, *name)
-                    .is_some_and(|plan| plan.cdata().is_some())
-                {
-                    continue;
-                }
-                out.push((
-                    format!(
-                        "`{name}` is constructed as a value struct here but is neither a struct \
-                         nor a cdata enum in the workspace, so the `nobox` guarantee cannot be \
-                         checked for it"
-                    ),
-                    func.inst_spans.get(iid).copied(),
-                ));
-                continue;
-            };
-            if ws.modules[sid.module.index()].structs[sid.def].is_nobox {
-                out.push((
-                    format!(
-                        "nobox value `{name}` survived lowering as an implicit materialization"
-                    ),
-                    func.inst_spans.get(iid).copied(),
-                ));
-            }
+            out.extend(nobox_materialization_violation(ws, func, iid, *name));
         }
     }
     out
+}
+
+pub fn nobox_materialization_violation(
+    ws: &Workspace,
+    func: &MirFunc,
+    iid: Idx<Inst>,
+    name: Ustr,
+) -> Option<(String, Option<bone_core::prelude::Span>)> {
+    let message = if let Some(sid) = ws.nominals.struct_id(name) {
+        if !ws.modules[sid.module.index()].structs[sid.def].is_nobox {
+            return None;
+        }
+        format!("nobox value `{name}` survived lowering as an implicit materialization")
+    } else {
+        // Cdata enums share the value-struct constructor opcode.
+        if skull_mir::lower::EnumPlan::for_name(ws, name).is_some_and(|plan| plan.cdata().is_some())
+        {
+            return None;
+        }
+        format!(
+            "`{name}` is constructed as a value struct here but is neither a struct \
+             nor a cdata enum in the workspace, so the `nobox` guarantee cannot be \
+             checked for it"
+        )
+    };
+    Some((message, func.inst_spans.get(iid).copied()))
 }
 
 fn ctor_tree_has_implicit_nobox(ws: &Workspace, func: &MirFunc, mvs: Idx<Inst>) -> bool {
