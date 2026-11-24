@@ -400,10 +400,10 @@ fn marker(attrs: &[Attribute], key: &str, package: &str) -> Result<Option<String
 }
 
 fn rust_name(ty: &Type) -> Result<String, String> {
-    if let Type::Path(path) = ty {
-        if let Some(name) = path.path.get_ident() {
-            return Ok(name.to_string());
-        }
+    if let Type::Path(path) = ty
+        && let Some(name) = path.path.get_ident()
+    {
+        return Ok(name.to_string());
     }
     Err("unsupported Rust FFI type".into())
 }
