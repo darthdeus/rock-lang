@@ -23,6 +23,7 @@ thread_local! {
     static RESULT: RefCell<Option<CString>> = const { RefCell::new(None) };
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub unsafe extern "C" fn stone_graphics_capture_begin(directory: *const c_char, frame: i32) {
     let directory = if directory.is_null() {
@@ -43,6 +44,7 @@ pub unsafe extern "C" fn stone_graphics_capture_begin(directory: *const c_char, 
     crate::with_gl(|gl| gl.set_capture(Some(record)));
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_graphics_capture_cancel() {
     crate::with_gl(|gl| gl.set_capture(None));
@@ -77,6 +79,7 @@ pub extern "C" fn stone_graphics_capture_finish_json() -> *const c_char {
     })
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_graphics_capture_scene_depth(handle: u64) {
     let Some(texture) = crate::canvas::capture_depth_texture(handle) else {

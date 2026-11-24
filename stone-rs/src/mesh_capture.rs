@@ -12,6 +12,7 @@ thread_local! {
     static RESULT: RefCell<Option<CString>> = const { RefCell::new(None) };
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_mesh_capture_arm(read_depth: bool) {
     READ_DEPTH.with(|v| v.set(read_depth));

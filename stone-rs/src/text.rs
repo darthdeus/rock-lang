@@ -303,6 +303,7 @@ fn c_str<'a>(ptr: *const c_char) -> &'a str {
     unsafe { CStr::from_ptr(ptr).to_str().unwrap_or("") }
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_track_text_draw_call() {
     crate::track_text_draw_call();

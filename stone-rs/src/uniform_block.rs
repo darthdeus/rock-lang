@@ -304,6 +304,7 @@ pub(crate) fn report_unfilled_blocks() {
     });
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_unfilled_uniform_block_count() -> c_int {
     BLOCKS.with(|b| {
@@ -315,6 +316,7 @@ pub extern "C" fn stone_unfilled_uniform_block_count() -> c_int {
     })
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_shader_bind_uniform_block(
     handle: u64,
@@ -386,6 +388,7 @@ pub extern "C" fn stone_shader_bind_uniform_block(
 
 /// Upload `size` bytes into `handle`'s block. The bytes are the compiler's
 /// std140 packing; this call does not interpret them.
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_shader_upload_uniform_block(
     handle: u64,
@@ -463,6 +466,7 @@ pub extern "C" fn stone_shader_upload_uniform_block(
 }
 
 /// Copy the last successfully uploaded bytes without waiting on the GPU.
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_shader_snapshot_uniform_block(
     handle: u64,
@@ -476,6 +480,8 @@ pub extern "C" fn stone_shader_snapshot_uniform_block(
     })
 }
 
+/// Read exactly the block's declared size. Only desktop GL exposes the bytes.
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_shader_read_uniform_block(
     handle: u64,
@@ -531,6 +537,7 @@ fn block_bytes_into(
 /// Check the driver layout against NUL-separated names and compiler offsets.
 /// GL may omit inactive members and size only the active portion, so this
 /// check skips absent members and treats the queried size as an upper bound.
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_shader_check_uniform_block_layout(
     handle: u64,

@@ -41,6 +41,7 @@ fn build_and_register(gl: &DebugGl, vert_src: &str, frag_src: &str) -> Option<u6
     }
 }
 
+/// rock-ffi stone-rendering rename:src=combined_src
 #[no_mangle]
 pub extern "C" fn stone_create_shader_from_combined(src: *const c_char) -> u64 {
     if src.is_null() {
@@ -69,6 +70,7 @@ pub extern "C" fn stone_create_shader_from_combined(src: *const c_char) -> u64 {
         .unwrap_or(0)
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_destroy_shader(handle: u64) {
     if handle == 0 {
@@ -108,6 +110,7 @@ pub(crate) fn destroy_all() {
     }
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_set_shader(handle: u64) {
     if handle == 0 {
@@ -138,6 +141,7 @@ fn get_shader_program(handle: u64) -> Option<glow::Program> {
 
 /// Point sampler `n` at texture `unit`: the link-time `@textures` slot binding
 /// (`bind_texture_slots`) is the only by-name uniform write.
+/// rock-ffi stone-rendering private rename:h=handle rename:n=name rename:unit=texture_unit
 #[no_mangle]
 pub extern "C" fn stone_shader_set_texture(h: u64, n: *const c_char, unit: c_int) {
     if h == 0 || n.is_null() {

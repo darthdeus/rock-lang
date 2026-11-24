@@ -28,6 +28,7 @@ fn set_last_error(message: &str) {
 
 /// Starts recording presented frames to `path` (a FIFO with a reader, or a
 /// file). Fails when a recording is already live.
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_frame_stream_begin(path: *const c_char) -> bool {
     if path.is_null() {
@@ -56,6 +57,7 @@ pub extern "C" fn stone_frame_stream_begin(path: *const c_char) -> bool {
 
 /// Reads the presented `w` x `h` frame back and queues it. Waits only when
 /// every buffer is queued behind the reader.
+/// rock-ffi stone-rendering private rename:w=width rename:h=height
 #[no_mangle]
 pub extern "C" fn stone_frame_stream_record(w: c_int, h: c_int) -> bool {
     let mut recording = RECORDING.lock().unwrap_or_else(|e| e.into_inner());
@@ -96,6 +98,7 @@ fn record_into(stream: &mut FrameStream, w: c_int, h: c_int) -> Result<(), Strin
     stream.submit(buffer, RowOrigin::BottomUp)
 }
 
+/// rock-ffi stone-rendering private rename:out_width=out_w rename:out_height=out_h
 #[no_mangle]
 pub extern "C" fn stone_frame_stream_finish(
     out_frames: *mut c_int,

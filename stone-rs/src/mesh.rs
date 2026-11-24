@@ -21,7 +21,6 @@ struct RetainedMesh {
     attr_count: i32,
     inst_count: i32,
     inst_layout: Option<ValidatedLayout>,
-    inst_stride_floats: i32,
     vbo_bytes: u64,
     inst_vbo_bytes: u64,
 }
@@ -34,12 +33,17 @@ thread_local! {
 /// (logged); never falls back.
 pub(crate) struct ValidatedLayout {
     sizes: [i32; 16],
-    len: usize,
+    len: u32,
+    pub(crate) stride_floats: i32,
 }
 
 impl ValidatedLayout {
     pub(crate) fn as_slice(&self) -> &[i32] {
-        &self.sizes[..self.len]
+        &self.sizes[..self.len as usize]
+    }
+
+    pub(crate) fn stride_bytes(&self) -> usize {
+        self.stride_floats as usize * std::mem::size_of::<c_float>()
     }
 }
 
@@ -88,7 +92,8 @@ pub(crate) fn validate_layout(
     }
     let mut validated = ValidatedLayout {
         sizes: [0; 16],
-        len: sizes.len(),
+        len: attr_count as u32,
+        stride_floats,
     };
     validated.sizes[..sizes.len()].copy_from_slice(sizes);
     Some(validated)
@@ -126,6 +131,7 @@ pub(crate) unsafe fn setup_attribs(
 
 /// mode: 0 = triangle_fan, 1 = triangles. Returns 0 on any invalid input
 /// (logged) -- reject, don't fall back.
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_mesh_create(
     mode: c_int,
@@ -151,7 +157,7 @@ pub extern "C" fn stone_mesh_create(
         );
         return 0;
     }
-    let Some(sizes) = validate_layout("stone_mesh_create", stride_floats, attr_sizes, attr_count)
+    let Some(layout) = validate_layout("stone_mesh_create", stride_floats, attr_sizes, attr_count)
     else {
         return 0;
     };
@@ -171,7 +177,7 @@ pub extern "C" fn stone_mesh_create(
         };
         gl.bind_vertex_array(Some(vao));
         gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-        let byte_len = vert_count as usize * stride_floats as usize * std::mem::size_of::<f32>();
+        let byte_len = vert_count as usize * layout.stride_bytes();
         let bytes = std::slice::from_raw_parts(verts as *const u8, byte_len);
         if gl
             .buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STATIC_DRAW)
@@ -183,7 +189,7 @@ pub extern "C" fn stone_mesh_create(
             return 0;
         }
         crate::track_retained_upload(vert_count as usize, byte_len);
-        setup_attribs(gl, 0, sizes.as_slice(), stride_floats, 0, 0);
+        setup_attribs(gl, 0, layout.as_slice(), layout.stride_floats, 0, 0);
         gl.bind_vertex_array(None);
 
         let id = crate::handles::mint(Class::Mesh);
@@ -199,7 +205,6 @@ pub extern "C" fn stone_mesh_create(
                     attr_count,
                     inst_count: 0,
                     inst_layout: None,
-                    inst_stride_floats: 0,
                     vbo_bytes: byte_len as u64,
                     inst_vbo_bytes: 0,
                 },
@@ -213,6 +218,7 @@ pub extern "C" fn stone_mesh_create(
     })
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_mesh_set_instances(
     handle: u64,
@@ -222,7 +228,7 @@ pub extern "C" fn stone_mesh_set_instances(
     attr_sizes: *const c_int,
     attr_count: c_int,
 ) -> c_int {
-    let Some(sizes) = validate_layout(
+    let Some(layout) = validate_layout(
         "stone_mesh_set_instances",
         stride_floats,
         attr_sizes,
@@ -230,8 +236,7 @@ pub extern "C" fn stone_mesh_set_instances(
     ) else {
         return 0;
     };
-    let Some(byte_len) = instance_byte_len("stone_mesh_set_instances", data, count, stride_floats)
-    else {
+    let Some(byte_len) = instance_byte_len("stone_mesh_set_instances", data, count, &layout) else {
         return 0;
     };
 
@@ -293,16 +298,15 @@ pub extern "C" fn stone_mesh_set_instances(
             setup_attribs(
                 gl,
                 mesh.attr_count as u32,
-                sizes.as_slice(),
-                stride_floats,
+                layout.as_slice(),
+                layout.stride_floats,
                 1,
                 0,
             );
             gl.bind_vertex_array(None);
             mesh.inst_vbo = Some(inst_vbo);
             mesh.inst_count = count;
-            mesh.inst_layout = Some(sizes);
-            mesh.inst_stride_floats = stride_floats;
+            mesh.inst_layout = Some(layout);
             mesh.inst_vbo_bytes = byte_len as u64;
             1
         })
@@ -317,11 +321,9 @@ fn instance_byte_len(
     what: &str,
     data: *const c_float,
     count: c_int,
-    stride_floats: c_int,
+    layout: &ValidatedLayout,
 ) -> Option<usize> {
-    let bytes = (count as usize)
-        .checked_mul(stride_floats as usize)
-        .and_then(|floats| floats.checked_mul(std::mem::size_of::<f32>()));
+    let bytes = (count as usize).checked_mul(layout.stride_bytes());
     if !(0..=10_000_000).contains(&count)
         || (count > 0 && data.is_null())
         || !matches!(bytes, Some(n) if n <= i32::MAX as usize)
@@ -334,6 +336,7 @@ fn instance_byte_len(
 
 /// Replace the live instance prefix, keeping its layout and allocation until
 /// growth is needed. Returns 1 on success, 0 on rejection or upload failure.
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_mesh_update_instances(
     handle: u64,
@@ -358,12 +361,8 @@ pub extern "C" fn stone_mesh_update_instances(
             );
             return 0;
         };
-        let Some(byte_len) = instance_byte_len(
-            "stone_mesh_update_instances",
-            data,
-            count,
-            mesh.inst_stride_floats,
-        ) else {
+        let Some(byte_len) = instance_byte_len("stone_mesh_update_instances", data, count, layout)
+        else {
             return 0;
         };
         if byte_len == 0 {
@@ -404,7 +403,7 @@ pub extern "C" fn stone_mesh_update_instances(
                     gl,
                     mesh.attr_count as u32,
                     layout.as_slice(),
-                    mesh.inst_stride_floats,
+                    layout.stride_floats,
                     1,
                     0,
                 );
@@ -439,6 +438,7 @@ pub extern "C" fn stone_mesh_update_instances(
 ///
 /// Returns -1 when no draw was issued, 0 when the draw had no resolved
 /// texture, and 1 when the texture was bound to unit 0 before it.
+/// rock-ffi stone-rendering private rename:tex=texture
 #[no_mangle]
 pub extern "C" fn stone_mesh_draw(handle: u64, tex: u64, count: c_int) -> c_int {
     MESHES.with(|m| {
@@ -514,11 +514,13 @@ pub(crate) fn live_mesh_ids() -> Vec<u64> {
     MESHES.with(|m| m.borrow().keys().copied().collect())
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_get_live_mesh_count() -> c_int {
     MESHES.with(|m| m.borrow().len().min(c_int::MAX as usize) as c_int)
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_get_live_mesh_handle(index: c_int) -> u64 {
     if index < 0 {
@@ -531,6 +533,7 @@ pub extern "C" fn stone_get_live_mesh_handle(index: c_int) -> u64 {
     })
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_mesh_bytes(handle: u64) -> u64 {
     MESHES.with(|m| {
@@ -540,6 +543,7 @@ pub extern "C" fn stone_mesh_bytes(handle: u64) -> u64 {
     })
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_mesh_free(handle: u64) {
     if handle == 0 {
@@ -602,7 +606,6 @@ mod layout_tests {
                     attr_count: 1,
                     inst_count: 0,
                     inst_layout: None,
-                    inst_stride_floats: 0,
                     vbo_bytes: 24,
                     inst_vbo_bytes: 0,
                 },
@@ -615,7 +618,6 @@ mod layout_tests {
             let mesh = meshes.get_mut(&handle).unwrap();
             mesh.inst_vbo = Some(glow::NativeBuffer(object));
             mesh.inst_layout = validate_layout("test", 2, [2].as_ptr(), 1);
-            mesh.inst_stride_floats = 2;
             mesh.inst_count = 1;
             mesh.inst_vbo_bytes = 8;
         });
