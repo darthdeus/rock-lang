@@ -588,13 +588,17 @@ impl<'a> Builder<'a> {
                 if self.in_defer_body {
                     return Err(gap("`yield` inside a `defer` body is not allowed"));
                 }
-                // A flat-enum yield threads its leaves through reused frame slots, with no
-                // allocation.
+                // The declared coroutine type determines whether the frame uses
+                // leaf slots or returns a single boxed value.
                 let values: Vec<Idx<Inst>> = match opt {
-                    Some(eb) => match self.flat_enum_value_shape_of(eb)? {
-                        Some(shape) => {
+                    Some(eb) => match self.current_yield_channel() {
+                        Some(channel) => {
                             let r = self.lower_expr_repr(eb)?;
-                            self.repr_to_storage_leaves(&r, &shape, "flat enum yield")?
+                            self.repr_to_storage_leaves(
+                                &r,
+                                &channel.value_shape(),
+                                "flat enum yield",
+                            )?
                         }
                         None => vec![self.lower_expr(eb)?],
                     },

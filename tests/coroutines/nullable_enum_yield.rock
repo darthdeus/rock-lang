@@ -1,0 +1,51 @@
+enum E { Value(int), Text(string) }
+
+co fn worker(value: E?) -> Coroutine<E?> {
+    yield value
+    yield null
+    yield E::Text("last")
+}
+
+@test(output = "first 7\nnull\nlast\n3")
+fn resuming_nullable_enum_keeps_both_yields() {
+    let count = 0
+    for received in worker(E::Value(7)) {
+        count += 1
+        if let e = received {
+            match e { E::Value(n) => { print("first {n}") }, E::Text(s) => { print(s) } }
+        } else { print("null") }
+    }
+    print(count)
+}
+
+@test(output = "first 7\nnull\nlast\ntrue")
+fn resuming_nullable_enum_by_hand() {
+    let c = worker(E::Value(7))
+    for _ in 0..3 {
+        let received = c.resume()
+        if let e = received {
+            match e { E::Value(n) => { print("first {n}") }, E::Text(s) => { print(s) } }
+        } else { print("null") }
+    }
+    let _ = c.resume()
+    print(c.completed())
+}
+
+co fn inner() -> Coroutine<E> { yield E::Value(19) }
+
+co fn widened() -> Coroutine<E?> {
+    await inner()
+    yield null
+}
+
+@test(output = "19\nnull\n2")
+fn await_can_widen_enum_yields() {
+    let count = 0
+    for received in widened() {
+        count += 1
+        if let e = received {
+            match e { E::Value(n) => { print(n) }, E::Text(s) => { print(s) } }
+        } else { print("null") }
+    }
+    print(count)
+}

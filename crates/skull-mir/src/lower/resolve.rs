@@ -1163,8 +1163,10 @@ impl<'a> Builder<'a> {
         // Registered as the active inner so kill() chains into it.
         self.emit_cur(Inst::CoroSetInner(sub));
 
-        // Keep the yielded enum in frame slots throughout the pump.
-        if let Some(shape) = self.coroutine_yield_flat_shape(sub_expr) {
+        // Keep the leaves in frame slots when both coroutines use that channel.
+        if self.current_yield_channel().is_some()
+            && let Some(shape) = self.concrete_coroutine_channel(sub_expr)?
+        {
             return self.lower_yield_delegate_flat(sub, rac, &shape);
         }
 

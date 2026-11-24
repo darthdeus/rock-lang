@@ -843,26 +843,7 @@ impl<'a> Builder<'a> {
         )
     }
 
-    /// A flat-enum yield threads through an `await` delegation as leaves, not a box.
-    pub(crate) fn coroutine_yield_flat_shape(&self, e: Idx<Expr>) -> Option<EnumFlatShape> {
-        let concrete = self.concrete_expr_ty(e)?;
-        let MonoTy::App {
-            ctor: crate::monoty::MonoCtor::Nominal(name),
-            params,
-        } = concrete.peel_nullable().0
-        else {
-            return None;
-        };
-        if !bone_core::modules::is_intrinsic_key(*name, "Coroutine") {
-            return None;
-        }
-        let Some(MonoTy::App {
-            ctor: crate::monoty::MonoCtor::Nominal(yield_name),
-            ..
-        }) = params.first()
-        else {
-            return None;
-        };
-        EnumPlan::for_name(self.ws, *yield_name).and_then(|plan| plan.flat().cloned())
+    pub(crate) fn current_yield_channel(&self) -> Option<EnumFlatShape> {
+        CoroutinePlan::channel_for_concrete_type(self.ws, self.ret_ty?)
     }
 }
