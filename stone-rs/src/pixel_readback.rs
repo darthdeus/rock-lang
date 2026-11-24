@@ -214,6 +214,7 @@ fn requested_side(shape: ReadShape, requested: Option<i32>) -> Option<i32> {
     }
 }
 
+/// rock-ffi stone-rendering private rename:canvas_handle=handle
 #[no_mangle]
 pub extern "C" fn stone_read_canvas_nearest_id(
     canvas_handle: u64,
@@ -463,6 +464,7 @@ pub(crate) fn release_all() {
 }
 
 /// The canvas must be resident and at most 128x128. Release the id explicitly.
+/// rock-ffi stone-rendering rename:canvas_handle=handle
 #[no_mangle]
 pub extern "C" fn stone_canvas_capture_begin(canvas_handle: u64) -> u64 {
     if canvas_handle == 0 {
@@ -590,6 +592,7 @@ pub extern "C" fn stone_canvas_capture_begin(canvas_handle: u64) -> u64 {
     id
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_canvas_capture_poll(id: u64, out: *mut u8, capacity: c_int) -> c_int {
     if id == 0 || out.is_null() || capacity < 0 {
@@ -661,6 +664,7 @@ pub extern "C" fn stone_canvas_capture_poll(id: u64, out: *mut u8, capacity: c_i
 
 /// Release a capture and all of its GL resources. Releasing a pending capture
 /// drops its PBO and fence; OpenGL keeps the submitted readback ordered.
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_canvas_capture_release(id: u64) -> bool {
     if id == 0 {
@@ -673,6 +677,7 @@ pub extern "C" fn stone_canvas_capture_release(id: u64) -> bool {
 }
 
 /// Alias for callers that abort a save before its capture is ready.
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_canvas_capture_cancel(id: u64) -> bool {
     stone_canvas_capture_release(id)
@@ -680,6 +685,7 @@ pub extern "C" fn stone_canvas_capture_cancel(id: u64) -> bool {
 
 /// Create a new pixel-readback slot. `is_depth = 0` for color (RGBA32F red
 /// channel), non-zero for depth. Returns 0 on GL failure.
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_pixel_readback_new(is_depth: c_int) -> u64 {
     let channel = if is_depth != 0 {
@@ -695,6 +701,7 @@ pub extern "C" fn stone_pixel_readback_new(is_depth: c_int) -> u64 {
     id
 }
 
+/// rock-ffi stone-rendering private rename:max_side=side
 #[no_mangle]
 pub extern "C" fn stone_pixel_readback_area_new(max_side: c_int) -> u64 {
     if max_side <= 0 {
@@ -713,6 +720,7 @@ pub(crate) fn live_readback_ids() -> Vec<u64> {
     SLOTS.with(|s| s.borrow().keys().copied().collect())
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_pixel_readback_reset_contents(id: u64) -> bool {
     if id == 0 {
@@ -728,6 +736,7 @@ pub extern "C" fn stone_pixel_readback_reset_contents(id: u64) -> bool {
     })
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_pixel_readback_destroy(id: u64) {
     if id == 0 {
@@ -744,6 +753,8 @@ pub extern "C" fn stone_pixel_readback_destroy(id: u64) {
     });
 }
 
+/// Map the other PBO to return the prior submission while the current read is in flight.
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_pixel_readback_consume(id: u64) -> c_float {
     if id == 0 {
@@ -759,6 +770,7 @@ pub extern "C" fn stone_pixel_readback_consume(id: u64) -> c_float {
     })
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_pixel_readback_poll_id(id: u64) -> c_int {
     if id == 0 {
@@ -796,6 +808,7 @@ pub extern "C" fn stone_pixel_readback_poll_id(id: u64) -> c_int {
     })
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_pixel_readback_poll_rgba(
     id: u64,
@@ -852,6 +865,7 @@ pub extern "C" fn stone_pixel_readback_poll_rgba(
 }
 
 /// Reads a polled slot has submitted and not yet answered.
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_pixel_readback_in_flight(id: u64) -> c_int {
     SLOTS.with(|slots| {
@@ -863,6 +877,7 @@ pub extern "C" fn stone_pixel_readback_in_flight(id: u64) -> c_int {
     })
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_pixel_readback_answer_x(id: u64) -> c_int {
     SLOTS.with(|slots| {
@@ -873,6 +888,7 @@ pub extern "C" fn stone_pixel_readback_answer_x(id: u64) -> c_int {
     })
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_pixel_readback_answer_y(id: u64) -> c_int {
     SLOTS.with(|slots| {
@@ -969,11 +985,13 @@ fn read_pbo(
 /// Submit a pixel or configured area read. The previous staging buffer becomes
 /// ready first, keeping consume at least one frame behind.
 /// Call when the canvas has no pending writes to avoid a pipeline flush.
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_pixel_readback_submit(id: u64, canvas_handle: u64, x: c_int, y: c_int) {
     pixel_readback_submit(id, canvas_handle, x, y, None);
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_pixel_readback_submit_area(
     id: u64,

@@ -258,21 +258,25 @@ pub(crate) fn current_target_size() -> (f32, f32) {
 
 // Derive the ortho from the currently bound target. An FFI struct-by-value
 // return can abort a LuaJIT trace, so expose two scalar getters.
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_get_live_canvas_bytes() -> u64 {
     live_canvas_bytes()
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_current_target_width() -> c_float {
     current_target_size().0
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_current_target_height() -> c_float {
     current_target_size().1
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_clear_canvas(r: c_float, g: c_float, b: c_float, a: c_float) {
     with_gl(|gl| unsafe {
@@ -282,6 +286,7 @@ pub extern "C" fn stone_clear_canvas(r: c_float, g: c_float, b: c_float, a: c_fl
 }
 
 /// Rect is (x, y, w, h) in logical window px, top-left origin. Re-bind canvas 0 to apply.
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_set_present_viewport(active: bool, x: c_int, y: c_int, w: c_int, h: c_int) {
     PRESENT_VIEWPORT.with(|p| {
@@ -292,6 +297,7 @@ pub extern "C" fn stone_set_present_viewport(active: bool, x: c_int, y: c_int, w
 /// Set a canvas's active rectangle: the live image inside its allocated
 /// capacity, anchored at the GL origin. Clamped into [1, capacity]. Takes
 /// effect at the next bind of that canvas.
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_set_canvas_active(handle: u64, w: c_int, h: c_int) {
     with_canvas_mut(handle, |canvas| {
@@ -300,6 +306,7 @@ pub extern "C" fn stone_set_canvas_active(handle: u64, w: c_int, h: c_int) {
     });
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_set_viewport_rect(x: c_int, y: c_int, w: c_int, h: c_int) {
     if w <= 0 || h <= 0 {
@@ -326,6 +333,7 @@ pub extern "C" fn stone_set_viewport_rect(x: c_int, y: c_int, w: c_int, h: c_int
     });
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_set_canvas(handle: u64) {
     if handle == 0 {
@@ -462,6 +470,7 @@ fn canvas_dimensions_respect_both_device_axes() {
     assert!(!canvas_dimensions_fit(1, -1, 16384));
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_create_canvas(
     width: c_int,
@@ -538,6 +547,8 @@ pub extern "C" fn stone_create_canvas(
     .unwrap_or(0)
 }
 
+/// Integer color buffers require an integer clear. glClear is undefined for R32I.
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_clear_canvas_int(draw_buffer: c_int, value: c_int) {
     with_gl(|gl| unsafe {
@@ -545,32 +556,38 @@ pub extern "C" fn stone_clear_canvas_int(draw_buffer: c_int, value: c_int) {
     });
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_canvas_bound_as_target(handle: u64) -> bool {
     with_canvas(handle, |c| c.bound_as_target).unwrap_or(false)
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_canvas_active_is_creation(handle: u64) -> bool {
     with_canvas(handle, |c| c.active_w == c.width && c.active_h == c.height).unwrap_or(false)
 }
 
 /// Active width, or -1 for an unknown handle.
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_canvas_active_w(handle: u64) -> c_int {
     with_canvas(handle, |c| c.active_w).unwrap_or(-1)
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_canvas_active_h(handle: u64) -> c_int {
     with_canvas(handle, |c| c.active_h).unwrap_or(-1)
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_canvas_capacity_w(handle: u64) -> c_int {
     with_canvas(handle, |c| c.width).unwrap_or(-1)
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_canvas_capacity_h(handle: u64) -> c_int {
     with_canvas(handle, |c| c.height).unwrap_or(-1)
@@ -583,11 +600,13 @@ pub(crate) fn live_canvas_ids() -> Vec<u64> {
 
 /// Asset-report census over the canvas registry: population and one handle
 /// per index in id order.
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_get_live_canvas_count() -> c_int {
     get_canvas_count().min(c_int::MAX as usize) as c_int
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_get_live_canvas_handle(index: c_int) -> u64 {
     if index < 0 {
@@ -600,6 +619,7 @@ pub extern "C" fn stone_get_live_canvas_handle(index: c_int) -> u64 {
     })
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_canvas_report(handle: u64, width: *mut c_int, height: *mut c_int) -> c_int {
     if handle == 0 || width.is_null() || height.is_null() {
@@ -621,6 +641,7 @@ pub extern "C" fn stone_canvas_report(handle: u64, width: *mut c_int, height: *m
 /// Re-specify storage while retaining the handle, framebuffer and textures.
 /// Invalid requests fail; an incomplete framebuffer restores old storage.
 /// `bound_as_target` remains set if the canvas was ever painted.
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_canvas_resize(handle: u64, width: c_int, height: c_int) -> bool {
     if handle == 0 || width < 1 || height < 1 {
@@ -688,6 +709,7 @@ pub extern "C" fn stone_canvas_resize(handle: u64, width: c_int, height: c_int) 
     true
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_destroy_canvas(handle: u64) {
     if handle == 0 {
@@ -710,6 +732,7 @@ pub(crate) fn destroy_all() {
 }
 
 /// Bind a canvas texture by handle without exposing the backend GL name.
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_bind_canvas_texture_to_unit(handle: u64, unit: c_int) -> bool {
     if handle == 0 {
@@ -730,6 +753,7 @@ pub(crate) fn canvas_texture_id(handle: u64) -> Option<u32> {
     with_canvas(handle, |c| c.texture.0.get())
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_bind_canvas_depth_to_unit(handle: u64, unit: c_int) -> bool {
     if handle == 0 {
@@ -743,6 +767,7 @@ pub extern "C" fn stone_bind_canvas_depth_to_unit(handle: u64, unit: c_int) -> b
     }
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_canvas_exists(handle: u64) -> bool {
     if handle == 0 {
@@ -751,6 +776,7 @@ pub extern "C" fn stone_canvas_exists(handle: u64) -> bool {
     with_canvas(handle, |_| ()).is_some()
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_canvas_has_depth(handle: u64) -> bool {
     if handle == 0 {
@@ -763,6 +789,7 @@ pub extern "C" fn stone_canvas_has_depth(handle: u64) -> bool {
 /// The colour attachment's GL name. NOT for the rendering path, which binds
 /// through `stone_bind_canvas_texture_to_unit` -- this exists for cimgui, whose
 /// renderer is GL and whose `ImTextureRef_TextureID` takes a GL texture.
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_get_canvas_texture(handle: u64) -> u32 {
     if handle == 0 {
@@ -772,11 +799,13 @@ pub extern "C" fn stone_get_canvas_texture(handle: u64) -> u32 {
     with_canvas(handle, |c| c.texture.0.get()).unwrap_or(0)
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_canvas_attach_id_target(color_handle: u64, id_handle: u64) -> bool {
     stone_canvas_attach_color_target(color_handle, id_handle, 1)
 }
 
+/// rock-ffi stone-rendering rename:id_handle=target_handle
 #[no_mangle]
 pub extern "C" fn stone_canvas_attach_color_target(
     color_handle: u64,
@@ -837,6 +866,7 @@ pub extern "C" fn stone_canvas_attach_color_target(
 
 /// Read a single channel from a canvas at (x, y) in screen coordinates (top-left origin).
 /// Returns 0.0 if the canvas doesn't exist, coordinates are out of bounds, or the channel is invalid.
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_read_canvas_pixel_channel(
     handle: u64,
@@ -866,6 +896,7 @@ pub extern "C" fn stone_read_canvas_pixel_channel(
 }
 
 /// Read the red channel at top-left screen coordinates.
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_read_canvas_pixel(handle: u64, x: c_int, y: c_int) -> c_float {
     stone_read_canvas_pixel_channel(handle, x, y, 0)
@@ -873,6 +904,7 @@ pub extern "C" fn stone_read_canvas_pixel(handle: u64, x: c_int, y: c_int) -> c_
 
 /// (x, y) are top-left drawable coordinates. Valid only before the swap: the post-swap
 /// back buffer is undefined.
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_read_window_rect(x: c_int, y: c_int, w: c_int, h: c_int, out: *mut u8) {
     if out.is_null() || w <= 0 || h <= 0 {
@@ -930,6 +962,7 @@ pub(crate) fn read_rows_top_down(
 
 /// Read the depth buffer value at (x, y) from a canvas with a depth attachment.
 /// Returns depth as a float in [0, 1]. Returns 1.0 (far plane) if no depth attachment.
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_read_depth_pixel(handle: u64, x: c_int, y: c_int) -> c_float {
     let Some(canvas) = lookup_canvas(handle) else {
@@ -959,6 +992,7 @@ pub extern "C" fn stone_read_depth_pixel(handle: u64, x: c_int, y: c_int) -> c_f
 /// flipped from the GL bottom-left origin). Returns the number of bytes
 /// written, or -1 on any failure (unknown handle, capacity too small,
 /// readback error). Required size = canvas_w * canvas_h * 4.
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_canvas_read_rgba8(handle: u64, out: *mut u8, capacity: c_int) -> c_int {
     if handle == 0 || out.is_null() || capacity <= 0 {
@@ -1069,6 +1103,7 @@ fn read_region<T>(
     }
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_canvas_read_region_rgba32f(
     handle: u64,
@@ -1088,6 +1123,7 @@ pub extern "C" fn stone_canvas_read_region_rgba32f(
     )
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_canvas_read_region_i32(
     handle: u64,
@@ -1121,6 +1157,7 @@ pub extern "C" fn stone_canvas_read_region_i32(
 
 /// Upload top-to-bottom RGBA8 pixels into an existing RGBA8 canvas. The
 /// caller owns the input buffer; GL keeps the canvas contents.
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub unsafe extern "C" fn stone_canvas_upload_rgba8(
     handle: u64,
@@ -1173,6 +1210,7 @@ pub unsafe extern "C" fn stone_canvas_upload_rgba8(
 
 /// Upload RGBA32F data in native texture row order (first row at v=0).
 /// Intended for shader data tables; no color conversion or row-flip allocation.
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub unsafe extern "C" fn stone_canvas_upload_rgba32f(
     handle: u64,
@@ -1217,6 +1255,7 @@ pub unsafe extern "C" fn stone_canvas_upload_rgba32f(
     uploaded
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_canvas_save_png(handle: u64, path: *const c_char) -> bool {
     if handle == 0 || path.is_null() {
