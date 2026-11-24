@@ -366,3 +366,29 @@ fn nav_live(holder: NavHolder?) -> NavRef? { return holder?.live }
     assert(nav_live(NavHolder { id: 2 }) == null)
     assert(nav_live(null) == null)
 }
+
+struct OptionalSignal { sig: Sig? }
+
+@noalloc
+fn signal_is_absent(holder: OptionalSignal) -> bool {
+    return null == holder.sig
+}
+
+@noalloc
+fn signal_is_present(holder: OptionalSignal) -> bool {
+    if holder.sig != null { return true }
+    return false
+}
+
+@test
+fn flat_enum_presence_only_reads_the_tag() {
+    let holder = OptionalSignal { sig: null }
+    assert(signal_is_absent(holder))
+    assert(!signal_is_present(holder))
+    holder.sig = Sig::A
+    assert(!signal_is_absent(holder))
+    assert(signal_is_present(holder))
+    holder.sig = Sig::B("payload")
+    assert(!signal_is_absent(holder))
+    assert(signal_is_present(holder))
+}

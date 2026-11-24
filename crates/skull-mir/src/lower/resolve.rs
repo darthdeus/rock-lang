@@ -695,12 +695,7 @@ impl<'a> Builder<'a> {
                 }
                 // A flattened enum field read as a whole value re-materializes the box from
                 // the parent's slots (the single escape boundary).
-                if let Some(TypeExpr::App {
-                    ctor: TypeCtor::Nominal(sname),
-                    ..
-                }) = self.field_base_ty(base)
-                    && let Some(shape) = self.struct_field_plan(sname, field, false)?.flat_shape()
-                {
+                if let Some(shape) = self.flat_enum_field(base, field)? {
                     let parent = self.lower_expr(base)?;
                     return Ok(ValueRepr::Scalar(
                         self.materialize_flat(parent, field, &shape),

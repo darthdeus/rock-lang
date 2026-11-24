@@ -540,21 +540,15 @@ impl<'a> Builder<'a> {
     /// A flattened enum field stays a `Scrut::Flat` read from the parent's slots,
     /// with no box.
     fn lower_scrut(&mut self, e: Idx<Expr>, record: bool) -> Result<Scrut, CompilerError> {
-        if let Expr::FieldAccess { base, field } = self.body.expr_arena[e] {
-            if let Some(TypeExpr::App {
-                ctor: TypeCtor::Nominal(sname),
-                ..
-            }) = self.field_base_ty(base)
-            {
-                if let Some(shape) = self.struct_field_plan(sname, field, false)?.flat_shape() {
-                    let parent = self.lower_expr(base)?;
-                    return Ok(Scrut::Flat {
-                        parent,
-                        prefix: field,
-                        shape,
-                    });
-                }
-            }
+        if let Expr::FieldAccess { base, field } = self.body.expr_arena[e]
+            && let Some(shape) = self.flat_enum_field(base, field)?
+        {
+            let parent = self.lower_expr(base)?;
+            return Ok(Scrut::Flat {
+                parent,
+                prefix: field,
+                shape,
+            });
         }
         if let Expr::Tuple(elements) = self.body.expr_arena[e] {
             let mut parts = Vec::with_capacity(elements.len());

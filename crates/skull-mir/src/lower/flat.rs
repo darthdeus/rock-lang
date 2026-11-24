@@ -220,6 +220,21 @@ impl<'a> Builder<'a> {
         self.dispatch().expr_is_flat_enum(e)
     }
 
+    pub(super) fn flat_enum_field(
+        &self,
+        base: Idx<Expr>,
+        field: Ustr,
+    ) -> Result<Option<EnumFlatShape>, CompilerError> {
+        let Some(TypeExpr::App {
+            ctor: TypeCtor::Nominal(owner),
+            ..
+        }) = self.field_base_ty(base)
+        else {
+            return Ok(None);
+        };
+        Ok(self.struct_field_plan(owner, field, false)?.flat_shape())
+    }
+
     pub(crate) fn flat_enum_value_shape_of(
         &self,
         e: Idx<Expr>,

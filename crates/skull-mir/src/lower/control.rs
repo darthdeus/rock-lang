@@ -397,8 +397,7 @@ impl<'a> Builder<'a> {
                 Ok(self.emit_cur(inst))
             }
             BinOp::Eq | BinOp::NotEq => {
-                // `x == null` on a flat enum compares the tag slot (nil tag is null):
-                // materializing a box would compare a table to nil, always false.
+                // A flat enum's nil tag encodes absence without its payload.
                 let null_side = if self.is_null_lit(rhs) {
                     Some(lhs)
                 } else if self.is_null_lit(lhs) {
@@ -481,15 +480,22 @@ impl<'a> Builder<'a> {
                         return Ok(self.lower_presence_test(op, present, condition));
                     }
                     if self.expr_is_flat_enum(v) {
-                        let tag = match self.lower_expr_repr(v)?.into_value() {
-                            ValueRepr::Group { parts, .. } => self.pack(
-                                parts
-                                    .into_iter()
-                                    .next()
-                                    .expect("flat enum group has a tag leaf"),
-                            )?,
-                            // A boxed flat enum is nil-or-table and compares directly.
-                            other => self.pack(other)?,
+                        let tag = if let Expr::FieldAccess { base, field } = self.body.expr_arena[v]
+                            && self.flat_enum_field(base, field)?.is_some()
+                        {
+                            let parent = self.lower_expr(base)?;
+                            self.read_field(parent, flat_tag_slot(field))
+                        } else {
+                            match self.lower_expr_repr(v)?.into_value() {
+                                ValueRepr::Group { parts, .. } => self.pack(
+                                    parts
+                                        .into_iter()
+                                        .next()
+                                        .expect("flat enum group has a tag leaf"),
+                                )?,
+                                // A boxed flat enum is nil-or-table and compares directly.
+                                other => self.pack(other)?,
+                            }
                         };
                         let nil = self.emit_cur(Inst::Const(Lit::Nil));
                         return Ok(self.emit_cur(if matches!(op, BinOp::Eq) {
