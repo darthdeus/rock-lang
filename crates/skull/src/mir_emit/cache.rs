@@ -80,7 +80,7 @@ pub(super) struct BodyEditState {
     // Bounds elimination depends on transitive callee effects, residual calls included.
     effect_snapshot: EffectSnapshot,
     // Keyed by emitted body, since a specialization is its own definition.
-    emitted: FxHashSet<Instance>,
+    pub(super) emitted: FxHashSet<Instance>,
     pub(super) code_artifact: std::sync::Arc<skull_mir::code_identity::CodeArtifact>,
     pub(super) code_slots_in_main: bool,
     lifecycle_plan: Option<std::sync::Arc<skull_mir::lifecycle::LifecyclePlan>>,

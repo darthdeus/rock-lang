@@ -289,6 +289,11 @@ fn collect_needed_foreign(
     });
     let always = always_emitted_calls.iter().copied().filter(foreign);
     let mut needed: FxHashSet<FuncRef> = always.chain(found.into_iter().flatten()).collect();
+    extend_needed_lua_helpers(ws, &mut needed);
+    needed.into_iter().map(shared).collect()
+}
+
+fn extend_needed_lua_helpers(ws: &Workspace, needed: &mut FxHashSet<FuncRef>) {
     let mut pending: Vec<FuncRef> = needed.iter().copied().collect();
     while let Some(caller) = pending.pop() {
         for helper in named_lua_helpers(ws, caller) {
@@ -297,7 +302,6 @@ fn collect_needed_foreign(
             }
         }
     }
-    needed.into_iter().map(shared).collect()
 }
 
 /// A `@lua_helper` is not an emission root: it is emitted when an emitted
@@ -663,6 +667,47 @@ fn place_function<'c>(
         None => None,
     };
     Placement::Chunk(emit_def, chunk)
+}
+
+pub(super) fn overlay_foreign_definitions(
+    ws: &Workspace,
+    cache: &SkullEmitCache,
+    calls: Vec<FuncRef>,
+) -> Result<String, CompilerError> {
+    let fn_values = cache
+        .lua_view
+        .fn_value_targets
+        .iter()
+        .filter_map(|instance| Some(cache.lua_view.realization.get(instance)?.decl));
+    let mut needed: FxHashSet<_> = calls
+        .into_iter()
+        .chain(fn_values)
+        .filter(|fref| {
+            let f = &ws.module(fref.module).functions[fref.func];
+            (f.inline_body.is_some() || f.ffi_lib.is_some())
+                && !cache.edit.emitted.contains(&shared(*fref))
+        })
+        .collect();
+    extend_needed_lua_helpers(ws, &mut needed);
+
+    let needed: FxHashSet<_> = needed.into_iter().map(shared).collect();
+    let mut order: Vec<_> = needed
+        .iter()
+        .filter(|instance| !cache.edit.emitted.contains(*instance))
+        .map(|instance| instance.func)
+        .collect();
+    order.sort_unstable_by_key(|fref| (fref.module.index(), fref.func.into_raw()));
+    let mut definitions = DefinitionOrder::default();
+    let allocation =
+        crate::allocation_report::enabled().then(crate::allocation_report::activation_enabled);
+    for fref in order {
+        let f = &ws.module(fref.module).functions[fref.func];
+        if let Placement::Text(definition) = place_function(ws, cache, &needed, fref, f, allocation)
+        {
+            definitions.push_text(definition?.0);
+        }
+    }
+    Ok(definitions.definitions_lua())
 }
 
 fn release_one_shot_chunks(

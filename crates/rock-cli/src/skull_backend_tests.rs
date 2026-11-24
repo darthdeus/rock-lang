@@ -1601,3 +1601,23 @@ fn main() { print(target(1)) }
         ExecOutcome::Errored(error) => panic!("{error}"),
     }
 }
+
+#[test]
+fn a_body_edit_can_reach_an_inline_lua_wrapper() {
+    let original = r#"inline(lua) fn foreign(x: int) -> int = "return x + 1"
+fn main() { print(1) }
+"#;
+    let mut live = ProjectFixture::boot(original);
+    assert!(matches!(
+        live.edit(&original.replace("print(1)", "print(foreign(1))"))
+            .unwrap(),
+        super::SkullReload::Incremental { .. }
+    ));
+    let main = live
+        .main_text()
+        .replace("\n__rock_main_wrapper(main)\n", "\n");
+    match run_parts(&[&main, SYS_STUB, &live.overlay_text(), "main()"]) {
+        ExecOutcome::Output(out) => assert_eq!(out.trim(), "2"),
+        ExecOutcome::Errored(error) => panic!("{error}"),
+    }
+}

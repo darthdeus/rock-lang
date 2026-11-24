@@ -116,11 +116,16 @@ fn assemble_overlay(
         match cache.chunks.get(body) {
             Some(Ok(chunk)) => definitions.push_chunk(chunk),
             Some(Err(err)) => return Err(err.clone()),
-            // An extern or inline(lua) edit is interface-tier and takes a full rebuild.
+            // Foreign wrappers have no cached chunk. Emit them from their call demands.
             None => {}
         }
     }
     let runtime_refs = definitions.runtime_refs();
+    let mut calls = definitions
+        .emitted
+        .iter()
+        .flat_map(|chunk| chunk.calls.iter().copied())
+        .collect::<Vec<_>>();
     out.push_str(&definitions.definitions_lua());
     let (mut bindings, rebound_bodies) = overlay_callee_bindings(ws, cache, &order);
     overwritten_globals.extend(bindings.iter().map(|binding| binding.name.clone()));
@@ -265,6 +270,7 @@ fn assemble_overlay(
                     .globals
                     .insert((a.mid, a.gid), unit.comptime_reads.clone());
                 definitions.push_str(&unit.lua);
+                calls.extend(unit.calls);
                 unit_refs.extend(
                     unit.global_names
                         .iter()
@@ -337,10 +343,10 @@ fn assemble_overlay(
 
     let mut ctor_calls = Vec::new();
     crate::push_value_ctor_calls(&out[value_ctors_at..], &mut ctor_calls);
-    out.insert_str(
-        value_ctors_at,
-        &crate::value_ctor_defs(&cache.value_ctors, &ctor_calls.into_iter().collect()),
-    );
+    let foreign = overlay_foreign_definitions(ws, cache, calls)?;
+    let mut prefix = crate::value_ctor_defs(&cache.value_ctors, &ctor_calls.into_iter().collect());
+    prefix.push_str(&foreign);
+    out.insert_str(value_ctors_at, &prefix);
     out.push_str("end\n");
     out = transactional_overlay(&out, overwritten_globals);
     if cache.cg.line_directives() {
