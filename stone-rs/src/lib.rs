@@ -1056,6 +1056,7 @@ fn release_native_window() {
 
 /// Borrow the process GPU context, creating a hidden host only on first use.
 /// A lost host cannot be recreated: its callers retain context-owned resources.
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_gpu_host_acquire() -> *mut StoneWindow {
     if GPU_HOST_LIFETIME.with(|host| host.get() == GpuHostLifetime::Lost) {
@@ -1226,6 +1227,7 @@ fn configure_sdl_graphics_drivers() {
 /// Create a window with OpenGL context at the given position on the given
 /// display. Pass SDL_WINDOWPOS_CENTERED (0x2FFF0000) for x/y to let SDL
 /// auto-center on the chosen display.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_create_window_ex(
     title: *const c_char,
@@ -1841,6 +1843,7 @@ pub extern "C" fn stone_stop_text_input() {
     unsafe { sdl2::sys::SDL_StopTextInput() };
 }
 
+/// rock-ffi stone rename:_window=window
 #[no_mangle]
 pub extern "C" fn stone_swap_window(_window: *mut StoneWindow) {
     GL_SWAP_COUNT.fetch_add(1, Ordering::SeqCst);
@@ -2115,6 +2118,7 @@ pub extern "C" fn stone_is_window_hidden() -> bool {
 
 /// Explicitly bring an interactive window to the foreground. Normal Stone
 /// startup avoids stealing focus; launchers and demos opt into activation.
+/// rock-ffi stone rename:_window=window
 #[no_mangle]
 pub extern "C" fn stone_activate_window(_window: *mut StoneWindow) {
     if stone_is_window_hidden() {
@@ -2583,6 +2587,7 @@ pub extern "C" fn stone_get_time() -> f64 {
     start.elapsed().as_secs_f64()
 }
 
+/// rock-ffi stone private rename:width=w rename:height=h
 #[no_mangle]
 pub extern "C" fn stone_get_window_size(width: *mut c_int, height: *mut c_int) {
     with_window(|window| {
@@ -2592,6 +2597,7 @@ pub extern "C" fn stone_get_window_size(width: *mut c_int, height: *mut c_int) {
     });
 }
 
+/// rock-ffi stone private rename:width=w rename:height=h
 #[no_mangle]
 pub extern "C" fn stone_get_drawable_size(width: *mut c_int, height: *mut c_int) {
     with_window(|window| {
@@ -2626,6 +2632,7 @@ pub extern "C" fn stone_get_dpi_scale() -> c_float {
     .unwrap_or(1.0)
 }
 
+/// rock-ffi stone rename:_window=window
 #[no_mangle]
 pub extern "C" fn stone_set_window_title(_window: *mut StoneWindow, title: *const c_char) {
     if title.is_null() {
@@ -2637,6 +2644,7 @@ pub extern "C" fn stone_set_window_title(_window: *mut StoneWindow, title: *cons
     });
 }
 
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_get_window_position(x: *mut c_int, y: *mut c_int) {
     with_window(|window| {
@@ -2941,6 +2949,7 @@ pub extern "C" fn stone_get_window_refresh_rate() -> c_int {
     })
 }
 
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_get_window_borders(
     top: *mut c_int,
