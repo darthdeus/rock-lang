@@ -577,7 +577,7 @@ impl<'a> Builder<'a> {
                             if matches!(self.f.insts[v], Inst::MakeValueStruct { .. }) {
                                 self.owned_value_binds.insert(raw(name));
                             }
-                            self.store_cell(cell, v);
+                            self.initialize_binding(cell, v);
                             self.binds.insert(raw(name), cell);
                         }
                     }

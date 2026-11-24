@@ -1148,7 +1148,7 @@ impl<'a> Builder<'a> {
                 if self.binding_is_nonnull_value_struct(*b) {
                     self.f.mark_nonnull_value_struct(cell);
                 }
-                self.store_cell(cell, value);
+                self.initialize_binding(cell, value);
                 self.binds.insert(raw(*b), cell);
             }
             BindingPattern::Tuple(subs) => {

@@ -538,6 +538,12 @@ fn copy_inst_metadata(
         code_value_identities,
         lambda_abis,
     );
+    target.binding_initializers.extend(
+        source
+            .binding_initializers
+            .iter()
+            .filter_map(|id| inst_map.get(id)),
+    );
     for (old_id, span) in source.inst_spans.iter() {
         if let Some(&new_id) = inst_map.get(&old_id) {
             target.inst_spans.insert(new_id, *span);

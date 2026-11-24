@@ -917,6 +917,8 @@ pub struct MirFunc {
     /// Contains no backend symbol or build-local `RepId`.
     pub code_abi_fingerprint: Option<String>,
     pub lambda_abis: bone_core::prelude::FxHashMap<Idx<Inst>, LambdaAbi>,
+    /// Stores that begin a lexical binding's lifetime.
+    pub binding_initializers: bone_core::prelude::FxHashSet<Idx<Inst>>,
     pub code_value_identities:
         bone_core::prelude::FxHashMap<Idx<Inst>, crate::code_identity::CodeIdentity>,
     pub nested_fn_identities:
@@ -1028,6 +1030,7 @@ impl MirFunc {
             code_identity: None,
             code_abi_fingerprint: None,
             lambda_abis: Default::default(),
+            binding_initializers: Default::default(),
             code_value_identities: Default::default(),
             nested_fn_identities: Default::default(),
             code_compatibility: None,

@@ -1566,7 +1566,7 @@ impl<'a> Builder<'a> {
     ) -> Vec<Idx<Cell>> {
         let cells = self.new_binding_slots(binding, slots.len());
         for (&cell, &value) in cells.iter().zip(slots) {
-            self.store_cell(cell, value);
+            self.initialize_binding(cell, value);
         }
         cells
     }
@@ -1742,6 +1742,13 @@ impl<'a> Builder<'a> {
             value,
             kind,
         })
+    }
+
+    fn initialize_binding(&mut self, cell: Idx<Cell>, value: Idx<Inst>) {
+        let store = self.store_cell(cell, value);
+        if self.body_facts().may_capture {
+            self.f.binding_initializers.insert(store);
+        }
     }
 
     fn store_cell(&mut self, cell: Idx<Cell>, value: Idx<Inst>) -> Idx<Inst> {

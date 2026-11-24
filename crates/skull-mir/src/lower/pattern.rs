@@ -160,7 +160,7 @@ impl<'a> Builder<'a> {
                 let val = self.owned_binding_value(b, val)?;
                 let cell =
                     self.new_binding_cell(b, name, self.binding_ty(b), crate::names::ustr(""));
-                self.store_cell(cell, val);
+                self.initialize_binding(cell, val);
                 self.binds.insert(raw(b), cell);
                 Ok(())
             }
