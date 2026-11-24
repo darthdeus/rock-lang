@@ -6,10 +6,6 @@ const char* stone_scancode_label(const char* token);
 
 void stone_imgui_shutdown(void);
 
-// Sprite rendering system
-float stone_current_target_width(void);
-float stone_current_target_height(void);
-
 // Draw a fullscreen quad in NDC coordinates for post-processing
 void stone_draw_fullscreen_quad(void);
 void stone_set_fullscreen_uv_scale(float sx, float sy);
@@ -63,70 +59,8 @@ static const int STONE_CANVAS_RGBA16F = 1;
 static const int STONE_CANVAS_RGBA32F = 2;
 static const int STONE_CANVAS_R32I = 3;
 
-StoneCanvasHandle stone_create_canvas(int width, int height, int format, bool with_depth);
-void stone_destroy_canvas(StoneCanvasHandle handle);
-uint8_t stone_canvas_bound_as_target(StoneCanvasHandle handle);
-void stone_set_canvas(StoneCanvasHandle handle);
-void stone_set_canvas_active(StoneCanvasHandle handle, int w, int h);
-uint8_t stone_bind_canvas_texture_to_unit(StoneCanvasHandle handle, int unit);
-uint8_t stone_bind_canvas_depth_to_unit(StoneCanvasHandle handle, int unit);
-uint8_t stone_canvas_exists(StoneCanvasHandle handle);
-uint8_t stone_canvas_has_depth(StoneCanvasHandle handle);
-int stone_get_live_canvas_count(void);
-uint64_t stone_get_live_canvas_handle(int index);
-int stone_canvas_report(StoneCanvasHandle handle, int* width, int* height);
-uint32_t stone_get_canvas_texture(StoneCanvasHandle handle);
-void stone_set_viewport_rect(int x, int y, int w, int h);
-uint8_t stone_canvas_attach_id_target(StoneCanvasHandle color_handle, StoneCanvasHandle id_handle);
-uint8_t stone_canvas_attach_color_target(StoneCanvasHandle color_handle, StoneCanvasHandle target_handle, int slot);
-void stone_clear_canvas(float r, float g, float b, float a);
-void stone_clear_canvas_int(int draw_buffer, int value);
-void stone_set_present_viewport(bool active, int x, int y, int w, int h);
-uint8_t stone_canvas_save_png(StoneCanvasHandle handle, const char* path);
-int  stone_canvas_read_rgba8(StoneCanvasHandle handle, uint8_t* out, int capacity);
-uint64_t stone_canvas_capture_begin(uint64_t handle);
-int stone_canvas_capture_poll(uint64_t id, uint8_t* out, int capacity);
-uint8_t stone_canvas_capture_release(uint64_t id);
-uint8_t stone_canvas_capture_cancel(uint64_t id);
-uint8_t stone_canvas_upload_rgba32f(StoneCanvasHandle handle, const float* pixels, int count);
-int  stone_canvas_read_region_rgba32f(StoneCanvasHandle handle, int x, int y, int w, int h, float* out, int capacity);
-int stone_canvas_read_region_i32(StoneCanvasHandle handle, int x, int y, int w, int h, int32_t* out, int capacity);
-uint8_t stone_canvas_upload_rgba8(StoneCanvasHandle handle, const uint8_t* pixels, int byte_len);
-float stone_read_canvas_pixel(StoneCanvasHandle handle, int x, int y);
-float stone_read_canvas_pixel_channel(StoneCanvasHandle handle, int x, int y, int channel);
-int stone_read_canvas_nearest_id(StoneCanvasHandle handle, int x, int y, int side);
-float stone_read_depth_pixel(StoneCanvasHandle handle, int x, int y);
-void stone_read_window_rect(int x, int y, int w, int h, uint8_t* out);
-
-// Async pixel readback via double-buffered PBOs. Each slot
-// returns a value 1 frame stale. submit() issues glReadPixels into
-// one PBO; consume() maps the other (filled last frame). Call submit
-// when the canvas is quiescent (no pending writes) to get real async
-// behavior -- otherwise the driver serializes on pending writes and
-// the submit stalls. read() is a convenience = consume + submit for
-// callers whose canvas is quiescent at the single call site.
-uint64_t stone_pixel_readback_new(int is_depth);
-uint64_t stone_pixel_readback_area_new(int side);
-void     stone_pixel_readback_destroy(uint64_t id);
-void     stone_pixel_readback_submit(uint64_t id, StoneCanvasHandle canvas_handle, int x, int y);
-void     stone_pixel_readback_submit_area(uint64_t id, StoneCanvasHandle canvas_handle, int x, int y, int side);
-float    stone_pixel_readback_consume(uint64_t id);
-int      stone_pixel_readback_poll_id(uint64_t id);
-int      stone_pixel_readback_poll_rgba(uint64_t id, float* out, int capacity);
-int      stone_pixel_readback_in_flight(uint64_t id);
-int      stone_pixel_readback_answer_x(uint64_t id);
-int      stone_pixel_readback_answer_y(uint64_t id);
-uint8_t     stone_pixel_readback_reset_contents(uint64_t id);
-
 const char* stone_gl_blend_state(void);
 const char* stone_gl_write_state(void);
-
-uint8_t stone_canvas_active_is_creation(StoneCanvasHandle handle);
-int stone_canvas_active_w(StoneCanvasHandle handle);
-int stone_canvas_active_h(StoneCanvasHandle handle);
-int stone_canvas_capacity_w(StoneCanvasHandle handle);
-int stone_canvas_capacity_h(StoneCanvasHandle handle);
-uint8_t stone_canvas_resize(StoneCanvasHandle handle, int width, int height);
 
 // Screenshot system
 uint8_t stone_save_screenshot(const char* filepath, int width, int height, int max_size);
@@ -135,7 +69,6 @@ uint8_t stone_frame_stream_begin(const char* path);
 uint8_t stone_frame_stream_record(int width, int height);
 uint8_t stone_frame_stream_finish(int* out_frames, int* out_width, int* out_height);
 const char* stone_frame_stream_last_error(void);
-uint64_t stone_get_live_canvas_bytes(void);
 void stone_track_text_draw_call(void);
 
 // Shader system
@@ -193,15 +126,46 @@ int stone_native_handle_state(const char* class, uint64_t handle);
 const char* stone_native_id_accounting(void);
 
 // Generated by stone-rs/build.rs.
+uint8_t stone_bind_canvas_depth_to_unit(uint64_t handle, int unit);
+uint8_t stone_bind_canvas_texture_to_unit(uint64_t handle, int unit);
 void stone_bind_sampler(int unit, int mode, uint64_t image);
+int stone_canvas_active_h(uint64_t handle);
+uint8_t stone_canvas_active_is_creation(uint64_t handle);
+int stone_canvas_active_w(uint64_t handle);
+uint8_t stone_canvas_attach_color_target(uint64_t color_handle, uint64_t id_handle, int slot);
+uint8_t stone_canvas_attach_id_target(uint64_t color_handle, uint64_t id_handle);
+uint8_t stone_canvas_bound_as_target(uint64_t handle);
+int stone_canvas_capacity_h(uint64_t handle);
+int stone_canvas_capacity_w(uint64_t handle);
+uint64_t stone_canvas_capture_begin(uint64_t canvas_handle);
+uint8_t stone_canvas_capture_cancel(uint64_t id);
+int stone_canvas_capture_poll(uint64_t id, uint8_t* out, int capacity);
+uint8_t stone_canvas_capture_release(uint64_t id);
+uint8_t stone_canvas_exists(uint64_t handle);
+uint8_t stone_canvas_has_depth(uint64_t handle);
+int stone_canvas_read_region_i32(uint64_t handle, int x, int y, int w, int h, int* out, int capacity);
+int stone_canvas_read_region_rgba32f(uint64_t handle, int x, int y, int w, int h, float* out, int capacity);
+int stone_canvas_read_rgba8(uint64_t handle, uint8_t* out, int capacity);
+int stone_canvas_report(uint64_t handle, int* width, int* height);
+uint8_t stone_canvas_resize(uint64_t handle, int width, int height);
+uint8_t stone_canvas_save_png(uint64_t handle, const char* path);
+uint8_t stone_canvas_upload_rgba32f(uint64_t handle, const float* pixels, int count);
+uint8_t stone_canvas_upload_rgba8(uint64_t handle, const uint8_t* pixels, int byte_len);
+void stone_clear_canvas(float r, float g, float b, float a);
+void stone_clear_canvas_int(int draw_buffer, int value);
 void stone_clear_depth(float depth);
+uint64_t stone_create_canvas(int width, int height, int format, bool with_depth);
 uint64_t stone_create_cursor(const char* path, int hot_x, int hot_y);
 uint8_t stone_current_shader_bound(void);
+float stone_current_target_height(void);
+float stone_current_target_width(void);
+void stone_destroy_canvas(uint64_t handle);
 void stone_draw_fullscreen_rect(float u0, float v0, float u1, float v1);
 int stone_font_atlas_instance_count(unsigned int font_id);
 int64_t stone_font_data_len(unsigned int font_id);
 uint8_t stone_font_release_coverage(unsigned int font_id);
 void stone_free_cursor(uint64_t cursor_id);
+uint32_t stone_get_canvas_texture(uint64_t handle);
 uint64_t stone_get_font_atlas_instance_image_at(unsigned int font_id, int index);
 int stone_get_font_atlas_instance_pixel_size(unsigned int font_id, unsigned int index);
 uint8_t stone_get_font_atlas_size(unsigned int font_id, int* width, int* height);
@@ -215,6 +179,9 @@ int stone_get_font_slot_count(unsigned int font_id);
 uint8_t stone_get_font_unit_metrics(unsigned int font_id, float* out);
 void stone_get_global_mouse_position(int* x, int* y);
 uint8_t stone_get_glyph_unit_metrics(unsigned int font_id, int face, int char_code, float* out);
+uint64_t stone_get_live_canvas_bytes(void);
+int stone_get_live_canvas_count(void);
+uint64_t stone_get_live_canvas_handle(int index);
 void stone_get_mouse_position(int* x, int* y);
 uint8_t stone_gl_depth_write_enabled(void);
 uint32_t stone_gl_pass_state_begin(void);
@@ -227,19 +194,40 @@ void* stone_imgui_prepare_render(void);
 void stone_imgui_render(void);
 uint8_t stone_is_key_down(const char* key);
 uint8_t stone_pad_connected(void);
+int stone_pixel_readback_answer_x(uint64_t id);
+int stone_pixel_readback_answer_y(uint64_t id);
+uint64_t stone_pixel_readback_area_new(int max_side);
+float stone_pixel_readback_consume(uint64_t id);
+void stone_pixel_readback_destroy(uint64_t id);
+int stone_pixel_readback_in_flight(uint64_t id);
+uint64_t stone_pixel_readback_new(int is_depth);
+int stone_pixel_readback_poll_id(uint64_t id);
+int stone_pixel_readback_poll_rgba(uint64_t id, float* out, int capacity);
+uint8_t stone_pixel_readback_reset_contents(uint64_t id);
+void stone_pixel_readback_submit(uint64_t id, uint64_t canvas_handle, int x, int y);
+void stone_pixel_readback_submit_area(uint64_t id, uint64_t canvas_handle, int x, int y, int side);
+int stone_read_canvas_nearest_id(uint64_t canvas_handle, int x, int y, int side);
+float stone_read_canvas_pixel(uint64_t handle, int x, int y);
+float stone_read_canvas_pixel_channel(uint64_t handle, int x, int y, int channel);
+float stone_read_depth_pixel(uint64_t handle, int x, int y);
+void stone_read_window_rect(int x, int y, int w, int h, uint8_t* out);
 void stone_reset_cursor(void);
 void stone_restore_after_custom_draw(void);
 uint8_t stone_sampler_bound(int unit);
 int stone_scancode_value(const char* token);
 void stone_set_blend_mode_i(int mode);
+void stone_set_canvas(uint64_t handle);
+void stone_set_canvas_active(uint64_t handle, int w, int h);
 void stone_set_clear_color(float r, float g, float b, float a);
 void stone_set_color_mask(bool r, bool g, bool b, bool a);
 void stone_set_cursor(uint64_t cursor_id);
 void stone_set_depth_mode(const char* compare, bool write);
 void stone_set_draw_buffer_mask(int mask);
 void stone_set_gl_viewport(int x, int y, int w, int h);
+void stone_set_present_viewport(bool active, int x, int y, int w, int h);
 void stone_set_scissor(bool enabled, int x, int y, int w, int h);
 uint64_t stone_set_system_cursor(int cursor_type);
+void stone_set_viewport_rect(int x, int y, int w, int h);
 void stone_show_cursor(bool show);
 uint8_t stone_sprite_init(void);
 int stone_test_virtual_pad_attach(void);
