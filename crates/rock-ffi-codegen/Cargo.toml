@@ -1,0 +1,12 @@
+[package]
+name = "rock-ffi-codegen"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bone-semantic = { workspace = true }
+skull-mir = { workspace = true }
+skull-parser = { workspace = true }
+syn = { version = "3.0.9", features = ["full"] }

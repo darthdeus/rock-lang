@@ -1,9 +1,8 @@
-use super::{stone_event_layout, Layout, Module, STONE_WINDOW};
+use super::{Layout, Module, STONE_WINDOW};
 
 pub const STONE_ENGINE: Module = Module {
     package: "stone",
     library: "stone",
-    c_owned_layout: Some(stone_event_layout),
     opaque_pointers: &[STONE_WINDOW, ("StoneEvent", "crate::StoneEvent")],
     layouts: &[
         Layout {

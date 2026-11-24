@@ -26,6 +26,8 @@ fn check_generated(path: &Path, generated: String, out: &Path, stale: &mut Vec<S
     stale.push(format!("copy {} to {}", updated.display(), path.display()));
 }
 
+type CLayoutGenerator = fn(&str) -> Result<String, String>;
+
 fn package_ffi(
     module: &ffi_codegen::Module,
     root: &str,
@@ -33,6 +35,7 @@ fn package_ffi(
     bindings: &str,
     sources: &[(&str, &str)],
     layout_files: Option<(&str, &str)>,
+    c_owned_layout: Option<CLayoutGenerator>,
 ) {
     use ffi_codegen::GENERATED;
 
@@ -98,7 +101,12 @@ fn package_ffi(
             .layouts(layout_source, &read(&source))
             .unwrap_or_else(|e| panic!("{} layout: {e}", module.package));
         layouts = rust;
-        check_generated(&layout_test, tests, &out, &mut stale);
+        check_generated(
+            &layout_test,
+            format!("{GENERATED}{tests}"),
+            &out,
+            &mut stale,
+        );
         assert!(
             stale.is_empty(),
             "stale {} layouts:\n{}",
@@ -108,8 +116,7 @@ fn package_ffi(
     }
 
     let file = out.join("ffi.rs");
-    let c_layout = module
-        .c_owned_layout
+    let c_layout = c_owned_layout
         .map(|generate| {
             generate(authored).unwrap_or_else(|e| panic!("{} layout: {e}", module.package))
         })
@@ -144,6 +151,7 @@ fn main() {
                 "bindings.rock",
                 STONE_NATIVE_SOURCES,
                 Some(("wire_layouts.rock", "tests/ffi_layouts.rock")),
+                None,
             );
             package_ffi(
                 &STONE_ENGINE,
@@ -152,6 +160,7 @@ fn main() {
                 "engine/runtime_ffi.rock",
                 STONE_ENGINE_SOURCES,
                 STONE_ENGINE_LAYOUT_FILES,
+                Some(ffi_codegen::stone_event_layout),
             );
             package_ffi(
                 &STONE_RENDERING,
@@ -160,6 +169,7 @@ fn main() {
                 "engine/rendering_ffi.rock",
                 STONE_RENDERING_SOURCES,
                 STONE_RENDERING_LAYOUT_FILES,
+                None,
             );
         });
 
