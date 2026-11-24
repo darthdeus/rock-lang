@@ -384,3 +384,26 @@ fn generation_reads_top_level_exports_only() {
     assert!(generated.cdef.ends_with("float example(float sample);\n"));
     assert_eq!(generated.rock.matches("extern(ffi,").count(), 1);
 }
+
+#[test]
+fn a_void_pointer_can_have_a_typed_rock_view() {
+    let source = r#"
+        /// rock-ffi stone-rendering view:data=Vertex
+        #[no_mangle]
+        pub extern "C" fn example(data: *const c_void, stride: c_int) -> bool { true }
+    "#;
+    let module = ffi_codegen::rendering::STONE_RENDERING;
+    let bindings = module.bindings([("probe", source)]).unwrap();
+    assert_eq!(
+        bindings.cdef,
+        "uint8_t example(const void* data, int stride);\n"
+    );
+    assert_eq!(
+        bindings.rock,
+        "pub extern(ffi, \"stone\") fn example(data: Ptr<Vertex>, stride: int) -> bool\n"
+    );
+    assert!(bindings.rust.contains("*const ::std::ffi::c_void"));
+    let changed = source.replace("*const c_void", "*const f32");
+    let result = module.bindings([("probe", changed.as_str())]);
+    assert!(matches!(result, Err(error) if error.contains("view requires a void pointer")));
+}

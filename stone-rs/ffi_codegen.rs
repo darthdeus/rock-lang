@@ -448,6 +448,12 @@ impl<'a> ExportOptions<'a> {
     }
 
     fn project(&mut self, name: &str, wire: &mut Wire) -> Result<(), String> {
+        if let Some(view) = self.take(&format!("view:{name}")) {
+            if !matches!(wire.c.as_str(), "void*" | "const void*") {
+                return Err(format!("{name}: view requires a void pointer"));
+            }
+            wire.rock = format!("Ptr<{view}>");
+        }
         if self.take(&format!("nullable:{name}")).is_some() {
             if wire.c != "const char*" {
                 return Err(format!("{name}: nullable requires a const C string"));
