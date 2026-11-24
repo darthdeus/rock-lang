@@ -4,7 +4,7 @@ pub const STONE_ENGINE: Module = Module {
     package: "stone",
     library: "stone",
     c_owned_layout: Some(stone_event_layout),
-    opaque_pointers: &[STONE_WINDOW],
+    opaque_pointers: &[STONE_WINDOW, ("StoneEvent", "crate::StoneEvent")],
     layouts: &[
         Layout {
             rock: "GraphicsStats",

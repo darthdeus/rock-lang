@@ -1681,6 +1681,7 @@ fn report_created_window(
     )
 }
 
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_poll_event(event: *mut StoneEvent) -> bool {
     if event.is_null() {

@@ -42,7 +42,6 @@ typedef struct {
 void stone_hide_window(void);
 void stone_show_window(void);
 unsigned long long stone_gl_swap_count(void);
-uint8_t stone_poll_event(StoneEvent* event);
 
 // Window functions
 
@@ -232,6 +231,7 @@ uint64_t stone_new_image_from_data(uint64_t data_handle, int filter_mode);
 void stone_play_music(uint64_t handle);
 uint64_t stone_play_sound(uint64_t handle, uint32_t bus, float volume, float speed, float decay, bool looped, bool spatial, float pan);
 int stone_poll_changed_assets(void);
+uint8_t stone_poll_event(StoneEvent* event);
 uint8_t stone_probe_image_size(const char* path, int* width, int* height);
 void stone_quit(void);
 uint8_t stone_quit_requested(void);
