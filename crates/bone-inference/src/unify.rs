@@ -189,7 +189,12 @@ pub fn unify(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<(), Comp
 }
 
 pub(crate) fn resolve(gamma: &mut Gamma, ty: TyId, span: Span) -> TyId {
-    let texp = *gamma.get(ty);
+    // The interface lowerer rejects type holes. Only body-local types can
+    // contain inference variables, and static children share their arena.
+    let TyId::Local(idx) = ty else {
+        return ty;
+    };
+    let texp = gamma.out.ty_arena[idx];
     match texp {
         TypeExpr::Infer(var_id, _) => match gamma.out.substitutions.get(var_id) {
             Some(next) => {
