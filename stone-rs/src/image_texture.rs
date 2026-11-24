@@ -90,11 +90,13 @@ pub(crate) fn reset_image_frame_stats() {
     FRAME_IMAGE_LOAD_STATS.with(|stats| *stats.borrow_mut() = ImageLoadStats::default());
 }
 
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_reset_image_profile_stats() {
     PROFILE_IMAGE_LOAD_STATS.with(|stats| *stats.borrow_mut() = ImageLoadStats::default());
 }
 
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_reset_image_profile_stats_to_frame() {
     let frame = FRAME_IMAGE_LOAD_STATS.with(|stats| *stats.borrow());
@@ -684,6 +686,9 @@ const LOAD_DEFERRED: i32 = 2;
 const LOAD_DEPTH_RG8: i32 = 4;
 const LOAD_MATERIAL_RG8: i32 = 8;
 
+/// Positive manifest dimensions let Deferred loads read entirely on the worker;
+/// the decode must match them. Zero/zero keeps header admission.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_load_image(
     path: *const c_char,
@@ -935,6 +940,9 @@ pub(crate) fn refresh_image_mipmaps(handle: u64, texture: glow::Texture) {
     });
 }
 
+/// Publishes Required images, waiting for their decodes. A loaded handle and size
+/// do not imply sampleable pixels: publication must precede any draw or readback.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_flush_image_uploads() {
     if let Some((calls, bytes, wait_us, upload_us)) = publish_uploads(PublicationSite::Flush) {
@@ -966,16 +974,19 @@ fn publish_uploads(site: PublicationSite) -> Option<(usize, usize, c_int, c_int)
     Some((calls, bytes, wait_us, upload_us))
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_set_frame_image_upload_budget(bytes: c_int) {
     crate::image_publication::set_budget(bytes.max(0) as usize);
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_image_uploads_pending() -> c_int {
     saturating_count(crate::image_publication::pending())
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_service_image_uploads() -> c_int {
     if let Some((calls, bytes, _, upload_us)) = publish_uploads(PublicationSite::Pump) {
@@ -1060,6 +1071,7 @@ fn publish_image_pixels(
     Some(fresh)
 }
 
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_image_is_stub(handle: u64) -> bool {
     with_image(handle, |image| image.stub_path.is_some()).unwrap_or(false)
@@ -1067,6 +1079,9 @@ pub extern "C" fn stone_image_is_stub(handle: u64) -> bool {
 
 /// Diagnostic GL storage size, or zeros for an unknown handle. Draws must use
 /// logical dimensions so texture caps cannot change layout or UVs.
+/// What GL actually holds, which `STONE_IMAGE_MAX_SIDE` may have reduced below
+/// the logical size above. A DIAGNOSTIC for fixtures; no draw may branch on it.
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_image_storage_size(handle: u64, width: *mut c_int, height: *mut c_int) {
     let (w, h) = with_image(handle, LoadedImage::stored_size).unwrap_or((0, 0));
@@ -1074,6 +1089,7 @@ pub extern "C" fn stone_image_storage_size(handle: u64, width: *mut c_int, heigh
     crate::write_out(height, h as c_int);
 }
 
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_probe_image_size(
     path: *const c_char,
@@ -1089,6 +1105,7 @@ pub extern "C" fn stone_probe_image_size(
     size.is_some()
 }
 
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_get_image_size(handle: u64, width: *mut c_int, height: *mut c_int) {
     with_image(handle, |img| {
@@ -1097,6 +1114,7 @@ pub extern "C" fn stone_get_image_size(handle: u64, width: *mut c_int, height: *
     });
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_image_set_wrap(handle: u64, repeat: bool) -> bool {
     let texture = with_image(handle, |img| img.texture);
@@ -1152,6 +1170,10 @@ pub(crate) fn image_write_target_stored(
 
 /// Read 0xRRGGBBAA, or -1 for an invalid handle or coordinate.
 /// Desktop GL only: `glGetTexImage` is unavailable on GLES.
+/// One texel of an image's texture as 0xRRGGBBAA, or -1 for an unknown handle
+/// or an out-of-range coordinate. A PROBE: it reads through glGetTexImage,
+/// which GLES does not have, and nothing in the engine calls it.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_image_read_texel(handle: u64, x: c_int, y: c_int) -> i64 {
     let Some((texture, (width, height))) =
@@ -1184,6 +1206,7 @@ pub extern "C" fn stone_image_read_texel(handle: u64, x: c_int, y: c_int) -> i64
         | i64::from(pixels[i + 3])
 }
 
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_image_exists(handle: u64) -> bool {
     if handle == 0 {
@@ -1194,6 +1217,7 @@ pub extern "C" fn stone_image_exists(handle: u64) -> bool {
 
 /// Whether the handle's deferred decode failed to produce pixels. False for
 /// unknown handles and for every synchronously loaded image.
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_image_decode_failed(handle: u64) -> bool {
     image_decode_failed(handle)
@@ -1201,11 +1225,13 @@ pub extern "C" fn stone_image_decode_failed(handle: u64) -> bool {
 
 /// Cumulative failed deferred decodes. Residency snapshots this at its frame
 /// and profile boundaries and reports the deltas.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_image_decode_failed_count() -> u64 {
     FAILED_DECODE_COUNT.with(|c| *c.borrow())
 }
 
+/// rock-ffi stone private
 #[no_mangle]
 pub extern "C" fn stone_bind_image_texture_to_unit(handle: u64, unit: c_int) -> bool {
     let tex = sample_image_texture_for_bind(handle);
@@ -1238,6 +1264,7 @@ pub(crate) fn sample_image_texture_for_bind(handle: u64) -> Option<u32> {
     sample_image_texture(handle)
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_get_image_texture(handle: u64) -> u32 {
     sample_image_texture(handle).unwrap_or(0)
@@ -1265,6 +1292,7 @@ pub(crate) fn sample_image_texture(handle: u64) -> Option<u32> {
 }
 
 /// Free a previously stone_load_image'd handle and its GL texture.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_unload_image(handle: u64) {
     crate::image_publication::retire(handle);
@@ -1287,6 +1315,7 @@ pub(crate) fn unload_all() {
 
 /// Reload pixels while preserving the handle, GL texture and filter/wrap state.
 /// Returns false for an unknown handle or failed decode.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_reload_image(handle: u64, path: *const c_char) -> bool {
     if handle == 0 || path.is_null() {
@@ -1338,6 +1367,7 @@ pub extern "C" fn stone_reload_image(handle: u64, path: *const c_char) -> bool {
     true
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_get_white_image() -> u64 {
     WHITE_IMAGE.with(|wi| {
@@ -1414,16 +1444,23 @@ pub(crate) fn live_texture_bytes() -> u64 {
 
 /// GL bytes including mipmaps, or zero for an unknown handle. Logical size times
 /// four would overcount R8 and RG8 textures.
+/// Honest GL bytes for one live image, including its mip chain when present.
+/// The image census reads this per classified handle; multiplying
+/// stone_get_image_size by 4 overcounts R8 font aliases. The broad live total
+/// also includes canvas attachments.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_get_image_byte_len(handle: u64) -> u64 {
     with_image(handle, image_byte_len).unwrap_or(0)
 }
 
+/// rock-ffi stone c-bool
 #[no_mangle]
 pub extern "C" fn stone_supports_bc1() -> bool {
     with_gl(|gl| gl.supports_bc1()).unwrap_or(false)
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_get_image_format(handle: u64) -> c_int {
     with_image(handle, |image| image.format.report_code()).unwrap_or(-1)
