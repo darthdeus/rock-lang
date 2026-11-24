@@ -172,3 +172,23 @@ fn test_nested_generic_nullable() {
     let n: Wrapper<int> = Wrapper { inner: null }
     print(n.inner?.val ?? 0)
 }
+
+// A literal checked against `T?` type arguments takes them, so a `nobox`
+// payload is converted to its nullable layout where it is built.
+nobox value NPoint { x: float, y: float }
+enum NPick<T> { Got(T), Missing }
+
+fn npoint_vec(p: NPoint) -> [NPoint?] { return [p, null] }
+fn npoint_pair(p: NPoint) -> (NPoint?, int) { return (p, 1) }
+fn npoint_pick(p: NPoint) -> NPick<NPoint?> { return NPick::Got(p) }
+fn npoint_thunk(p: NPoint) -> () -> NPoint? { return () => p }
+fn widened(f: () -> string) -> () -> string? { return f }
+
+@test(output = "1 nil 2 1 1 2 hi")
+fn literals_take_nullable_type_arguments() {
+    let p = NPoint { x: 1.0, y: 2.0 }
+    let v = npoint_vec(p)
+    let (first, k) = npoint_pair(p)
+    let picked = match npoint_pick(p) { NPick::Got(q) => q?.x ?? -1.0, NPick::Missing => -2.0 }
+    print("{v[0]?.x ?? -1.0} {v[1]?.x} {first?.y ?? -1.0} {k} {picked} {npoint_thunk(p)()?.y ?? -1.0} {widened(() => \"hi\")()}")
+}

@@ -15,7 +15,8 @@ return _G.__wide_strided_weak[1] == nil
 fn seed(values: [Holder<[int]?>]) {
     let items = [7]
     watch(items)
-    values.push(Holder { items, a: 1, b: 2, c: 3, d: 4 })
+    let row: Holder<[int]?> = Holder { items, a: 1, b: 2, c: 3, d: 4 }
+    values.push(row)
 }
 
 fn discard(values: [Holder<[int]?>]) { let _ = values.pop() }

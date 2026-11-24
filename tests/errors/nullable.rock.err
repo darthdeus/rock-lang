@@ -401,3 +401,44 @@ fn main() {
     //! expect: argument of `unwrap` is not nullable -- the `unwrap` is redundant
     print(p.unwrap().x)
 }
+
+//=== PROLOGUE: nullable_type_args ===
+// Nullability is a top-level coercion only: inside a type argument `N` and
+// `N?` differ, and for a `nobox` value their layouts differ too.
+nobox value N { x: float, y: float }
+enum R<T> { Ok(T), Err(string) }
+
+//=== TEST CASE: nullable_vec_element_is_invariant_Generic ===
+//! expect: type mismatch: expected `N?`, found `N`
+//--- USE: nullable_type_args ---
+fn as_vec(n: N) -> [N?] {
+    let r = [n]
+    return r
+}
+
+//=== TEST CASE: nullable_tuple_element_is_invariant_Generic ===
+//! expect: type mismatch: expected `N?`, found `N`
+//--- USE: nullable_type_args ---
+fn as_tuple(n: N) -> (N?, int) {
+    let r = (n, 1)
+    return r
+}
+
+//=== TEST CASE: nullable_enum_argument_is_invariant_Generic ===
+//! expect: type mismatch: expected `N?`, found `N`
+//--- USE: nullable_type_args ---
+fn as_result(n: N) -> R<N?> {
+    let r = R::Ok(n)
+    return r
+}
+
+//=== TEST CASE: nullable_parameter_of_function_value_is_invariant_Generic ===
+//! expect: type mismatch: expected `int?`, found `int`
+fn takes_int(x: int) -> int { return x }
+fn main() {
+    let f: (int?) -> int = takes_int
+}
+
+//=== TEST CASE: nullable_map_value_is_invariant_Generic ===
+//! expect: type mismatch: expected `string?`, found `string`
+fn widen(m: Map<string, string>) -> Map<string, string?> { return m }

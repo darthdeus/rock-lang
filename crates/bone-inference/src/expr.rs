@@ -1086,65 +1086,7 @@ pub(crate) fn infer_expr_used(
             }
         }
 
-        Expr::StructLiteral {
-            name,
-            fields,
-            bases,
-        } => {
-            let name = *name;
-            let fields = *fields;
-            let bases = *bases;
-
-            let sid = resolve_struct(gamma, name).ok_or_else(|| {
-                CompilerError::new_with_label(expr_span, format!("unknown struct `{}`", name))
-            })?;
-
-            let def = &gamma.workspace.module(sid.module).structs[sid.def];
-
-            let (subs, arg_tys) = gamma.instantiate_generics(&def.generics, expr_span)?;
-            let provided: Vec<(Ustr, Idx<Expr>)> = fields
-                .into_iter()
-                .map(|fi| {
-                    let f = c.body.struct_lit_field_arena[fi];
-                    (f.name, f.value)
-                })
-                .collect();
-
-            let what = format!("struct `{}`", name);
-
-            let ctor = if bone_core::modules::is_intrinsic_key(name, "Vec") {
-                TypeCtor::Array
-            } else {
-                TypeCtor::Nominal(name)
-            };
-            let result_ty = gamma.app_with_ctor(ctor, &arg_tys, expr_span);
-
-            // Each base supplies all unwritten fields, so two bases would collide.
-            let has_base = !bases.is_empty();
-            if bases.len() > 1 {
-                comp_error!(
-                    expr_span,
-                    "a functional-update literal takes at most one `..base`"
-                );
-            }
-            for b in bases {
-                check_expr(c, gamma, b, result_ty, c.body.expr_spans[b])?;
-            }
-
-            check_named_fields(
-                c,
-                gamma,
-                Some(name),
-                &def.fields,
-                &provided,
-                &subs,
-                expr_span,
-                &what,
-                has_base,
-            )?;
-
-            result_ty
-        }
+        Expr::StructLiteral { .. } => infer_struct_literal(c, gamma, e, None)?,
 
         Expr::FieldAccess { base, field } => {
             let (base, field) = (*base, *field);
@@ -1971,10 +1913,34 @@ pub(crate) fn check_expr(
         }
     }
 
-    if matches!(c.body.expr_arena[e], Expr::EnumVariant { .. })
-        && !gamma.out.expr_types.contains_idx(e)
+    if let Expr::Tuple(items) = c.body.expr_arena[e] {
+        let exp_r = resolve(gamma, expected, span);
+        if let TypeExpr::Tuple { elements } = *gamma.get(exp_r)
+            && elements.len() == items.len()
+        {
+            for (item, elem) in items.into_iter().zip(elements) {
+                check_expr(
+                    c,
+                    gamma,
+                    item,
+                    exp_r.with_idx(elem),
+                    c.body.expr_spans[item],
+                )?;
+            }
+            gamma.assign_expr_type(c, e, exp_r)?;
+            return Ok(());
+        }
+    }
+
+    if matches!(
+        c.body.expr_arena[e],
+        Expr::EnumVariant { .. } | Expr::StructLiteral { .. }
+    ) && !gamma.out.expr_types.contains_idx(e)
     {
-        let ty = infer_enum_variant(c, gamma, e, Some(expected))?;
+        let ty = match c.body.expr_arena[e] {
+            Expr::EnumVariant { .. } => infer_enum_variant(c, gamma, e, Some(expected))?,
+            _ => infer_struct_literal(c, gamma, e, Some(expected))?,
+        };
         coerce(gamma, ty, expected, span)?;
         gamma.assign_expr_type(c, e, ty)?;
         return Ok(());
@@ -2381,6 +2347,105 @@ pub(crate) fn coroutine_yrn(
     }
 }
 
+fn infer_struct_literal(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    e: Idx<Expr>,
+    expected: Option<TyId>,
+) -> Result<TyId, CompilerError> {
+    let expr_span = c.body.expr_spans[e];
+    let Expr::StructLiteral {
+        name,
+        fields,
+        bases,
+    } = c.body.expr_arena[e]
+    else {
+        unreachable!("infer_struct_literal on a non-struct-literal expression");
+    };
+
+    let sid = resolve_struct(gamma, name).ok_or_else(|| {
+        CompilerError::new_with_label(expr_span, format!("unknown struct `{}`", name))
+    })?;
+
+    let def = &gamma.workspace.module(sid.module).structs[sid.def];
+
+    let (subs, arg_tys) = gamma.instantiate_generics(&def.generics, expr_span)?;
+    let provided: Vec<(Ustr, Idx<Expr>)> = fields
+        .into_iter()
+        .map(|fi| {
+            let f = c.body.struct_lit_field_arena[fi];
+            (f.name, f.value)
+        })
+        .collect();
+
+    let what = format!("struct `{}`", name);
+
+    let ctor = if bone_core::modules::is_intrinsic_key(name, "Vec") {
+        TypeCtor::Array
+    } else {
+        TypeCtor::Nominal(name)
+    };
+    adopt_expected_type_args(gamma, expected, &arg_tys, expr_span, |g, expected_ctor| {
+        match expected_ctor {
+            TypeCtor::Nominal(n) => resolve_struct(g, n) == Some(sid),
+            _ => expected_ctor == ctor,
+        }
+    })?;
+    let result_ty = gamma.app_with_ctor(ctor, &arg_tys, expr_span);
+
+    // Each base supplies all unwritten fields, so two bases would collide.
+    let has_base = !bases.is_empty();
+    if bases.len() > 1 {
+        comp_error!(
+            expr_span,
+            "a functional-update literal takes at most one `..base`"
+        );
+    }
+    for b in bases {
+        check_expr(c, gamma, b, result_ty, c.body.expr_spans[b])?;
+    }
+
+    check_named_fields(
+        c,
+        gamma,
+        Some(name),
+        &def.fields,
+        &provided,
+        &subs,
+        expr_span,
+        &what,
+        has_base,
+    )?;
+
+    Ok(result_ty)
+}
+
+/// A generic literal checked against an expected application of its own
+/// type takes the expected type arguments, so its payload coerces instead of
+/// fixing arguments whose layout differs from the destination's.
+fn adopt_expected_type_args(
+    gamma: &mut Gamma,
+    expected: Option<TyId>,
+    arg_tys: &[TyId],
+    span: Span,
+    same_def: impl Fn(&Gamma, TypeCtor) -> bool,
+) -> Result<(), CompilerError> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let expected = peel_nullable(gamma, expected, span);
+    let TypeExpr::App { ctor, params } = *gamma.get(expected) else {
+        return Ok(());
+    };
+    if params.len() != arg_tys.len() || !same_def(gamma, ctor) {
+        return Ok(());
+    }
+    for (&fresh, param) in arg_tys.iter().zip(params) {
+        unify(gamma, fresh, expected.with_idx(param), span)?;
+    }
+    Ok(())
+}
+
 /// A generic variant checked against an expected application takes the
 /// expected type arguments, so `R::Ok(n)` returned as `R<N?>` is an `R<N?>`
 /// whose payload coerces, not an `R<N>` with a different layout.
@@ -2406,23 +2471,13 @@ fn infer_enum_variant(
 
     let def = &gamma.workspace.module(eid.module).enums[eid.def];
     let (subs, arg_tys) = gamma.instantiate_generics(&def.generics, expr_span)?;
-    if let Some(expected) = expected {
-        let mut expected = resolve(gamma, expected, expr_span);
-        if let TypeExpr::Nullable(inner) = *gamma.get(expected) {
-            expected = resolve(gamma, expected.with_idx(inner), expr_span);
-        }
-        if let TypeExpr::App {
-            ctor: TypeCtor::Nominal(name),
-            params,
-        } = *gamma.get(expected)
-            && resolve_enum(gamma, name) == Some(eid)
-            && params.len() == arg_tys.len()
-        {
-            for (&fresh, param) in arg_tys.iter().zip(params) {
-                unify(gamma, fresh, expected.with_idx(param), expr_span)?;
-            }
-        }
-    }
+    adopt_expected_type_args(
+        gamma,
+        expected,
+        &arg_tys,
+        expr_span,
+        |g, ctor| matches!(ctor, TypeCtor::Nominal(n) if resolve_enum(g, n) == Some(eid)),
+    )?;
 
     let vdef = def
         .variants

@@ -124,7 +124,6 @@ pub fn unify(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<(), Comp
         (TypeExpr::Nullable(inner), TypeExpr::Nullable(other)) => {
             return unify(gamma, a.with_idx(inner), b.with_idx(other), span);
         }
-        (_, TypeExpr::Nullable(inner)) => return unify(gamma, a, b.with_idx(inner), span),
         (
             TypeExpr::App { ctor, params },
             TypeExpr::App {
@@ -512,6 +511,30 @@ fn coerce_impl(
         };
 
         return coerce_impl(gamma, from_inner, to_inner, span, contextual_lambda);
+    }
+
+    // A function returning `T` stands in for one returning `T?`; nobox
+    // returns, whose layouts differ, were rejected above for stored functions.
+    if let (
+        TypeExpr::Function { params, ret },
+        TypeExpr::Function {
+            params: to_params,
+            ret: to_ret,
+        },
+    ) = (*gamma.get(from_r), *gamma.get(to_r))
+        && params.len() == to_params.len()
+    {
+        for (param, to_param) in params.zip(to_params) {
+            unify(gamma, from_r.with_idx(param), to_r.with_idx(to_param), span)?;
+        }
+        let ret = resolve(gamma, from_r.with_idx(ret), span);
+        let mut to_ret = resolve(gamma, to_r.with_idx(to_ret), span);
+        if let TypeExpr::Nullable(inner) = *gamma.get(to_ret)
+            && !matches!(gamma.get(ret), TypeExpr::Nullable(_) | TypeExpr::Infer(..))
+        {
+            to_ret = to_ret.with_idx(inner);
+        }
+        return unify(gamma, ret, to_ret, span);
     }
 
     unify(gamma, from_r, to_r, span)
