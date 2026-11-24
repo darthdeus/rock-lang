@@ -399,6 +399,7 @@ function __rock_nb_move(dst, dst_start, src, src_start, count)
   __rock_nb_crt.memmove(dst + dst_start, first, bytes)
 end
 local __rock_nb_elems = {}
+local __rock_nb_array_bytes = setmetatable({}, { __mode = "k" })
 -- ffi.gc keeps a callback alive until its buffers are finalized. Weak values
 -- let unused sizes disappear without making their buffers reachable.
 local __rock_nb_finalizers = setmetatable({}, { __mode = "v" })
@@ -415,12 +416,16 @@ function __rock_nb_alloc(ctype, n)
   local e = __rock_nb_elems[ctype]
   if not e then
     local array = ffi.typeof(ctype .. "[?]")
-    e = { size = ffi.sizeof(ctype), array = array, ptr = ffi.typeof(ctype .. "*"), key = tostring(array) }
+    e = { size = ffi.sizeof(ctype), array = array, ptr = ffi.typeof(ctype .. "*"), key = tonumber(array) }
     __rock_nb_elems[ctype] = e
   end
   -- Keep the byte count out of the small-to-large exit snapshot: one extra
   -- inherited float can exhaust x86 side-trace register coalescing.
-  if not (n * e.size >= __ROCK_NB_OFFHEAP_MIN) then return e.array(n) end
+  if not (n * e.size >= __ROCK_NB_OFFHEAP_MIN) then
+    local array = e.array(n)
+    __rock_nb_array_bytes[array] = math.max(math.floor(n), 0) * e.size
+    return array
+  end
   local bytes = n * e.size
   local stats = __ROCK_NB_OFFHEAP_STATS
   stats.since_cycle = stats.allocated_bytes - stats.credited_bytes + bytes
@@ -467,9 +472,10 @@ function __rock_nb_storage_of(x)
   if off then
     return reg and reg[off.key] or { ctype = off.ctype, elem_size = off.elem_size, views = {} }, off.bytes
   end
-  local ok, key = pcall(function() return tostring(ffi.typeof(x)) end)
-  local desc = ok and reg and reg[key]
-  if desc then return desc, ffi.sizeof(x) end
+  local ok, ct = pcall(ffi.typeof, x)
+  local desc = ok and reg and reg[tonumber(ct)]
+  -- LuaJIT cannot record sizeof on an arbitrary variable-length array.
+  if desc then return desc, __rock_nb_array_bytes[x] or ffi.sizeof(x) end
   return nil
 end
 "#;
