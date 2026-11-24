@@ -322,6 +322,9 @@ mod engine_ffi {
 }
 use engine_ffi::STONE_TEXT_INPUT_BYTES;
 pub use engine_ffi::{GraphicsStats, StoneEvent};
+mod rendering_ffi {
+    include!(concat!(env!("OUT_DIR"), "/stone-rendering/ffi.rs"));
+}
 
 mod relight_jobs;
 mod screenshot;
@@ -334,6 +337,7 @@ pub(crate) use image_texture::{
     IMAGES, WHITE_IMAGE,
 };
 mod canvas;
+pub use canvas::stone_get_live_canvas_bytes;
 #[cfg(target_os = "macos")]
 mod display_pacer;
 mod gl_state;
@@ -350,6 +354,7 @@ mod sprite;
 mod stream_buffer;
 mod system_report;
 mod text;
+pub use text::stone_track_text_draw_call;
 mod ui_submission_probe;
 mod uniform_block;
 pub mod window_placement;
@@ -2124,6 +2129,18 @@ fn activate_window_impl(window: &mut StoneWindow) {
 
 /// GL errors since process start, or 0 in release builds.
 /// u32 avoids boxed uint64_t cdata in LuaJIT.
+/// After swap, pull the driver's vblank wait out of CPU timing spans.
+#[no_mangle]
+pub extern "C" fn stone_gl_finish() {
+    with_gl(|gl| unsafe { gl.finish() });
+}
+
+/// Flush submits without waiting; finish also waits for GPU or display work.
+#[no_mangle]
+pub extern "C" fn stone_gl_flush() {
+    with_gl(|gl| unsafe { gl.flush() });
+}
+
 #[no_mangle]
 pub extern "C" fn stone_gl_error_count() -> u32 {
     stone_gl::GL_ERROR_COUNT.load(std::sync::atomic::Ordering::Relaxed) as u32
@@ -3076,11 +3093,6 @@ pub(crate) fn track_text_draw_call() {
     });
 }
 
-#[no_mangle]
-pub extern "C" fn stone_track_text_draw_call() {
-    track_text_draw_call();
-}
-
 pub(crate) fn track_canvas_switch() {
     FRAME_STATS.with(|fs| {
         fs.borrow_mut().canvas_switches += 1;
@@ -3165,11 +3177,6 @@ pub extern "C" fn stone_get_live_image_bytes() -> u64 {
 #[no_mangle]
 pub extern "C" fn stone_get_live_mip_bytes() -> u64 {
     live_mip_bytes()
-}
-
-#[no_mangle]
-pub extern "C" fn stone_get_live_canvas_bytes() -> u64 {
-    canvas::live_canvas_bytes()
 }
 
 #[no_mangle]

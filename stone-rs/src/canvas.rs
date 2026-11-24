@@ -259,6 +259,11 @@ pub(crate) fn current_target_size() -> (f32, f32) {
 // Derive the ortho from the currently bound target. An FFI struct-by-value
 // return can abort a LuaJIT trace, so expose two scalar getters.
 #[no_mangle]
+pub extern "C" fn stone_get_live_canvas_bytes() -> u64 {
+    live_canvas_bytes()
+}
+
+#[no_mangle]
 pub extern "C" fn stone_current_target_width() -> c_float {
     current_target_size().0
 }

@@ -304,6 +304,11 @@ fn c_str<'a>(ptr: *const c_char) -> &'a str {
 }
 
 #[no_mangle]
+pub extern "C" fn stone_track_text_draw_call() {
+    crate::track_text_draw_call();
+}
+
+#[no_mangle]
 pub extern "C" fn stone_text_init() -> bool {
     shutdown();
     if !crate::sprite::stone_sprite_init() {

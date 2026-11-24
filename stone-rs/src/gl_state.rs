@@ -3,18 +3,6 @@ use std::ffi::{c_char, c_float, c_int, CStr};
 
 use crate::{log_once, with_gl, DebugGl, IMAGES};
 
-/// After swap, pull the driver's vblank wait out of CPU timing spans.
-#[no_mangle]
-pub extern "C" fn stone_gl_finish() {
-    with_gl(|gl| unsafe { gl.finish() });
-}
-
-/// Flush submits without waiting; finish also waits for GPU or display work.
-#[no_mangle]
-pub extern "C" fn stone_gl_flush() {
-    with_gl(|gl| unsafe { gl.flush() });
-}
-
 /// 0 = NEAREST, 1 = LINEAR, 2 = stable bilinear mip. Keep in sync with IMAGE_FILTER_* in
 /// stone/engine/lib.rock and the web `__sw_gl_filter`.
 pub(crate) fn gl_filter_for(filter_mode: i32) -> Option<u32> {

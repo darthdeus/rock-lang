@@ -186,7 +186,7 @@ fn a_byte_is_a_rock_integer_without_the_boolean_projection() {
 
 #[test]
 fn engine_stats_prototypes_are_generated() {
-    let header = include_str!("../../packages/stone/engine/stone.h");
+    let header = include_str!("../../packages/stone/engine/runtime_ffi.h");
     let (_, generated) = header
         .split_once(ffi_codegen::GENERATED)
         .expect("generated engine declarations");
@@ -207,7 +207,7 @@ fn graphics_stats_requires_a_writable_result_slot() {
         "fn stone_get_graphics_stats(stats: *mut GraphicsStats)",
         "fn stone_get_graphics_stats(stats: *const GraphicsStats)",
     );
-    let problem = ffi_codegen::STONE_ENGINE
+    let problem = ffi_codegen::runtime::STONE_ENGINE
         .bindings([("", changed.as_str())])
         .err()
         .unwrap();
@@ -224,10 +224,140 @@ fn stone_event_layout_comes_from_the_c_header() {
 
 #[test]
 fn stone_event_text_extent_follows_the_c_layout() {
-    let header = include_str!("../../packages/stone/engine/stone.h");
+    let header = include_str!("../../packages/stone/engine/runtime_ffi.h");
     assert!(header.contains("char text[32];"));
     let changed = header.replace("char text[32];", "char text[48];");
-    let generate = ffi_codegen::STONE_ENGINE.c_owned_layout.unwrap();
+    let generate = ffi_codegen::runtime::STONE_ENGINE.c_owned_layout.unwrap();
     let generated = generate(&changed).unwrap();
     assert!(generated.contains("const STONE_TEXT_INPUT_BYTES: usize = 48;"));
+}
+
+#[test]
+fn engine_projections_preserve_the_rust_wire_types() {
+    for (options, signature, c, rock, mismatch, error) in [
+        (
+            "",
+            "(text: *const c_char)",
+            "void example(const char* text);",
+            "pub extern(ffi, \"stone\") fn example(text: string)",
+            "*mut c_char",
+            "no Rock pointer mapping",
+        ),
+        (
+            "nullable:text",
+            "(text: *const c_char)",
+            "void example(const char* text);",
+            "pub extern(ffi, \"stone\") fn example(text: string?)",
+            "*const u8",
+            "nullable requires a const C string",
+        ),
+        (
+            "c-bool",
+            "() -> bool",
+            "bool example(void);",
+            "pub extern(ffi, \"stone\") fn example() -> bool",
+            "u8",
+            "c-bool requires a bool return",
+        ),
+        (
+            "byte-bool",
+            "() -> u8",
+            "uint8_t example(void);",
+            "pub extern(ffi, \"stone\") fn example() -> bool",
+            "i32",
+            "byte-bool requires a u8 return",
+        ),
+        (
+            "",
+            "(size: usize)",
+            "void example(size_t size);",
+            "pub extern(ffi, \"stone\") fn example(size: int)",
+            "u64",
+            "uint64_t size",
+        ),
+        (
+            "",
+            "(window: *mut StoneWindow) -> *mut StoneWindow",
+            "StoneWindow* example(StoneWindow* window);",
+            "pub extern(ffi, \"stone\") fn example(window: StoneWindow) -> StoneWindow",
+            "*mut c_int",
+            "int* window",
+        ),
+        (
+            "uint:handle uint:return",
+            "(handle: u64) -> u64",
+            "uint64_t example(uint64_t handle);",
+            "pub extern(ffi, \"stone\") fn example(handle: uint) -> uint",
+            "i64",
+            "uint requires an unsigned integer",
+        ),
+        (
+            "",
+            "(width: *mut c_int, size: *mut usize)",
+            "void example(int* width, size_t* size);",
+            "pub extern(ffi, \"stone\") fn example(width: Ptr<int>, size: Ptr<int>)",
+            "*const c_int",
+            "const int* width",
+        ),
+        (
+            "",
+            "(bytes: *const u8)",
+            "void example(const uint8_t* bytes);",
+            "pub extern(ffi, \"stone\") fn example(bytes: PtrU8)",
+            "*const i32",
+            "const int* bytes",
+        ),
+        (
+            "",
+            "(samples: *mut c_float)",
+            "void example(float* samples);",
+            "pub extern(ffi, \"stone\") fn example(samples: Ptr<float>)",
+            "*mut c_double",
+            "no Rock pointer mapping",
+        ),
+    ] {
+        let source = |signature: &str| {
+            format!(
+                "/// rock-ffi stone {options}\n#[no_mangle]\npub extern \"C\" fn example{signature} {{}}"
+            )
+        };
+        let original = source(signature);
+        let generated = ffi_codegen::runtime::STONE_ENGINE
+            .bindings([("", original.as_str())])
+            .unwrap_or_else(|error| panic!("{original}: {error}"));
+        assert_eq!(generated.cdef.trim_end(), c);
+        assert_eq!(generated.rock.trim_end(), rock);
+
+        let original_type = if let Some((_, param)) = signature.split_once(": ") {
+            param.split([',', ')']).next().unwrap()
+        } else {
+            signature.split_once(" -> ").unwrap().1
+        };
+        let changed = source(&signature.replacen(original_type, mismatch, 1));
+        match ffi_codegen::runtime::STONE_ENGINE.bindings([("", changed.as_str())]) {
+            Ok(updated) => {
+                assert_ne!(updated.cdef, generated.cdef);
+                assert!(updated.cdef.contains(error), "{changed}: {}", updated.cdef);
+            }
+            Err(problem) => assert!(problem.contains(error), "{changed}: {problem}"),
+        }
+    }
+}
+
+#[test]
+fn engine_projection_preserves_visibility_parameter_names_and_defaults() {
+    let generated = ffi_codegen::runtime::STONE_ENGINE
+        .bindings([(
+            "",
+            r#"
+        /// rock-ffi stone private rename:_window=window default:wait=false
+        #[no_mangle]
+        pub extern "C" fn example(_window: *mut StoneWindow, wait: bool) -> i32 { 0 }
+    "#,
+        )])
+        .unwrap();
+    assert_eq!(
+        generated.rock,
+        "extern(ffi, \"stone\") fn example(window: StoneWindow, wait: bool = false) -> int\n"
+    );
 }

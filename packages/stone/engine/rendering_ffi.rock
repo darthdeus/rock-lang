@@ -1,0 +1,265 @@
+pub extern(ffi, "stone") fn stone_test_virtual_pad_attach() -> int
+pub extern(ffi, "stone") fn stone_test_virtual_pad_button(index: int, token: string, down: bool) -> bool
+pub extern(ffi, "stone") fn stone_test_virtual_pad_axis(index: int, token: string, value: int) -> bool
+pub extern(ffi, "stone") fn stone_test_virtual_pad_detach(index: int) -> bool
+extern(ffi, "stone") fn stone_pad_connected() -> bool
+extern(lua, "stone.stone_pad_type_name") fn stone_pad_type_name_ptr() -> any
+extern(ffi, "stone") fn stone_is_key_down(key: string) -> bool
+extern(ffi, "stone") fn stone_get_mouse_position(x: Ptr<int>, y: Ptr<int>)
+extern(ffi, "stone") fn stone_get_global_mouse_position(x: Ptr<int>, y: Ptr<int>)
+pub extern(ffi, "stone") fn stone_show_cursor(show: bool)
+pub extern(ffi, "stone") fn stone_create_cursor(path: string, hot_x: int, hot_y: int) -> int
+pub extern(ffi, "stone") fn stone_set_system_cursor(cursor_type: int) -> int
+pub extern(ffi, "stone") fn stone_set_cursor(cursor_id: int)
+extern(ffi, "stone") fn stone_reset_cursor()
+pub extern(ffi, "stone") fn stone_free_cursor(cursor_id: int)
+pub extern(ffi, "stone") fn stone_native_destroy(class: string, handle: int) -> bool
+pub extern(ffi, "stone") fn stone_native_handle_state(class: string, handle: int) -> int
+extern(lua, "stone.stone_native_live_handles") fn stone_native_live_handles_ptr(class: string) -> any
+extern(lua, "stone.stone_native_id_accounting") fn stone_native_id_accounting_ptr() -> any
+
+// OpenGL state management
+pub extern(ffi, "stone") fn stone_gl_pass_state_begin() -> int
+pub extern(ffi, "stone") fn stone_gl_pass_state_end(scope: int) -> bool
+pub extern(ffi, "stone") fn stone_set_blend_mode_i(mode: int)
+pub extern(ffi, "stone") fn stone_set_depth_mode(compare_mode: string, write: bool)
+pub extern(ffi, "stone") fn stone_clear_depth(depth: float)
+pub extern(ffi, "stone") fn stone_set_color_mask(r: bool, g: bool, b: bool, a: bool)
+extern(ffi, "stone") fn stone_restore_after_custom_draw()
+pub extern(ffi, "stone") fn stone_set_clear_color(r: float, g: float, b: float, a: float)
+pub extern(ffi, "stone") fn stone_set_scissor(enabled: bool, x: int, y: int, w: int, h: int)
+
+// DEPTH_WRITEMASK as GL currently has it (diagnostic).
+pub extern(ffi, "stone") fn stone_gl_depth_write_enabled() -> bool
+
+// GL's own blend state, `on/off eq=<e> src=<s> dst=<d>`. The Rock-side
+// `CURRENT_BLEND` shadow is a separate view and the two can disagree, which is
+// exactly what this reader exists to show.
+extern(lua, "stone.stone_gl_blend_state") fn stone_gl_blend_state_ptr() -> any
+
+// GL's colour mask, clear colour and scissor as one string, with a masked-off
+// channel shown as `-`. The `gl_write_state` ambient row's oracle, and GL's own
+// answer rather than a mirror -- this crate keeps none, which is why the state
+// crosses at all.
+extern(lua, "stone.stone_gl_write_state") fn stone_gl_write_state_ptr() -> any
+pub extern(ffi, "stone") fn stone_canvas_active_is_creation(handle: int) -> bool
+pub extern(ffi, "stone") fn stone_canvas_active_w(handle: int) -> int
+pub extern(ffi, "stone") fn stone_canvas_active_h(handle: int) -> int
+pub extern(ffi, "stone") fn stone_canvas_capacity_w(handle: int) -> int
+pub extern(ffi, "stone") fn stone_canvas_capacity_h(handle: int) -> int
+
+// Re-specify a canvas's storage at a new extent, keeping its handle, its FBO
+// and its texture objects. False (logged) for an unknown handle, a non-positive
+// extent, or an FBO the driver reports incomplete at the new size -- in which
+// case the old storage is put back.
+extern(ffi, "stone") fn stone_canvas_resize(handle: int, width: int, height: int) -> bool
+
+// Bit i enables COLOR_ATTACHMENT i; a clear bit below the highest set one writes
+// GL_NONE there.
+pub extern(ffi, "stone") fn stone_set_draw_buffer_mask(mask: int)
+extern(lua, "stone.stone_scancode_token_at") fn stone_scancode_token_at_ptr(index: int) -> any
+extern(lua, "stone.stone_scancode_token_for") fn stone_scancode_token_for_ptr(scancode: int) -> any
+pub extern(ffi, "stone") fn stone_scancode_value(token: string) -> int
+extern(lua, "stone.stone_scancode_label") fn stone_scancode_label_ptr(token: string) -> any
+pub extern(ffi, "stone") fn stone_imgui_init(window: StoneWindow) -> bool
+extern(ffi, "stone") fn stone_imgui_new_frame()
+extern(ffi, "stone") fn stone_imgui_render()
+extern(ffi, "stone") fn stone_imgui_prepare_render() -> PtrU8
+extern(ffi, "stone") fn stone_imgui_last_vtx_count() -> int
+pub extern(ffi, "stone") fn stone_imgui_initialized() -> bool
+extern(ffi, "stone") fn stone_draw_fullscreen_rect(u0: float, v0: float, u1: float, v1: float)
+
+// The typed pointer must refer to a NativeBuffer<float>.
+extern(ffi, "stone") fn stone_draw_mesh(
+    vertex_data: Ptr<float>,
+    vertex_count: int,
+    vertex_stride: int,
+    attr_sizes: Ptr<int>,
+    attr_count: int,
+    texture_kind: int,
+    texture: int,
+) -> int
+extern(ffi, "stone") fn stone_mesh_create(
+    mode: int,
+    verts: Ptr<float>,
+    vert_count: int,
+    stride_floats: int,
+    attr_sizes: Ptr<int>,
+    attr_count: int,
+) -> int
+extern(ffi, "stone") fn stone_mesh_set_instances(
+    handle: int,
+    data: Ptr<float>,
+    count: int,
+    stride_floats: int,
+    attr_sizes: Ptr<int>,
+    attr_count: int,
+) -> int
+extern(ffi, "stone") fn stone_mesh_update_instances(handle: int, data: Ptr<float>, count: int) -> int
+extern(ffi, "stone") fn stone_mesh_draw(handle: int, texture: int, count: int) -> int
+extern(ffi, "stone") fn stone_mesh_free(handle: int)
+pub extern(ffi, "stone") fn stone_get_live_mesh_count() -> int
+pub extern(ffi, "stone") fn stone_get_live_mesh_handle(index: int) -> int
+pub extern(ffi, "stone") fn stone_mesh_bytes(handle: int) -> int
+
+// mode < 0 releases the unit. `image` picks the matching wrap (a sampler
+// overrides the texture's own) and is 0 for a canvas, which is always clamped.
+pub extern(ffi, "stone") fn stone_bind_sampler(unit: int, mode: int, image: int)
+pub extern(ffi, "stone") fn stone_sampler_bound(unit: int) -> bool
+extern(ffi, "stone") fn stone_sprite_init() -> bool
+pub extern(ffi, "stone") fn stone_current_shader_bound() -> bool
+extern(ffi, "stone") fn stone_current_target_width() -> float
+extern(ffi, "stone") fn stone_current_target_height() -> float
+extern(ffi, "stone") fn stone_create_canvas(width: int, height: int, format: int, with_depth: bool) -> int
+extern(ffi, "stone") fn stone_destroy_canvas(handle: int)
+pub extern(ffi, "stone") fn stone_canvas_bound_as_target(handle: int) -> bool
+pub extern(ffi, "stone") fn stone_set_canvas(handle: int)
+
+// The live rectangle inside a canvas's allocated capacity, anchored at the GL
+// origin. Every bind viewports and scissors to it, so draws, clears, the
+// sprite ortho and gl_FragCoord all see the active image.
+pub extern(ffi, "stone") fn stone_set_canvas_active(handle: int, w: int, h: int)
+
+// The rendering path's canvas verbs: the host resolves the handle and never
+// hands a GL name back.
+extern(ffi, "stone") fn stone_bind_canvas_texture_to_unit(handle: int, unit: int) -> bool
+extern(ffi, "stone") fn stone_bind_canvas_depth_to_unit(handle: int, unit: int) -> bool
+extern(ffi, "stone") fn stone_canvas_exists(handle: int) -> bool
+extern(ffi, "stone") fn stone_canvas_has_depth(handle: int) -> bool
+pub extern(ffi, "stone") fn stone_get_live_canvas_count() -> int
+pub extern(ffi, "stone") fn stone_get_live_canvas_handle(index: int) -> int
+extern(ffi, "stone") fn stone_canvas_report(handle: int, width: Ptr<int>, height: Ptr<int>) -> int
+
+// GL names, for cimgui only -- its renderer is GL. Not for the rendering path.
+extern(ffi, "stone") fn stone_get_canvas_texture(handle: int) -> int
+pub extern(ffi, "stone") fn stone_set_viewport_rect(x: int, y: int, w: int, h: int)
+
+// The semantic submission's viewport: GL convention, target pixels, verbatim.
+extern(ffi, "stone") fn stone_set_gl_viewport(x: int, y: int, w: int, h: int)
+pub extern(ffi, "stone") fn stone_canvas_attach_id_target(color_handle: int, id_handle: int) -> bool
+pub extern(ffi, "stone") fn stone_canvas_attach_color_target(color_handle: int, target_handle: int, slot: int) -> bool
+pub extern(ffi, "stone") fn stone_clear_canvas(r: float, g: float, b: float, a: float)
+
+// The only defined clear for an integer (R32I) color buffer; glClear on one is
+// undefined.
+pub extern(ffi, "stone") fn stone_clear_canvas_int(draw_buffer: int, value: int)
+pub extern(ffi, "stone") fn stone_set_present_viewport(active: bool, x: int, y: int, w: int, h: int)
+pub extern(ffi, "stone") fn stone_canvas_save_png(handle: int, path: string) -> bool
+extern(ffi, "stone") fn stone_canvas_read_rgba8(handle: int, out: PtrU8, capacity: int) -> int
+pub extern(ffi, "stone") fn stone_canvas_capture_begin(handle: int) -> int
+pub extern(ffi, "stone") fn stone_canvas_capture_poll(id: int, out: PtrU8, capacity: int) -> int
+pub extern(ffi, "stone") fn stone_canvas_capture_release(id: int) -> bool
+pub extern(ffi, "stone") fn stone_canvas_capture_cancel(id: int) -> bool
+pub extern(ffi, "stone") fn stone_canvas_upload_rgba32f(handle: int, pixels: Ptr<float>, count: int) -> bool
+pub extern(ffi, "stone") fn stone_canvas_read_region_rgba32f(handle: int, x: int, y: int, w: int, h: int, out: Ptr<float>, capacity: int) -> int
+extern(ffi, "stone") fn stone_canvas_read_region_i32(handle: int, x: int, y: int, w: int, h: int, out: Ptr<int>, capacity: int) -> int
+extern(ffi, "stone") fn stone_canvas_upload_rgba8(handle: int, pixels: PtrU8, byte_len: int) -> bool
+pub extern(ffi, "stone") fn stone_read_canvas_pixel(handle: int, x: int, y: int) -> float
+pub extern(ffi, "stone") fn stone_read_canvas_pixel_channel(handle: int, x: int, y: int, channel: int) -> float
+extern(ffi, "stone") fn stone_read_canvas_nearest_id(handle: int, x: int, y: int, side: int) -> int
+
+// Pre-swap only: go through the runner's window-probe capture, never a direct
+// mid-frame call.
+extern(ffi, "stone") fn stone_read_window_rect(x: int, y: int, w: int, h: int, out: PtrU8)
+extern(ffi, "stone") fn stone_read_depth_pixel(handle: int, x: int, y: int) -> float
+extern(ffi, "stone") fn stone_pixel_readback_new(is_depth: int) -> int
+extern(ffi, "stone") fn stone_pixel_readback_area_new(side: int) -> int
+extern(ffi, "stone") fn stone_pixel_readback_destroy(id: int)
+extern(ffi, "stone") fn stone_pixel_readback_submit(id: int, canvas_handle: int, x: int, y: int)
+extern(ffi, "stone") fn stone_pixel_readback_submit_area(id: int, canvas_handle: int, x: int, y: int, side: int)
+extern(ffi, "stone") fn stone_pixel_readback_consume(id: int) -> float
+extern(ffi, "stone") fn stone_pixel_readback_poll_id(id: int) -> int
+extern(ffi, "stone") fn stone_pixel_readback_poll_rgba(id: int, out: Ptr<float>, capacity: int) -> int
+extern(ffi, "stone") fn stone_pixel_readback_in_flight(id: int) -> int
+extern(ffi, "stone") fn stone_pixel_readback_answer_x(id: int) -> int
+extern(ffi, "stone") fn stone_pixel_readback_answer_y(id: int) -> int
+extern(ffi, "stone") fn stone_pixel_readback_reset_contents(id: int) -> bool
+pub extern(ffi, "stone") fn stone_create_shader_from_combined(combined_src: string) -> int
+pub extern(ffi, "stone") fn stone_destroy_shader(handle: int)
+pub extern(ffi, "stone") fn stone_set_shader(handle: int)
+
+// Uniform blocks: bound once at registration, then fed whole. The compiler
+// packs the bytes from its std140 plan; nothing on this side knows that layout.
+pub extern(ffi, "stone") fn stone_shader_bind_uniform_block(handle: int, shader_key: string, block_name: string, binding: int, size: int, fingerprint: int) -> bool
+pub extern(ffi, "stone") fn stone_shader_upload_uniform_block(handle: int, data: PtrU8, size: int, fingerprint: int) -> bool
+pub extern(ffi, "stone") fn stone_unfilled_uniform_block_count() -> int
+
+// Read one block's bytes back out, by block name. Desktop GL only
+// (`glGetBufferSubData` does not exist in GLES) and the only thing on either
+// side of the FFI that can see what a block buffer holds, which is why it is a
+// probe rather than anything the render path uses. `size` must equal the
+// block's own.
+pub extern(ffi, "stone") fn stone_shader_read_uniform_block(handle: int, block_name: string, dst: PtrU8, size: int) -> bool
+
+// GL's own uniform-block binding state as JSON (0 = every block-owning program
+// plus each indexed binding point). Diagnostic only: it queries GL and reads
+// buffers back, so only the on-demand dump (uniform_block_dump.rock) calls it.
+extern(lua, "stone.stone_uniform_block_binding_state_json") fn stone_uniform_block_binding_state_json_ptr(handle: int) -> any
+pub extern(ffi, "stone") fn stone_graphics_capture_begin(directory: string, frame: int)
+pub extern(ffi, "stone") fn stone_graphics_capture_cancel()
+pub extern(ffi, "stone") fn stone_graphics_capture_scene_depth(handle: int)
+extern(lua, "stone.stone_graphics_capture_finish_json") fn stone_graphics_capture_finish_json_ptr() -> any
+pub extern(ffi, "stone") fn stone_mesh_capture_arm(read_depth: bool)
+extern(lua, "stone.stone_mesh_capture_finish_json") fn stone_mesh_capture_finish_json_ptr() -> any
+pub extern(ffi, "stone") fn stone_shader_snapshot_uniform_block(handle: int, block_name: string, dst: PtrU8, size: int) -> bool
+
+// Asserts the driver's own std140 layout against the compiler's plan. Partial
+// by construction: an inactive block member is optimized out and reports no
+// index, so it is skipped rather than failed.
+extern(ffi, "stone") fn stone_shader_check_uniform_block_layout(handle: int, block_name: string, names: string, names_len: int, offsets: Ptr<int>, count: int, plan_size: int) -> bool
+extern(ffi, "stone") fn stone_shader_set_texture(handle: int, name: string, texture_unit: int)
+pub extern(ffi, "stone") fn stone_save_screenshot(filepath: string, width: int, height: int, max_size: int) -> bool
+extern(ffi, "stone") fn stone_save_screenshot_sized(filepath: string, width: int, height: int, max_size: int, out_w: Ptr<int>, out_h: Ptr<int>) -> bool
+extern(ffi, "stone") fn stone_frame_stream_begin(path: string) -> bool
+extern(ffi, "stone") fn stone_frame_stream_record(width: int, height: int) -> bool
+extern(ffi, "stone") fn stone_frame_stream_finish(out_frames: Ptr<int>, out_w: Ptr<int>, out_h: Ptr<int>) -> bool
+pub extern(ffi, "stone") fn stone_get_live_canvas_bytes() -> int
+extern(ffi, "stone") fn stone_track_text_draw_call()
+extern(ffi, "stone") fn stone_text_init() -> bool
+extern(lua, "stone.stone_load_font") fn stone_load_font_ffi(path: string, pixel_size: int, face_mask: int, extra_chars: string) -> int
+extern(lua, "stone.stone_load_font_metrics") fn stone_load_font_metrics_ffi(path: string, pixel_size: int, face_mask: int, extra_chars: string) -> int
+extern(lua, "stone.stone_unload_font") fn stone_unload_font_ffi(font_id: int) -> bool
+pub extern(lua, "stone.stone_reload_font") fn stone_reload_font_ffi(font_id: int, path: string, pixel_size: int) -> bool
+pub extern(lua, "stone.stone_resize_font") fn stone_resize_font_ffi(font_id: int, pixel_size: int) -> bool
+extern(ffi, "stone") fn stone_get_font_slot_count(font_id: int) -> int
+extern(ffi, "stone") fn stone_get_font_slot_codepoint(font_id: int, slot: int) -> int
+extern(ffi, "stone") fn stone_get_font_atlas_size(font_id: int, width: Ptr<int>, height: Ptr<int>) -> bool
+pub extern(lua, "stone.stone_ensure_font_atlas_instance_number") fn stone_ensure_font_atlas_instance_ffi(font_id: int, pixel_size: int) -> int
+extern(ffi, "stone") fn stone_get_font_instance_image(instance_id: int) -> int
+extern(ffi, "stone") fn stone_get_font_atlas_instance_pixel_size(font_id: int, index: int) -> int
+pub extern(ffi, "stone") fn stone_get_font_atlas_instance_image_at(font_id: int, index: int) -> int
+extern(ffi, "stone") fn stone_get_font_instance_size(instance_id: int, width: Ptr<int>, height: Ptr<int>) -> bool
+pub extern(ffi, "stone") fn stone_get_font_instance_byte_len(instance_id: int) -> int
+extern(ffi, "stone") fn stone_get_font_instance_glyph_info(instance_id: int, face: int, char_code: int, out: Ptr<float>) -> bool
+pub extern(lua, "stone.stone_get_font_instance_pixel_size") fn stone_get_font_instance_pixel_size_ffi(instance_id: int) -> int
+pub extern(lua, "stone.stone_font_atlas_instance_count") fn stone_font_atlas_instance_count_ffi(font_id: int) -> int
+extern(ffi, "stone") fn stone_get_font_instance_pixel_size(instance_id: int) -> int
+extern(ffi, "stone") fn stone_font_atlas_instance_count(font_id: int) -> int
+pub extern(ffi, "stone") fn stone_get_font_unit_metrics(font_id: int, out: Ptr<float>) -> bool
+pub extern(ffi, "stone") fn stone_get_glyph_unit_metrics(font_id: int, face: int, char_code: int, out: Ptr<float>) -> bool
+pub extern(ffi, "stone") fn stone_font_data_len(font_id: int) -> int
+pub extern(ffi, "stone") fn stone_font_release_coverage(font_id: int) -> bool
+extern(lua, "stone.stone_stream_text") fn stone_stream_text(shader: int, font_id: int, text: string,
+    x: float, y: float, scale_x: float, scale_y: float, baseline: float, multiline: bool)
+pub extern(lua, "stone.stone_get_text_baseline") fn stone_get_text_baseline_for(font_id: int, text: string, scale: float) -> float
+pub extern(lua, "stone.stone_get_font_pixel_size") fn stone_get_font_pixel_size_for(font_id: int) -> int
+pub extern(lua, "stone.stone_get_glyph_info") fn stone_get_glyph_info_for(font_id: int, face: int, char_code: int, out: Ptr<float>) -> bool
+extern(ffi, "stone") fn stone_ui_probe_context(phase: string, pass: string, surface: string, space: string)
+extern(ffi, "stone") fn stone_ui_probe_begin(windowless: bool)
+extern(ffi, "stone") fn stone_ui_probe_stop()
+pub extern(ffi, "stone") fn stone_ui_probe_accept(kind: string, key: string, detail: string) -> int
+pub extern(ffi, "stone") fn stone_ui_probe_expect_vertices(id: int, vertices: Ptr<Vertex>, count: int, stride: int) -> bool
+extern(ffi, "stone") fn stone_ui_probe_observe(kind: string, detail: string) -> bool
+extern(ffi, "stone") fn stone_ui_probe_custom_consumed()
+pub extern(ffi, "stone") fn stone_ui_probe_end_operation()
+extern(ffi, "stone") fn stone_ui_probe_refuse(kind: string, detail: string) -> bool
+pub extern(ffi, "stone") fn stone_ui_probe_check_population(accepted: int, refused: int, observed: int) -> bool
+pub extern(ffi, "stone") fn stone_ui_probe_check(expected: int) -> bool
+pub extern(ffi, "stone") fn stone_ui_probe_accepted() -> int
+pub extern(ffi, "stone") fn stone_ui_probe_consumed() -> int
+pub extern(ffi, "stone") fn stone_ui_probe_z(index: int) -> int
+pub extern(ffi, "stone") fn stone_ui_probe_vertex(index: int, lane: int) -> float
+pub extern(ffi, "stone") fn stone_ui_probe_retire(kind: string, handle: uint) -> bool
+pub extern(ffi, "stone") fn stone_ui_probe_resource(kind: string, handle: uint, source: string, generation: int) -> bool
+
+// Generated by stone-rs/build.rs.

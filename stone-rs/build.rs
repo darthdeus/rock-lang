@@ -26,18 +26,20 @@ fn check_generated(path: &Path, generated: String, out: &Path, stale: &mut Vec<S
     stale.push(format!("copy {} to {}", updated.display(), path.display()));
 }
 
-fn package_ffi(module: &ffi_codegen::Module, root: &str, header: &str, sources: &[(&str, &str)]) {
+fn package_ffi(
+    module: &ffi_codegen::Module,
+    root: &str,
+    header: &str,
+    bindings: &str,
+    sources: &[(&str, &str)],
+    layout_files: Option<(&str, &str)>,
+) {
     use ffi_codegen::GENERATED;
 
     let rock = Path::new(root);
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo OUT_DIR")).join(module.package);
     fs::create_dir_all(&out).unwrap();
-    for path in [
-        header,
-        "bindings.rock",
-        "wire_layouts.rock",
-        "tests/ffi_layouts.rock",
-    ] {
+    for path in [header, bindings] {
         println!("cargo:rerun-if-changed={}", rock.join(path).display());
     }
     let sources: Vec<_> = sources
@@ -60,6 +62,11 @@ fn package_ffi(module: &ffi_codegen::Module, root: &str, header: &str, sources: 
     let (authored, _) = existing
         .split_once(GENERATED)
         .expect("FFI declaration marker");
+    let rock_bindings = rock.join(bindings);
+    let existing_rock = read(&rock_bindings);
+    let (authored_rock, _) = existing_rock
+        .split_once(GENERATED)
+        .expect("FFI declaration marker");
     let mut stale = Vec::new();
     check_generated(
         &header,
@@ -68,8 +75,8 @@ fn package_ffi(module: &ffi_codegen::Module, root: &str, header: &str, sources: 
         &mut stale,
     );
     check_generated(
-        &rock.join("bindings.rock"),
-        format!("{GENERATED}{}", generated.rock),
+        &rock_bindings,
+        format!("{authored_rock}{GENERATED}{}", generated.rock),
         &out,
         &mut stale,
     );
@@ -80,22 +87,25 @@ fn package_ffi(module: &ffi_codegen::Module, root: &str, header: &str, sources: 
         stale.join("\n")
     );
 
-    let layout_source = rock.join("wire_layouts.rock");
-    let (layouts, tests) = module
-        .layouts("wire_layouts.rock", &read(&layout_source))
-        .unwrap_or_else(|e| panic!("{} layout: {e}", module.package));
-    check_generated(
-        &rock.join("tests/ffi_layouts.rock"),
-        tests,
-        &out,
-        &mut stale,
-    );
-    assert!(
-        stale.is_empty(),
-        "stale {} layouts:\n{}",
-        module.package,
-        stale.join("\n")
-    );
+    let mut layouts = String::new();
+    if let Some((layout_source, layout_test)) = layout_files {
+        let source = rock.join(layout_source);
+        let layout_test = rock.join(layout_test);
+        for path in [&source, &layout_test] {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+        let (rust, tests) = module
+            .layouts(layout_source, &read(&source))
+            .unwrap_or_else(|e| panic!("{} layout: {e}", module.package));
+        layouts = rust;
+        check_generated(&layout_test, tests, &out, &mut stale);
+        assert!(
+            stale.is_empty(),
+            "stale {} layouts:\n{}",
+            module.package,
+            stale.join("\n")
+        );
+    }
 
     let file = out.join("ffi.rs");
     let c_layout = module
@@ -114,7 +124,11 @@ fn package_ffi(module: &ffi_codegen::Module, root: &str, header: &str, sources: 
 }
 
 fn main() {
-    use ffi_codegen::{STONE_ENGINE, STONE_ENGINE_SOURCES, STONE_NATIVE, STONE_NATIVE_SOURCES};
+    use ffi_codegen::{
+        rendering::{STONE_RENDERING, STONE_RENDERING_LAYOUT_FILES, STONE_RENDERING_SOURCES},
+        runtime::{STONE_ENGINE, STONE_ENGINE_LAYOUT_FILES, STONE_ENGINE_SOURCES},
+        STONE_NATIVE, STONE_NATIVE_SOURCES,
+    };
 
     println!("cargo:rerun-if-changed=ffi_codegen.rs");
     rayon::ThreadPoolBuilder::new()
@@ -127,13 +141,25 @@ fn main() {
                 &STONE_NATIVE,
                 "../packages/stone-native",
                 "stone_native.h",
+                "bindings.rock",
                 STONE_NATIVE_SOURCES,
+                Some(("wire_layouts.rock", "tests/ffi_layouts.rock")),
             );
             package_ffi(
                 &STONE_ENGINE,
                 "../packages/stone",
-                "engine/stone.h",
+                "engine/runtime_ffi.h",
+                "engine/runtime_ffi.rock",
                 STONE_ENGINE_SOURCES,
+                STONE_ENGINE_LAYOUT_FILES,
+            );
+            package_ffi(
+                &STONE_RENDERING,
+                "../packages/stone",
+                "engine/rendering_ffi.h",
+                "engine/rendering_ffi.rock",
+                STONE_RENDERING_SOURCES,
+                STONE_RENDERING_LAYOUT_FILES,
             );
         });
 
