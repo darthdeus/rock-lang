@@ -29,6 +29,9 @@ inline(lua) fn snapshots_trace() -> bool = """
     local foreign = ffi.new("Row[?]", 2)
     local desc, bytes = __rock_nb_storage_of(foreign)
     assert(desc.ctype == "Row" and bytes == ffi.sizeof(foreign))
+    local fractional = trace_setup(1.5).ptr
+    local _, actual = __rock_nb_storage_of(fractional)
+    assert(actual == ffi.sizeof(fractional))
     assert(__rock_nb_storage_of(ffi.new("int64_t", 0)) == nil)
     assert(__rock_nb_storage_of(true) == nil)
     return true
