@@ -13,7 +13,8 @@ fn c_unit_array_preserves_count_and_effects() {
     assert(UNIT_EFFECTS == 2)
     items.push(())
     assert(items.len() == 4)
-    assert(items.get(0) == null)
+    assert(items.get(0) != null)
+    assert(items.get(99) == null)
     let count = 0
     for item in items { count += 1 }
     assert(count == 4)
@@ -22,11 +23,11 @@ fn c_unit_array_preserves_count_and_effects() {
     let copied: [()] = [item, ()]
     assert(copied.len() == 2)
     let removed = items.pop()
-    assert(removed == null)
+    assert(removed != null)
     assert(items.len() == 3)
-    assert(items.remove_at(0) == null)
+    assert(items.remove_at(0) != null)
     assert(items.len() == 2)
-    assert(items.swap_remove(0) == null)
+    assert(items.swap_remove(0) != null)
     assert(items.len() == 1)
     items.clear()
     assert(items.len() == 0)
@@ -36,9 +37,7 @@ co fn finish_unit() -> Coroutine<int, ()> { yield 7; return () }
 
 fn take_unit(coroutine: Coroutine<int, ()>) -> () {
     assert(coroutine.completed())
-    // Unit completion stores nil; the completed guard checks this bridge.
-    // rock: allow(transmute_of_nullable)
-    return cast(coroutine.result())
+    return coroutine.result().unwrap()
 }
 
 @test
@@ -46,9 +45,14 @@ fn c_unit_coroutine_completion_and_result() {
     let coroutine = finish_unit()
     assert(coroutine.resume() == 7)
     assert(!coroutine.completed())
+    assert(coroutine.result() == null)
     let _ = coroutine.resume()
     assert(coroutine.completed())
+    assert(coroutine.result() != null)
     take_unit(coroutine)
+    let cancelled = finish_unit()
+    cancelled.kill()
+    assert(cancelled.result() == null)
 }
 
 struct ExitPair { a: int, b: int }

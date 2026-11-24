@@ -1132,7 +1132,7 @@ pub fn lower_definition_factory(
         FlatVariantsHandle::default(),
     );
     let callee = b.emit_cur(Inst::Load(parameter));
-    let result = b.indirect_call_by_plan(abi.representation().clone(), callee, &[])?;
+    let result = b.indirect_call_by_plan(abi.representation().clone(), None, callee, &[])?;
     let result = b.pack(result.into_value())?;
     b.f.set_term(b.cur, Term::Return(vec![result]));
     Ok(b.f)
@@ -2558,7 +2558,12 @@ impl<'a> Builder<'a> {
         &mut self,
         opt: Option<Idx<Expr>>,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        let Some(e) = opt else { return Ok(vec![]) };
+        let Some(e) = opt else {
+            if !self.f.is_coroutine && Self::optional_unit(self.ret_ty) {
+                return Ok(vec![self.present_unit()]);
+            }
+            return Ok(vec![]);
+        };
         let json_default_return = self.site_owner.as_ref().is_some_and(|owner| {
             matches!(
                 self.ws.module(owner.func.module).functions[owner.func.func].json_field_for,
@@ -2660,7 +2665,11 @@ impl<'a> Builder<'a> {
             }
             return Ok(self.tuple_return_operands(v, shape.slots.len()));
         }
-        let v = self.lower_expr_with_expected(e, self.ret_ty)?;
+        let v = if self.f.is_coroutine {
+            self.lower_unit_coercion(e, self.coroutine_slot_ty(1))?
+        } else {
+            self.lower_expr_with_expected(e, self.ret_ty)?
+        };
         if !self.is_open() {
             return Ok(Vec::new());
         }

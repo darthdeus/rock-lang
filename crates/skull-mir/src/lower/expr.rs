@@ -57,7 +57,7 @@ impl<'a> Builder<'a> {
     }
 
     pub(crate) fn lower_expr(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
-        self.lower_expr_with_expected(e, None)
+        self.lower_expr_for_use(e, None, false, true)
     }
 
     pub(crate) fn lower_condition(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
@@ -130,7 +130,19 @@ impl<'a> Builder<'a> {
         e: Idx<Expr>,
         expected: Option<&crate::monoty::MonoTy>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        self.lower_expr_for_use(e, expected, false, true)
+        let value = self.lower_expr_for_use(e, expected, false, true)?;
+        self.optional_unit_edge(e, value, expected)
+    }
+
+    /// Lower the same expression and storage plan, then apply the optional
+    /// unit wire conversion at the consuming edge.
+    pub(crate) fn lower_unit_coercion(
+        &mut self,
+        e: Idx<Expr>,
+        expected: Option<&MonoTy>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let value = self.lower_expr(e)?;
+        self.optional_unit_edge(e, value, expected)
     }
 
     fn lower_expr_for_use(
@@ -315,6 +327,14 @@ impl<'a> Builder<'a> {
                 None => Ok(self.emit_cur(Inst::Const(Lit::Str(name)))),
             },
 
+            Expr::Var(b)
+                if matches!(self.concrete_expr_ty(e), Some(MonoTy::Unit))
+                    && Self::optional_unit(
+                        self.binding_ty(b).and_then(|ty| self.concrete_ty_id(ty)),
+                    ) =>
+            {
+                Ok(self.emit_cur(Inst::Const(Lit::Nil)))
+            }
             Expr::Var(b) if self.group_binds.contains_key(&raw(b)) => {
                 let r = self.lower_expr_repr(e)?.into_value();
                 self.pack_maybe_absent(r)
@@ -516,7 +536,7 @@ impl<'a> Builder<'a> {
                     return self.pack_maybe_absent(r);
                 }
                 let (b, i, kind) = self.index_place(base, index)?;
-                Ok(self.read_index(b, i, kind))
+                Ok(self.read_typed_index(e, b, i, kind))
             }
             Expr::FieldAccess { .. } => {
                 let r = self.lower_expr_repr(e)?.into_value();
@@ -568,7 +588,7 @@ impl<'a> Builder<'a> {
                 variant,
                 args,
                 ..
-            } => self.lower_enum_variant(self.literal_layout(e, enum_name), variant, args),
+            } => self.lower_enum_variant(e, self.literal_layout(e, enum_name), variant, args),
 
             Expr::Assign { target, value } => {
                 self.lower_assign_effect(target, value)?;
@@ -602,8 +622,19 @@ impl<'a> Builder<'a> {
                                 "flat enum yield",
                             )?
                         }
-                        None => vec![self.lower_expr(eb)?],
+                        None => {
+                            let ty = self.coroutine_slot_ty(0);
+                            let value = self.lower_unit_coercion(eb, ty)?;
+                            vec![if matches!(ty, Some(MonoTy::Unit)) {
+                                self.present_unit()
+                            } else {
+                                value
+                            }]
+                        }
                     },
+                    None if matches!(self.coroutine_slot_ty(0), Some(MonoTy::Unit)) => {
+                        vec![self.present_unit()]
+                    }
                     None => Vec::new(),
                 };
                 let resume = self.f.new_block();
@@ -638,7 +669,7 @@ impl<'a> Builder<'a> {
                 target,
                 kind,
             } => {
-                let v = self.lower_expr(value)?;
+                let v = self.lower_unit_coercion(value, self.concrete_ty_id(target))?;
                 let to_int = self
                     .concrete_ty_id(target)
                     .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Int));
@@ -747,7 +778,11 @@ impl<'a> Builder<'a> {
             let shape = self.tuple_box_shape(e)?;
             let mut vs = Vec::new();
             for (i, el) in elems.into_iter().enumerate() {
-                let bundle = self.lower_expr_repr(el)?;
+                let expected = match self.concrete_expr_ty(e).map(|ty| ty.peel_nullable().0) {
+                    Some(MonoTy::Tuple(parts)) => parts.get(i),
+                    _ => None,
+                };
+                let bundle = self.lower_expr_repr_as(el, expected)?;
                 match shape
                     .as_ref()
                     .and_then(|s| s.slots.get(i))
@@ -1051,6 +1086,22 @@ impl<'a> Builder<'a> {
         };
         self.write_place(&place, value)?;
         Ok(result)
+    }
+
+    pub(super) fn read_typed_index(
+        &mut self,
+        expr: Idx<Expr>,
+        base: Idx<Inst>,
+        index: Idx<Inst>,
+        kind: ContainerKind,
+    ) -> Idx<Inst> {
+        let value = self.read_index(base, index, kind);
+        if matches!(kind, ContainerKind::Map)
+            && matches!(self.concrete_expr_ty(expr), Some(MonoTy::Unit))
+        {
+            return self.emit_cur(Inst::Const(Lit::Nil));
+        }
+        value
     }
 
     pub(super) fn index_place(
@@ -1569,14 +1620,26 @@ impl<'a> Builder<'a> {
                         return s.nb_leaf_element_store(b, i, value, elem);
                     }
                 }
-                let v = s.lower_expr(value)?;
+                let expected = s.concrete_expr_ty(target);
+                let mut v = s.lower_unit_coercion(value, expected)?;
+                if matches!(kind, ContainerKind::Map) && matches!(expected, Some(MonoTy::Unit)) {
+                    v = s.present_unit();
+                }
                 s.write_place(&Place::Index(b, i, kind), v)
             })?,
             Expr::Global(_) if let Some((leaves, shape)) = nobox_global_place => {
                 self.nobox_global_store(target, &leaves, shape, value)?;
             }
             Expr::Global(name) => {
-                let v = self.lower_expr(value)?;
+                let expected = self
+                    .ws
+                    .globals_by_name
+                    .get(&name)
+                    .and_then(|&ty| self.concrete_ty_id(ty));
+                let v = self.lower_unit_coercion(
+                    value,
+                    expected.or_else(|| self.concrete_expr_ty(target)),
+                )?;
                 self.write_place(&Place::Global(name), v)?;
             }
             Expr::SafeNav { base, field } => {
@@ -1984,12 +2047,37 @@ impl<'a> Builder<'a> {
             let abi = self
                 .fn_value_rep_plan(field_ty)?
                 .ok_or_else(|| self.gap_here("fn-field call has no concrete function ABI plan"))?;
-            self.indirect_call_by_plan(abi, fieldv, &call_args)
+            let ty = self.concrete_ty_id(field_ty);
+            let bundle = self.indirect_call_by_plan(abi, ty, fieldv, &call_args)?;
+            let unit = matches!(self.fn_result_ty(ty)?, MonoTy::Unit);
+            Ok(self.promote_safe_call_unit(e, bundle, unit))
         } else {
             let func = self.resolve_funcref(e, method)?;
             let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
-            self.ufcs_call_repr(e, func, ValueRepr::Scalar(recv), &arg_idxs)
+            let unit = Self::optional_unit(self.concrete_expr_ty(e))
+                && self
+                    .concrete_callee_entry(e, self.cur_op.clone())?
+                    .signature
+                    .result
+                    .is_none_or(|id| matches!(self.concrete_mono(id), MonoTy::Unit));
+            let bundle = self.ufcs_call_repr(e, func, ValueRepr::Scalar(recv), &arg_idxs)?;
+            Ok(self.promote_safe_call_unit(e, bundle, unit))
         }
+    }
+
+    fn promote_safe_call_unit(
+        &mut self,
+        e: Idx<Expr>,
+        bundle: ValueBundle,
+        unit: bool,
+    ) -> ValueBundle {
+        if unit && Self::optional_unit(self.concrete_expr_ty(e)) {
+            return ValueBundle::new(
+                bundle.representation(),
+                ValueRepr::Scalar(self.present_unit()),
+            );
+        }
+        bundle
     }
 
     fn lower_scalar_safe_nav_receiver(
@@ -2150,6 +2238,7 @@ impl<'a> Builder<'a> {
         shape: RepLayout,
     ) -> Result<ValueRepr, CompilerError> {
         let recv = self.lower_safe_nav_receiver(receiver)?;
+        let expected = self.current_expr_mono();
         self.safe_nav_repr(recv, Some(shape), |s, recv| {
             let recv = s.safe_nav_present_value(recv)?;
             let cell = s.new_binding_cell(
@@ -2160,7 +2249,7 @@ impl<'a> Builder<'a> {
             );
             s.store_cell(cell, recv);
             s.binds.insert(raw(binding), cell);
-            s.lower_expr_repr(body).map(SafeNavValue::Repr)
+            s.lower_expr_repr_as(body, expected).map(SafeNavValue::Repr)
         })
     }
 
@@ -2171,6 +2260,30 @@ impl<'a> Builder<'a> {
         field: Ustr,
         shape: Option<RepLayout>,
     ) -> Result<ValueRepr, CompilerError> {
+        if Self::optional_unit(self.concrete_expr_ty(e))
+            && let Some(owner) = self.concrete_expr_ty(base).map(|ty| ty.peel_nullable().0)
+        {
+            let plain = match owner {
+                MonoTy::Tuple(parts) => {
+                    field
+                        .as_str()
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|index| parts.get(index))
+                        == Some(&MonoTy::Unit)
+                }
+                _ => {
+                    owner.nominal().and_then(|name| {
+                        self.member_ty(owner, name, super::pattern::Member::Field(field))
+                    }) == Some(MonoTy::Unit)
+                }
+            };
+            if plain {
+                let recv = self.lower_safe_nav_receiver(base)?;
+                return self
+                    .safe_nav_repr(recv, None, |s, _| Ok(SafeNavValue::Slot(s.present_unit())));
+            }
+        }
         if shape.is_none() {
             let recv = self.lower_scalar_safe_nav_receiver(e, base, field)?;
             return self.safe_nav_repr(recv, None, |s, recv| {
@@ -2289,13 +2402,23 @@ impl<'a> Builder<'a> {
             Some(ty) => self.vec_flat_elem_for_type(ty)?,
             None => self.vec_flat_elem_of(lit)?,
         };
+        let element = match expected
+            .or_else(|| self.concrete_expr_ty(lit))
+            .map(|ty| ty.peel_nullable().0)
+        {
+            Some(MonoTy::App {
+                ctor: MonoCtor::Array,
+                params,
+            }) => params.first(),
+            _ => None,
+        };
         if !has_spread {
             if let Some((elem, storage)) = flat_elem {
                 return self.flat_vec_literal(&idxs, elem, storage);
             }
             let vs: Vec<Idx<Inst>> = idxs
                 .iter()
-                .map(|&e| self.lower_expr(e))
+                .map(|&e| self.lower_unit_coercion(e, element))
                 .collect::<Result<_, _>>()?;
             return Ok(self.emit_cur(Inst::MakeVec(vs)));
         }
@@ -2312,11 +2435,11 @@ impl<'a> Builder<'a> {
         };
         for e in idxs {
             if let Expr::Spread(inner) = self.body.expr_arena[e] {
-                self.spread_into(arr, inner, dest)?;
+                self.spread_into(arr, inner, dest, Self::optional_unit(element))?;
             } else {
                 match dest {
                     SpreadDest::Container(kind) => {
-                        let value = self.lower_expr(e)?;
+                        let value = self.lower_unit_coercion(e, element)?;
                         self.emit_cur(Inst::ArrayPush { arr, value, kind });
                     }
                     SpreadDest::Flat(elem, storage) => {
@@ -2368,6 +2491,7 @@ impl<'a> Builder<'a> {
         arr: Idx<Inst>,
         inner: Idx<Expr>,
         dest: SpreadDest,
+        optional_unit: bool,
     ) -> Result<(), CompilerError> {
         if let Expr::Tuple(elements) = self.body.expr_arena[inner] {
             match dest {
@@ -2388,15 +2512,28 @@ impl<'a> Builder<'a> {
                 crate::monoty::MonoTy::Tuple(elements) => {
                     for (index, ety) in elements.iter().enumerate() {
                         let value = self.emit_cur(Inst::TupleIndex { base: v, index });
-                        let value = self.copied_value_repr(ety, value)?;
+                        let value = if optional_unit && *ety == MonoTy::Unit {
+                            ValueRepr::Scalar(self.present_unit())
+                        } else {
+                            self.copied_value_repr(ety, value)?
+                        };
                         self.append_spread_value(arr, value, dest)?;
                     }
                     Ok(())
                 }
-                crate::monoty::MonoTy::App {
-                    ctor: crate::monoty::MonoCtor::Array | crate::monoty::MonoCtor::Map,
-                    ..
-                } => self.spread_array_loop(arr, inner, v, dest),
+                crate::monoty::MonoTy::App { ctor, params }
+                    if matches!(ctor, MonoCtor::Array | MonoCtor::Map) =>
+                {
+                    self.spread_array_loop(
+                        arr,
+                        inner,
+                        v,
+                        dest,
+                        optional_unit
+                            && *ctor == MonoCtor::Array
+                            && params.first() == Some(&MonoTy::Unit),
+                    )
+                }
                 crate::monoty::MonoTy::App {
                     ctor: crate::monoty::MonoCtor::Nominal(name),
                     ..
@@ -2407,7 +2544,11 @@ impl<'a> Builder<'a> {
                     for field in fields {
                         let value = self.read_field(v, field);
                         let fty = self.struct_field_mono_ty(*name, field, Some(inner))?;
-                        let value = self.copied_value_repr(&fty, value)?;
+                        let value = if optional_unit && *fty == MonoTy::Unit {
+                            ValueRepr::Scalar(self.present_unit())
+                        } else {
+                            self.copied_value_repr(&fty, value)?
+                        };
                         self.append_spread_value(arr, value, dest)?;
                     }
                     Ok(())
@@ -2426,6 +2567,7 @@ impl<'a> Builder<'a> {
         src_expr: Idx<Expr>,
         src: Idx<Inst>,
         dest: SpreadDest,
+        unit_to_optional: bool,
     ) -> Result<(), CompilerError> {
         let src_kind = self.coll_kind(src_expr)?;
         let n = self.emit_cur(Inst::Len {
@@ -2434,7 +2576,11 @@ impl<'a> Builder<'a> {
         });
         self.for_each_row(n, |s, cell, _| {
             let i = s.emit_cur(Inst::Load(cell));
-            let repr = s.loop_element_repr_at(src, i, src_kind)?;
+            let repr = if unit_to_optional {
+                ValueRepr::Scalar(s.present_unit())
+            } else {
+                s.loop_element_repr_at(src, i, src_kind)?
+            };
             s.append_spread_value(arr, repr, dest)?;
             let i = s.emit_cur(Inst::Load(cell));
             Ok(s.int_plus_one(i))

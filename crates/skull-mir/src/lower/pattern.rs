@@ -19,8 +19,9 @@ impl<'a> Builder<'a> {
         shape: RepLayout,
     ) -> Result<ValueRepr, CompilerError> {
         let mut values = self.value_join(shape);
+        let expected = self.current_expr_mono();
         self.lower_match_arms(scrut, arms, |s, body, _| {
-            let bv = s.lower_expr_repr(body)?;
+            let bv = s.lower_expr_repr_as(body, expected)?;
             s.join_arm(&mut values, bv)
         })?;
         self.finish_join(values, self.cur)
@@ -880,24 +881,25 @@ impl<'a> Builder<'a> {
         let join = self.f.new_block();
         self.lower_let_test(pattern, value, else_bb)?;
 
+        let expected = self.current_expr_mono();
         if let Some(shape) = result_shape {
             let values = self.value_join(shape);
             return self.lower_value_arms(
                 values,
                 else_bb,
                 join,
-                |s| s.lower_expr_repr(then_branch),
+                |s| s.lower_expr_repr_as(then_branch, expected),
                 else_branch,
             );
         }
 
         let result = scalar_result.expect("scalar if let has a result cell");
-        let tv = self.lower_expr(then_branch)?;
+        let tv = self.lower_unit_coercion(then_branch, expected)?;
         self.store_and_join(result, tv, join);
 
         self.cur = else_bb;
         let ev = match else_branch {
-            Some(eb) => self.lower_expr(eb)?,
+            Some(eb) => self.lower_unit_coercion(eb, expected)?,
             None => self.emit_cur(Inst::Const(Lit::Nil)),
         };
         self.store_and_join(result, ev, join);
@@ -991,6 +993,11 @@ impl<'a> Builder<'a> {
             self.branch_on_nil(val, miss, cont);
             self.cur = cont;
         }
+        let scrut = if Self::optional_unit(self.concrete_expr_ty(value)) {
+            Scrut::Val(self.emit_cur(Inst::Const(Lit::Nil)))
+        } else {
+            scrut
+        };
         self.match_pattern(&scrut, pattern, miss, &variants, true, scrut_enum, scrut_ty)
     }
 
@@ -1020,7 +1027,12 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    fn member_ty(&self, owner_ty: &MonoTy, owner: Ustr, member: Member) -> Option<MonoTy> {
+    pub(super) fn member_ty(
+        &self,
+        owner_ty: &MonoTy,
+        owner: Ustr,
+        member: Member,
+    ) -> Option<MonoTy> {
         use bone_core::hir::VariantPayload;
         let MonoTy::App {
             ctor: crate::monoty::MonoCtor::Nominal(name),
@@ -1257,7 +1269,7 @@ impl<'a> Builder<'a> {
 }
 
 #[derive(Clone, Copy)]
-enum Member {
+pub(super) enum Member {
     Position(usize),
     Field(Ustr),
     Wrapped,

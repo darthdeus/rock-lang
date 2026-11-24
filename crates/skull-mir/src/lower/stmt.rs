@@ -818,7 +818,9 @@ impl<'a> Builder<'a> {
             return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))));
         }
         let repr = match tail {
-            Some(tail) => self.lower_expr_repr(tail)?.into_value(),
+            Some(tail) => self
+                .lower_expr_repr_as(tail, self.current_expr_mono())?
+                .into_value(),
             None => ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))),
         };
         self.run_top_frame()?;

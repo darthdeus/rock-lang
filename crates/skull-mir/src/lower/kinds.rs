@@ -357,23 +357,125 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Coerce typed integer reads at expected-float boundaries.
+    pub(crate) fn optional_unit(ty: Option<&MonoTy>) -> bool {
+        matches!(ty, Some(MonoTy::Nullable(inner)) if **inner == MonoTy::Unit)
+    }
+
+    pub(crate) fn present_unit(&mut self) -> Idx<Inst> {
+        self.emit_cur(Inst::Const(Lit::Bool(true)))
+    }
+
+    pub(crate) fn promote_unit(
+        &mut self,
+        value: Idx<Inst>,
+        actual: Option<&MonoTy>,
+        expected: Option<&MonoTy>,
+    ) -> Idx<Inst> {
+        if Self::optional_unit(expected)
+            && matches!(actual, Some(MonoTy::Unit))
+            && self.is_open()
+            && !matches!(self.f.insts[value], Inst::Const(Lit::Bool(true)))
+        {
+            return self.present_unit();
+        }
+        value
+    }
+
+    pub(crate) fn unit_coercion_source(&self, expr: Idx<Expr>) -> bool {
+        match self.concrete_expr_ty(expr).map(|ty| ty.peel_nullable().0) {
+            Some(MonoTy::Unit) => true,
+            Some(MonoTy::Function { ret, .. }) => **ret == MonoTy::Unit,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn optional_unit_edge(
+        &mut self,
+        expr: Idx<Expr>,
+        value: Idx<Inst>,
+        expected: Option<&MonoTy>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        if Self::optional_unit(expected) {
+            return Ok(self.promote_unit(value, self.concrete_expr_ty(expr), expected));
+        }
+        let Some(target) = expected else {
+            return Ok(value);
+        };
+        let MonoTy::Function { ret, .. } = target.peel_nullable().0 else {
+            return Ok(value);
+        };
+        if !Self::optional_unit(Some(ret)) {
+            return Ok(value);
+        }
+        let Some(source) = self.concrete_expr_ty(expr) else {
+            return Ok(value);
+        };
+        let (source_fn, nullable_source) = source.peel_nullable();
+        let MonoTy::Function { ret, .. } = source_fn else {
+            return Ok(value);
+        };
+        if **ret != MonoTy::Unit || !self.is_open() {
+            return Ok(value);
+        }
+        let source_abi = self
+            .fn_value_rep_plan_for_mono(source)?
+            .ok_or_else(|| self.gap_here("unit callback has no ABI"))?;
+        let target_abi = self
+            .fn_value_rep_plan_for_mono(target)?
+            .ok_or_else(|| self.gap_here("optional unit callback has no ABI"))?;
+        let adapter = move |s: &mut Self| -> Result<Idx<Inst>, CompilerError> {
+            let capture = s.f.new_cell(None);
+            s.store_cell(capture, value);
+            let outer = s.cur;
+            let entry = s.f.new_block();
+            s.cur = entry;
+            let arena = s.scx.rep_arena();
+            let mut params = Vec::new();
+            for &id in target_abi.params() {
+                params.extend(s.fresh_cells(arena.layout(id).slot_count(arena)));
+            }
+            let args = s.load_cells(&params);
+            let callee = s.emit_cur(Inst::Load(capture));
+            let call = s.emit_cur(Inst::CallValue { callee, args });
+            s.f.call_rep_plans.insert(call, source_abi);
+            let result = s.present_unit();
+            s.f.set_term(entry, Term::Return(vec![result]));
+            s.cur = outer;
+            let lambda = s.emit_cur(Inst::Lambda { params, entry });
+            s.f.inst_spans.insert(lambda, s.body.expr_spans[expr]);
+            s.f.lambda_abis.insert(
+                lambda,
+                LambdaAbi {
+                    fingerprint: target_abi.logical_fingerprint(arena),
+                    representation: target_abi,
+                    source: Some(expr),
+                },
+            );
+            Ok(lambda)
+        };
+        if nullable_source {
+            let absent = self.is_nil(value);
+            self.absent_or_join(None, absent, false, Lit::Nil, adapter)
+        } else {
+            adapter(self)
+        }
+    }
+
+    pub(crate) fn current_expr_mono(&self) -> Option<&'a MonoTy> {
+        self.cur_expr.and_then(|e| self.concrete_expr_ty(e))
+    }
+
+    /// Coerce typed scalar reads at their representation boundaries.
     pub(crate) fn coerced(
         &mut self,
         value: Idx<Inst>,
         value_expr: Idx<Expr>,
         expected: TyId,
     ) -> Idx<Inst> {
-        let to_float = self
-            .concrete_ty_id(expected)
-            .as_ref()
-            .and_then(|t| self.arith_ty_of_mono(t))
-            == Some(ArithTy::Float);
-        self.coerce_numeric_to_float(
-            value,
-            self.arith_ty(value_expr).unwrap_or(ArithTy::Str),
-            to_float,
-        )
+        match self.concrete_ty_id(expected) {
+            Some(expected) => self.coerced_mono(value, value_expr, expected),
+            None => value,
+        }
     }
 
     pub(crate) fn coerced_mono(
@@ -382,6 +484,9 @@ impl<'a> Builder<'a> {
         value_expr: Idx<Expr>,
         expected: &MonoTy,
     ) -> Idx<Inst> {
+        if Self::optional_unit(Some(expected)) {
+            return self.promote_unit(value, self.concrete_expr_ty(value_expr), Some(expected));
+        }
         self.coerce_numeric_to_float(
             value,
             self.arith_ty(value_expr).unwrap_or(ArithTy::Str),

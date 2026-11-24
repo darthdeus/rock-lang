@@ -1,3 +1,4 @@
+use super::pattern::Member;
 use super::*;
 use crate::monoty::MonoTy;
 
@@ -1264,6 +1265,7 @@ impl<'a> Builder<'a> {
             let cells = self.flat_ctor_cells(
                 &shape,
                 variant,
+                None,
                 vec![FlatPayload::Repr(payload)],
                 Vec::new(),
             )?;
@@ -1306,6 +1308,7 @@ impl<'a> Builder<'a> {
 
     pub(crate) fn lower_enum_variant(
         &mut self,
+        expr: Idx<Expr>,
         enum_name: Ustr,
         variant: Ustr,
         args: VariantArgs,
@@ -1326,14 +1329,27 @@ impl<'a> Builder<'a> {
             let g = crate::mangle::enum_singleton_global(self.ws, enum_name, variant);
             return Ok(self.emit_cur(Inst::Global(g)));
         }
+        let ty = self.concrete_expr_ty(expr);
         let (positional, named) = match args {
             VariantArgs::Unit => (Vec::new(), Vec::new()),
-            VariantArgs::Tuple(range) => (self.lower_exprs(range)?, Vec::new()),
+            VariantArgs::Tuple(range) => {
+                let mut positional = Vec::new();
+                for (index, arg) in range.into_iter().enumerate() {
+                    let expected = ty
+                        .filter(|_| self.unit_coercion_source(arg))
+                        .and_then(|ty| self.member_ty(ty, variant, Member::Position(index)));
+                    positional.push(self.lower_unit_coercion(arg, expected.as_ref())?);
+                }
+                (positional, Vec::new())
+            }
             VariantArgs::Record(fields) => {
                 let mut named = Vec::new();
                 for fidx in fields {
                     let lf = self.body.struct_lit_field_arena[fidx];
-                    let v = self.lower_expr(lf.value)?;
+                    let expected = ty
+                        .filter(|_| self.unit_coercion_source(lf.value))
+                        .and_then(|ty| self.member_ty(ty, variant, Member::Field(lf.name)));
+                    let v = self.lower_unit_coercion(lf.value, expected.as_ref())?;
                     named.push((lf.name, v));
                 }
                 (Vec::new(), named)

@@ -50,7 +50,13 @@ impl<'a> Builder<'a> {
                         (Vec::new(), rec)
                     }
                 };
-                return self.flat_ctor_cells(shape, variant, positional, rec_args);
+                return self.flat_ctor_cells(
+                    shape,
+                    variant,
+                    self.concrete_expr_ty(value),
+                    positional,
+                    rec_args,
+                );
             }
         }
         let r = self.lower_expr_repr(value)?.into_value();
@@ -71,6 +77,7 @@ impl<'a> Builder<'a> {
         &mut self,
         shape: &EnumFlatShape,
         variant: Ustr,
+        ty: Option<&MonoTy>,
         positional: Vec<FlatPayload>,
         rec_args: Vec<(Ustr, Idx<Expr>)>,
     ) -> Result<FlatCells, CompilerError> {
@@ -92,7 +99,17 @@ impl<'a> Builder<'a> {
                 }
                 None => {
                     let v = match arg {
-                        FlatPayload::Expr(a) => self.lower_expr(a)?,
+                        FlatPayload::Expr(a) => {
+                            let expected =
+                                ty.filter(|_| self.unit_coercion_source(a)).and_then(|ty| {
+                                    self.member_ty(
+                                        ty,
+                                        variant,
+                                        super::pattern::Member::Position(pos),
+                                    )
+                                });
+                            self.lower_unit_coercion(a, expected.as_ref())?
+                        }
                         // A compiler-built payload has no source line to mark `materialize`, so the
                         // box it needs is the authorized one.
                         FlatPayload::Repr(r) => {
@@ -112,7 +129,12 @@ impl<'a> Builder<'a> {
                     self.flat_payload_leaves(FlatPayload::Expr(value), &payload.shape, true)?;
                 rec_vals.extend(payload.keys.iter().copied().zip(leaves));
             } else {
-                rec_vals.push((name, self.lower_expr(value)?));
+                let expected = ty
+                    .filter(|_| self.unit_coercion_source(value))
+                    .and_then(|ty| {
+                        self.member_ty(ty, variant, super::pattern::Member::Field(name))
+                    });
+                rec_vals.push((name, self.lower_unit_coercion(value, expected.as_ref())?));
             }
         }
         let nil = || Inst::Const(Lit::Nil);

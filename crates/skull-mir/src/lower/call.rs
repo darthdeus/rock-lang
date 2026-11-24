@@ -1002,6 +1002,25 @@ impl<'a> Builder<'a> {
                 .and_then(|value| self.value_bundle_for_expr(e, value));
         }
         if let Callee::Unresolved { name, .. } = callee {
+            if name.as_str() == "cast"
+                && Self::optional_unit(self.concrete_expr_ty(e))
+                && let [inner] = arg_idxs[..]
+                && let Expr::Call { callee: Callee::Unresolved { name: getter, .. }, args, .. } =
+                    self.body.expr_arena[inner]
+                && getter == "__vec_data_get"
+                && args.into_iter().next().is_some_and(|base| {
+                    matches!(self.concrete_expr_ty(base), Some(MonoTy::App { ctor: MonoCtor::Array, params })
+                        if matches!(params.first(), Some(MonoTy::Unit)))
+                })
+                && self.resolves_to_inline_builtin(e, name)
+                && self.resolves_to_inline_builtin(inner, getter)
+            {
+                // The unchecked Vec primitive reads an occupied slot. Its
+                // erased result is unit even though it is declared as any.
+                self.lower_expr(inner)?;
+                let result = self.present_unit();
+                return self.value_bundle_for_expr(e, ValueRepr::Scalar(result));
+            }
             // `cast<T>(v)` is identity, so a `nobox` result keeps the argument's
             // representation instead of boxing and rereading its leaves.
             if name.as_str() == "cast" && self.nobox_value_name(e).is_some() {
@@ -1275,14 +1294,26 @@ impl<'a> Builder<'a> {
             let abi = self
                 .fn_value_rep_plan(field_ty)?
                 .ok_or_else(|| self.gap_here("fn-field call has no concrete function ABI plan"))?;
-            return self.indirect_call_by_plan(abi, fieldv, call_args);
+            return self.indirect_call_by_plan(
+                abi,
+                self.concrete_ty_id(field_ty),
+                fieldv,
+                call_args,
+            );
         }
         match callee {
             // A transparent newtype constructor is identity at runtime.
             Callee::Unresolved { name, .. } if self.ws.nominals.newtype_id(name).is_some() => {
                 match arg_idxs.as_slice() {
                     [inner] => {
-                        let value = ValueRepr::Scalar(self.lower_expr(*inner)?);
+                        let expected = self
+                            .concrete_expr_ty(e)
+                            .filter(|_| self.unit_coercion_source(*inner))
+                            .and_then(|ty| {
+                                self.member_ty(ty, name, super::pattern::Member::Wrapped)
+                            });
+                        let value =
+                            ValueRepr::Scalar(self.lower_unit_coercion(*inner, expected.as_ref())?);
                         self.value_bundle_for_expr(e, value)
                     }
                     _ => Err(gap(format!("newtype ctor `{name}` with non-unary args"))),
@@ -1331,7 +1362,7 @@ impl<'a> Builder<'a> {
                             self.gap_here(format!("fn-typed global `{name}` has no function ABI"))
                         })?;
                         let g = self.emit_cur(Inst::Global(name));
-                        return self.indirect_call_by_plan(abi, g, &arg_idxs);
+                        return self.indirect_call_by_plan(abi, Some(&mono), g, &arg_idxs);
                     }
                     Err(gap_err)
                 }
@@ -1345,6 +1376,17 @@ impl<'a> Builder<'a> {
                         self.f.code_value_identities.insert(g, identity);
                     }
                     let param_shapes = abi.param_slots(self.scx.rep_arena());
+                    let types = match self.binding_ty(b).and_then(|ty| self.concrete_ty_id(ty)) {
+                        Some(MonoTy::Function { params, .. })
+                            if arg_idxs.iter().any(|&arg| self.unit_coercion_source(arg)) =>
+                        {
+                            params
+                                .iter()
+                                .map(|ty| self.scx.interner().id_of(ty))
+                                .collect()
+                        }
+                        _ => Vec::new(),
+                    };
                     let arg_vals = self.lower_call_arguments(
                         e,
                         &arg_idxs,
@@ -1352,7 +1394,7 @@ impl<'a> Builder<'a> {
                         Some(&abi.param_names),
                         CallArgMode::Scalar {
                             shapes: &param_shapes,
-                            types: &[],
+                            types: &types,
                         },
                         None,
                     )?;
@@ -1379,12 +1421,16 @@ impl<'a> Builder<'a> {
                         self.emit_cur(Inst::Load(cell))
                     }
                 };
-                if let Some(abi) = self
-                    .fn_value_rep_plan(self.binding_ty(b).ok_or_else(|| {
-                        gap("fn-typed local has no physical function signature")
-                    })?)?
-                {
-                    return self.indirect_call_by_plan(abi, callee_v, &arg_idxs);
+                let ty = self
+                    .binding_ty(b)
+                    .ok_or_else(|| gap("fn-typed local has no physical function signature"))?;
+                if let Some(abi) = self.fn_value_rep_plan(ty)? {
+                    return self.indirect_call_by_plan(
+                        abi,
+                        self.concrete_ty_id(ty),
+                        callee_v,
+                        &arg_idxs,
+                    );
                 }
                 // Nothing `nobox` in the signature, so args are boxed.
                 let arg_vals: Vec<Idx<Inst>> = arg_idxs
@@ -1408,7 +1454,12 @@ impl<'a> Builder<'a> {
                 )?;
                 let callee_v = self.lower_expr(ve)?;
                 if let Some(abi) = abi {
-                    return self.indirect_call_by_plan(abi, callee_v, &arg_idxs);
+                    return self.indirect_call_by_plan(
+                        abi,
+                        self.concrete_expr_ty(ve),
+                        callee_v,
+                        &arg_idxs,
+                    );
                 }
                 let arg_vals: Vec<Idx<Inst>> = arg_idxs
                     .iter()
@@ -1728,6 +1779,27 @@ impl<'a> Builder<'a> {
         tuple: Option<&TupleLayout>,
         dc: &DirectCall<'a>,
     ) -> Result<ValueRepr, CompilerError> {
+        let module = self.ws.module(func.module);
+        let decl = &module.functions[func.func];
+        if decl.name == "result"
+            && bone_core::modules::is_stdlib_module_file(module.file.as_str())
+            && let [coroutine] = args.as_slice()
+            && let Some(&parameter) = self.direct_call_signature(dc)?.params.first()
+            && let MonoTy::App {
+                ctor: MonoCtor::Nominal(name),
+                params,
+            } = self.concrete_mono(parameter)
+            && bone_core::modules::is_intrinsic_key(*name, "Coroutine")
+            && matches!(params.get(1), Some(MonoTy::Unit))
+        {
+            let state = self.read_field(*coroutine, crate::names::ustr("__state"));
+            let complete = self.emit_cur(Inst::Const(Lit::Int(-3)));
+            let present = self.emit_cur(Inst::Eq(state, complete));
+            let value = self.present_unit();
+            return Ok(ValueRepr::Scalar(
+                self.emit_cur(Inst::MakeNullableValue { present, value }),
+            ));
+        }
         if let Some(shape) = value {
             let dests = self.fresh_cells(shape.leaf_count());
             let (call, leaves) = self.call_multi(dests, func, args);
@@ -1772,10 +1844,15 @@ impl<'a> Builder<'a> {
     pub(crate) fn indirect_call_by_plan(
         &mut self,
         plan: FunctionRepPlan,
+        fn_ty: Option<&MonoTy>,
         callee: Idx<Inst>,
         arg_idxs: &[Idx<Expr>],
     ) -> Result<ValueBundle, CompilerError> {
         let arena = self.scx.rep_arena();
+        let params = match fn_ty.map(|ty| ty.peel_nullable().0) {
+            Some(MonoTy::Function { params, .. }) => params.as_slice(),
+            _ => &[],
+        };
         let mut argv = Vec::new();
         for (i, &a) in arg_idxs.iter().enumerate() {
             let slot = required_wire_slot(
@@ -1785,7 +1862,13 @@ impl<'a> Builder<'a> {
                 "indirect function-value call",
                 |message| self.gap_here(message),
             )?;
-            argv.extend(self.arg_values_for_slot(arena.layout(*slot), a)?);
+            let mut values = self.arg_values_for_slot(arena.layout(*slot), a)?;
+            if let [value] = values.as_mut_slice()
+                && !arena.layout(*slot).splats()
+            {
+                *value = self.optional_unit_edge(a, *value, params.get(i))?;
+            }
+            argv.extend(values);
         }
         let Some(result) = plan.result() else {
             let call = self.emit_cur(Inst::CallValue { callee, args: argv });
@@ -1866,10 +1949,12 @@ impl<'a> Builder<'a> {
                 return self.emit_direct_call(e, func, args, None, None, &dc);
             }
             self.reject_flat_return_outside_direct_call(e, &dc.callee.instance)?;
+            let expected = self.direct_call_signature(&dc)?.params.as_slice();
+            let arg_type = |s: &Self, i| expected.get(i).map(|&id| s.concrete_mono(id));
             if !dc.plan.uses_scalar_abi() {
                 let mut argv = vec![pack_receiver(self, recv)?];
-                for &a in arg_idxs {
-                    argv.push(self.lower_expr(a)?);
+                for (i, &a) in arg_idxs.iter().enumerate() {
+                    argv.push(self.lower_unit_coercion(a, arg_type(self, i + 1))?);
                 }
                 // Tuple slots go on unpacked, so the per-slot join keeps `nobox` elements
                 // unboxed. A `(..)?` return forwards its tag: `a?.m()` is absent when
@@ -1903,7 +1988,13 @@ impl<'a> Builder<'a> {
                     "UFCS call",
                     |message| self.gap_here(message),
                 )?;
-                argv.extend(self.arg_values_for_slot(slot, a)?);
+                let mut values = self.arg_values_for_slot(slot, a)?;
+                if let [value] = values.as_mut_slice()
+                    && !slot.splats()
+                {
+                    *value = self.optional_unit_edge(a, *value, arg_type(self, i + 1))?;
+                }
+                argv.extend(values);
             }
             let argv = dc.plan.transport_arguments(argv)?;
             self.emit_direct_call(e, func, argv, dc.plan.ret_shape(), None, &dc)
@@ -2049,7 +2140,9 @@ impl<'a> Builder<'a> {
                         && !slot.splats()
                         && let ([value], Some(&ty)) = (values.as_mut_slice(), types.get(parameter))
                     {
-                        *value = self.coerced_mono(*value, arg, self.concrete_mono(ty));
+                        let expected = self.concrete_mono(ty);
+                        *value = self.coerced_mono(*value, arg, expected);
+                        *value = self.optional_unit_edge(arg, *value, Some(expected))?;
                     }
                     CallArgValue::Scalar(values)
                 }

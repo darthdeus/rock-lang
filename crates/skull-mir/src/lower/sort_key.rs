@@ -352,7 +352,7 @@ impl<'a> Builder<'a> {
         arg: Idx<Expr>,
         ty: &MonoTy,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        let key = self.indirect_call_by_plan(plan.clone(), callee, &[arg])?;
+        let key = self.indirect_call_by_plan(plan.clone(), None, callee, &[arg])?;
         let mut out = Vec::new();
         self.push_key_leaves(key.into_value(), ty, &mut out)?;
         Ok(out)

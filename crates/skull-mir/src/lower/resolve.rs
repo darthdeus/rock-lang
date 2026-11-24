@@ -101,6 +101,26 @@ impl<'a> Builder<'a> {
         self.lower_expr_repr_at(e, false)
     }
 
+    pub(crate) fn lower_expr_repr_as(
+        &mut self,
+        e: Idx<Expr>,
+        expected: Option<&MonoTy>,
+    ) -> Result<ValueBundle, CompilerError> {
+        let bundle = self.lower_expr_repr(e)?;
+        if expected.is_some()
+            && let ValueRepr::Scalar(value) = bundle.value()
+        {
+            let promoted = self.optional_unit_edge(e, *value, expected)?;
+            if promoted != *value {
+                return Ok(ValueBundle::new(
+                    bundle.representation(),
+                    ValueRepr::Scalar(promoted),
+                ));
+            }
+        }
+        Ok(bundle)
+    }
+
     fn lower_expr_repr_inner(&mut self, e: Idx<Expr>) -> Result<ValueBundle, CompilerError> {
         self.lower_expr_repr_at(e, true)
     }
@@ -451,7 +471,7 @@ impl<'a> Builder<'a> {
                 self.boxed_value_copy_repr(slot, name, self.concrete_expr_ty(e))?
             }
         } else {
-            let slot = self.read_index(b, i, kind);
+            let slot = self.read_typed_index(e, b, i, kind);
             self.stored_read_repr(e, slot)?
         };
         match representation {

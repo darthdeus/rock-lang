@@ -240,8 +240,8 @@ co fn explicit_unit() -> Coroutine<int, ()> {
     return
 }
 
-@test(output = "1 null\nnull\nnull")
-fn test_unit_returns_leave_result_null() {
+@test(output = "1 stashed\nstashed\nstashed")
+fn test_unit_returns_report_completion() {
     let c = bare_return()
     let v = c.resume()
     let _drain = c.resume()

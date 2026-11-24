@@ -843,6 +843,19 @@ impl<'a> Builder<'a> {
         )
     }
 
+    pub(crate) fn coroutine_slot_ty(&self, index: usize) -> Option<&'a MonoTy> {
+        let MonoTy::App {
+            ctor: MonoCtor::Nominal(name),
+            params,
+        } = self.ret_ty?
+        else {
+            return None;
+        };
+        bone_core::modules::is_intrinsic_key(*name, "Coroutine")
+            .then(|| params.get(index))
+            .flatten()
+    }
+
     pub(crate) fn current_yield_channel(&self) -> Option<EnumFlatShape> {
         CoroutinePlan::channel_for_concrete_type(self.ws, self.ret_ty?)
     }

@@ -623,8 +623,12 @@ impl<'a> Builder<'a> {
                     }
                 }
                 let route = self.dispatch().eq_route(lhs, rhs);
+                let lhs_ty = self.concrete_expr_ty(lhs);
+                let rhs_ty = self.concrete_expr_ty(rhs);
                 let lv = self.lower_expr(lhs)?;
+                let lv = self.promote_unit(lv, lhs_ty, rhs_ty);
                 let rv = self.lower_expr(rhs)?;
+                let rv = self.promote_unit(rv, rhs_ty, lhs_ty);
                 if self.scx.values_first_class && matches!(route, EqRoute::Structural) {
                     return Ok(self.emit_cur(if matches!(op, BinOp::Eq) {
                         Inst::Eq(lv, rv)
@@ -806,11 +810,12 @@ impl<'a> Builder<'a> {
         self.lower_branch(cond, then_bb, else_bb, true)?;
 
         self.cur = then_bb;
+        let expected = self.current_expr_mono();
         self.lower_value_arms(
             arms,
             else_bb,
             join,
-            |s| s.lower_expr_repr(then_branch),
+            |s| s.lower_expr_repr_as(then_branch, expected),
             else_branch,
         )
     }
@@ -823,12 +828,13 @@ impl<'a> Builder<'a> {
         then_value: impl FnOnce(&mut Self) -> Result<ValueBundle, CompilerError>,
         else_branch: Option<Idx<Expr>>,
     ) -> Result<ValueRepr, CompilerError> {
+        let expected = self.current_expr_mono();
         let then_value = then_value(self)?;
         let representation = then_value.representation();
         self.join_arm(&mut arms, then_value)?;
         self.cur = else_bb;
         let else_value = match else_branch {
-            Some(expr) => self.lower_expr_repr(expr)?,
+            Some(expr) => self.lower_expr_repr_as(expr, expected)?,
             None => ValueBundle::new(
                 representation,
                 ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))),
@@ -1130,15 +1136,23 @@ impl<'a> Builder<'a> {
             .f
             .new_cell_typed(None, self.current_expr_storage_ty_id());
         let lv = self.lower_expr(lhs)?;
+        let expected = self.current_expr_mono();
         let rhs_bb = self.f.new_block();
         let lhs_bb = self.f.new_block();
         let join = self.f.new_block();
         self.branch_on_nil(lv, rhs_bb, lhs_bb);
         self.cur = rhs_bb;
-        let rv = self.lower_expr(rhs)?;
+        let rv = self.lower_unit_coercion(rhs, expected)?;
         self.store_and_join(result, rv, join);
-        // Reuse `lv`: its defining block dominates this one.
         self.cur = lhs_bb;
+        let lv = if matches!(expected, Some(MonoTy::Unit))
+            && Self::optional_unit(self.concrete_expr_ty(lhs))
+        {
+            self.emit_cur(Inst::Const(Lit::Nil))
+        } else {
+            // Reuse `lv`: its defining block dominates this one.
+            lv
+        };
         self.store_and_join(result, lv, join);
         self.cur = join;
         Ok(self.emit_cur(Inst::Load(result)))

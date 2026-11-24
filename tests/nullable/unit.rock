@@ -1,0 +1,176 @@
+fn optional_unit(has: bool) -> ()? {
+    if has { return () }
+    return null
+}
+
+@test
+fn present_unit_differs_from_null() {
+    let some = optional_unit(true)
+    let none = optional_unit(false)
+    assert(some != null)
+    assert(none == null)
+    assert(some != none)
+}
+
+struct Slot<T> { value: T }
+enum WrappedUnit { Value(()?) }
+global OPTIONAL_UNIT: ()? = ()
+
+fn present<T>(x: T) -> T? { return x }
+fn forward<T>(x: T?) -> T? { return x }
+fn accepts_unit(x: ()?) -> bool { return x != null }
+fn selects_unit(pick: bool) -> ()? {
+    let result = if pick { () } else { null }
+    return result
+}
+
+@test
+fn unit_promotion_at_typed_boundaries() {
+    assert(accepts_unit(OPTIONAL_UNIT))
+    OPTIONAL_UNIT = null
+    assert(OPTIONAL_UNIT == null)
+    OPTIONAL_UNIT = ()
+    assert(accepts_unit(OPTIONAL_UNIT))
+
+    let some: ()? = ()
+    assert(some != null)
+    some = null
+    assert(some == null)
+    some = ()
+    assert(some != null)
+    assert(accepts_unit(()))
+    assert(present(()) != null)
+    assert(forward<()>(()) != null)
+    assert(forward<()>(null) == null)
+    assert(selects_unit(true) != null)
+    assert(selects_unit(false) == null)
+    assert((() : ()?) != null)
+
+    let field: Slot<()?> = Slot { value: () }
+    assert(accepts_unit(field.value))
+    field.value = null
+    assert(field.value == null)
+    field.value = ()
+    assert(accepts_unit(field.value))
+
+    let pair: (()?, int) = ((), 1)
+    assert(pair.0 != null)
+    match WrappedUnit::Value(()) {
+        WrappedUnit::Value(value) => assert(value != null),
+    }
+}
+
+@test
+fn unit_containers_keep_presence() {
+    let v: [()?] = [(), null]
+    assert(v[0] != null)
+    assert(v[1] == null)
+    v[1] = ()
+    assert(v[1] != null)
+    v.push(())
+    assert(v.pop() != null)
+
+    let m: Map<int, ()> = map_new()
+    m[1] = ()
+    m.insert(2, ())
+    assert(m.contains(1))
+    assert(m.get(2) != null)
+    assert(m.get(3) == null)
+    assert(m.remove(1) != null)
+    assert(!m.contains(1))
+    assert(m[2] == ())
+
+    let optionals: Map<int, ()?> = map_new()
+    optionals[1] = ()
+    assert(optionals.get(1) != null)
+    optionals[1] = null
+    assert(optionals.get(1) == null)
+}
+
+co fn yield_unit(pick: bool) -> Coroutine<()?, ()?> {
+    if pick { yield () }
+    yield null
+    return ()
+}
+
+@test
+fn optional_unit_coroutine_channels() {
+    let c = yield_unit(true)
+    assert(c.result() == null)
+    assert(c.resume() != null)
+    assert(c.resume() == null)
+    assert(c.resume() == null)
+    assert(c.completed())
+    assert(c.result() != null)
+}
+
+struct Holder<T> { item: T }
+fn wrap_holder<T>(item: T) -> Holder<T>? { return Holder { item: item } }
+fn Holder<T>.do_unit(self) { }
+fn receive(unit: ()?) -> bool { return unit != null }
+global UNIT_EFFECTS: int = 0
+fn effect() { UNIT_EFFECTS += 1 }
+fn make_unit() -> ()? { return () }
+fn no_unit() -> ()? { return null }
+
+@test
+fn unit_at_indirect_calls_and_on_safe_navigation() {
+    let sink: fn(()?) -> bool = receive
+    assert(sink(()), "indirect argument")
+    let holder = wrap_holder(())
+    assert(holder?.item != null, "present unit field")
+    assert(holder?.do_unit() != null, "present unit method")
+    let absent: Holder<()?>? = null
+    assert(absent?.item == null, "absent unit field")
+    let optional = wrap_holder(no_unit())
+    assert(optional?.item == null, "nullable slot inside present holder")
+}
+
+@test
+fn optional_unit_refinement_and_payload() {
+    let u = make_unit()
+    assert(u.unwrap() == (), "unwrap")
+    assert((u ?? ()) == (), "coalesce")
+    if let x = u {
+        assert(x == (), "if let unit")
+    } else {
+        assert(false, "let rejected a present unit")
+    }
+    if u != null { assert(u == (), "narrowed unit") }
+    assert(u == ())
+
+    UNIT_EFFECTS = 0
+    let callback: fn() -> ()? = effect
+    assert(callback() != null, "adapt unit return")
+    assert_eq(UNIT_EFFECTS, 1)
+}
+struct MaybeSlot<T> { item: T? }
+fn consume(thing: ()?) -> bool { return thing != null }
+fn MaybeSlot<T>.consume(self, value: ()?) -> bool { return consume(value) }
+fn make_slot() -> MaybeSlot<()>? { return MaybeSlot { item: () } }
+newtype OptionalWrapper(()?)
+co fn unit_channel() -> Coroutine<()> {
+    yield
+    yield ()
+}
+
+@test
+fn unit_and_nullable_generic_fields() {
+    let result = make_slot()
+    assert(result?.item != null, "nullable generic field")
+    assert(result?.consume(()) == true, "safe call argument")
+    let wrapped = OptionalWrapper(())
+    assert(wrapped.0 != null, "newtype constructor")
+}
+
+@test
+fn unit_sequence_spread_and_yield() {
+    let unit: [()] = [(), ()]
+    let opts = [...unit, null]
+    assert(opts[0] != null, "spread present")
+    assert(opts[2] == null, "spread absent")
+    let c = unit_channel()
+    assert(c.resume() != null, "bare unit yield")
+    assert(c.resume() != null, "explicit unit yield")
+    assert(c.resume() == null, "done")
+}

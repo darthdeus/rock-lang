@@ -280,7 +280,10 @@ A `T` converts to `T?` where a value is passed, returned or assigned, and a
 function returning `T` can stand in for one returning `T?`. Inside a type
 argument the two stay distinct: a `[T]`, `(T, int)` or `Map<K, T>` variable
 is not a `[T?]`, `(T?, int)` or `Map<K, T?>`. A literal written where the
-nullable type is expected takes it directly (`let v: [T?] = [t]`).
+nullable type is expected takes it directly (`let v: [T?] = [t]`). A
+present unit (`()` promoted to `()?`) is distinct from `null`. A successful
+optional lookup in a unit collection, or the result of a unit coroutine
+that ran to completion, returns a present unit.
 
 ```rock
 // A `T?` holds a `T` or `null`. `?.` stops at null instead of crashing,
