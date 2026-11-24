@@ -1,0 +1,14 @@
+@test
+fn hexadecimal_float_range_and_rounding() {
+    let tiny = "0x1p-1074".parse_float().unwrap()
+    assert(tiny > 0.0)
+    assert_eq("0x10000000000000p-1126".parse_float().unwrap(), tiny)
+    assert_eq("0x1p-1075".parse_float().unwrap(), 0.0)
+    assert_eq("0x3p-1075".parse_float().unwrap(), tiny + tiny)
+    assert_eq("0x0p2000".parse_float().unwrap(), 0.0)
+    assert_eq(tostring(1.0 / "-0x0p2000".parse_float().unwrap()), "-inf")
+    assert_eq("0x1.00000000000008p0".parse_float().unwrap(), 1.0)
+    assert_eq("0x1.000000000000080000000000001p0".parse_float().unwrap(), 1.0000000000000002)
+    assert_eq("0x1.fffffffffffffp1023".parse_float().unwrap(), 1.7976931348623157e308)
+    assert_eq(tostring("0x1.fffffffffffff8p1023".parse_float().unwrap()), "inf")
+}

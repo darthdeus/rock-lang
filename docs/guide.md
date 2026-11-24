@@ -647,6 +647,9 @@ is Lua `string.sub(a + 1, b)` on both backends, so a negative bound
 counts from the end (`"abc".substring(0, -1)` is `"abc"`); pass
 non-negative bounds unless you want that.
 
+`parse_float` accepts decimal and hexadecimal floating-point text.
+For example, `"0x1.8p3".parse_float()` returns `12.0`.
+
 `print` renders a float with at most 14 significant digits and no
 trailing zeros: `3.0` prints as `3`, `1e16` as `1e+16`, and non-finite
 values as `inf`, `-inf` and `nan`. `{x}` with no format spec keeps at

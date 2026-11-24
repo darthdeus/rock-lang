@@ -1433,11 +1433,28 @@ function __parse_float(s) {
   else if ((h = /^0[xX]([0-9a-fA-F]*)(?:\.([0-9a-fA-F]*))?(?:[pP]([+-]?[0-9]+))?$/.exec(body)) !== null) {
     var frac = h[2] || "", digits = h[1] + frac;
     if (digits === "") return null;
-    n = parseInt(digits, 16) * Math.pow(2, (h[3] ? Number(h[3]) : 0) - 4 * frac.length);
+    n = __parse_hex_float(digits, Number(h[3] || 0) - 4 * frac.length);
   } else if (/^0[bB][01]+$/.test(body)) n = parseInt(body.slice(2), 2);
   else if (/^([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?$/.test(body)) n = Number(body);
   else return null;
   return neg ? -n : n;
+}
+function __parse_hex_float(digits, scale) {
+  digits = digits.replace(/^0+/, "");
+  if (digits === "") return 0;
+  var width = 4 * (digits.length - 1) + 32 - Math.clz32(parseInt(digits[0], 16));
+  var exponent = width - 1 + scale;
+  if (exponent < -1075) return 0;
+  if (exponent > 1023) return Infinity;
+  // Round once, at either the 53-bit precision or the subnormal quantum.
+  // Scaling the separately rounded significand and power can underflow early.
+  var drop = Math.max(width - 53, -1074 - scale);
+  if (drop <= 0) return parseInt(digits, 16) * Math.pow(2, scale);
+  var mantissa = BigInt("0x" + digits), shift = BigInt(drop);
+  var high = mantissa >> shift;
+  var tail = mantissa - (high << shift), half = 1n << (shift - 1n);
+  if (tail > half || (tail === half && (high & 1n) !== 0n)) high++;
+  return Number(high) * Math.pow(2, scale + drop);
 }
 // stdlib from_codepoint: the same range and surrogate checks as luajit. JS
 // strings are UTF-16, so the code point becomes UTF-16 text (as a literal does)
