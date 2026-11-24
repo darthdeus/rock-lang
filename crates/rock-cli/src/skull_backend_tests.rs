@@ -1579,3 +1579,25 @@ fn main() { print(earlier(1), WITHOUT_VALUE) }
         std::fs::read_to_string(fresh_main).unwrap()
     );
 }
+
+#[test]
+fn cumulative_overlay_can_introduce_a_code_ref_after_a_skipped_overlay() {
+    let original = r#"@nomangle fn target(x: int) -> int { x + 1 }
+@nomangle inline(lua) fn apply_ref(f: (int) -> int, x: int) -> int = "return f(x)"
+fn main() { print(target(1)) }
+"#;
+    let mut live = ProjectFixture::boot(original);
+    let first = original.replace("print(target(1))", "print(apply_ref(target, 1))");
+    let second = first.replace("apply_ref(target, 1)", "apply_ref(target, 2)");
+    for text in [&first, &second] {
+        let reload = live.edit(text).unwrap();
+        assert!(matches!(reload, super::SkullReload::Incremental { .. }));
+    }
+    let main = live
+        .main_text()
+        .replace("\n__rock_main_wrapper(main)\n", "\n");
+    match run_parts(&[&main, SYS_STUB, &live.overlay_text(), "main()"]) {
+        ExecOutcome::Output(out) => assert_eq!(out.trim(), "3"),
+        ExecOutcome::Errored(error) => panic!("{error}"),
+    }
+}

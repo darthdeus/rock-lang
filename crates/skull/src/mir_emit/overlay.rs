@@ -90,12 +90,15 @@ fn assemble_overlay(
     ws: &Workspace,
     cache: &SkullEmitCache,
     shader_changed: bool,
-    initialize_code_slots: bool,
 ) -> Result<(MirEmit, UnitComptimeReads), CompilerError> {
     let t_clone_artifact = Instant::now();
     let mut out = String::from("-- skull incremental overlay (loaded after main.lua)\n");
-    if initialize_code_slots {
+    let has_code_slots = cache.edit.code_artifact.has_escaping();
+    if has_code_slots && !cache.edit.code_slots_in_main {
+        // A cumulative overlay may be the first one the VM loads.
+        out.push_str("if not _G.__rock_code_slot_begin then\n");
         out.push_str(skull_codegen_lua::FN_MT_PRELUDE);
+        out.push_str("end\n");
     }
     let mut candidate_code_artifact = cache.edit.code_artifact.clone();
     let d_clone_artifact = t_clone_artifact.elapsed();
@@ -135,7 +138,6 @@ fn assemble_overlay(
 
     let d_definitions = t_definitions.elapsed();
     let t_code_slot_stage = Instant::now();
-    let has_code_slots = cache.edit.code_artifact.has_escaping();
     let code_slot_stage = code_slot_registration_lua_entries(
         ws,
         &cache.scx,
@@ -439,8 +441,6 @@ pub fn emit_overlay_with_span_edits(
         .filter_map(|body| cache.chunks.get(body).and_then(|chunk| chunk.as_ref().ok()))
         .flat_map(|chunk| chunk.code_artifact.entries());
     let next_code_artifact = cache.edit.code_artifact.with_replacements(replacements);
-    let initialize_code_slots =
-        !cache.edit.code_artifact.has_escaping() && next_code_artifact.has_escaping();
     let d_replacements = t_replacements.elapsed();
     if !cache
         .edit
@@ -491,8 +491,7 @@ pub fn emit_overlay_with_span_edits(
     let d_stale = t_stale.elapsed();
     let t_relower = t2.elapsed();
     let t3 = Instant::now();
-    let (mut emit, overlay_unit_reads) =
-        assemble_overlay(ws, cache, shader_changed, initialize_code_slots)?;
+    let (mut emit, overlay_unit_reads) = assemble_overlay(ws, cache, shader_changed)?;
     emit.runtime_changed = runtime_changed;
     cache.edit.record_artifact(&emit);
     for (key, reads) in overlay_unit_reads.globals {

@@ -82,6 +82,7 @@ pub(super) struct BodyEditState {
     // Keyed by emitted body, since a specialization is its own definition.
     emitted: FxHashSet<Instance>,
     pub(super) code_artifact: std::sync::Arc<skull_mir::code_identity::CodeArtifact>,
+    pub(super) code_slots_in_main: bool,
     lifecycle_plan: Option<std::sync::Arc<skull_mir::lifecycle::LifecyclePlan>>,
     pub(super) global_layout: Option<String>,
     // Kept by body overlays: definition structure is a full-reload boundary.
@@ -147,6 +148,13 @@ impl SkullEmitCache {
         built_specs: Vec<(Instance, Chunk)>,
     ) -> usize {
         self.edit.emitted = emitted;
+        self.edit.code_slots_in_main = emit
+            .code_artifact
+            .publication(
+                !emit.definition_plan.catalogs.is_empty(),
+                emit.lifecycle_plan.declarations > 0,
+            )
+            .publish;
         self.edit.record_artifact(emit);
         self.edit.global_layout = Some(emit.global_layout.clone());
         self.edit.definition_plan = Some(std::sync::Arc::new(emit.definition_plan.clone()));
