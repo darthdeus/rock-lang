@@ -2963,10 +2963,10 @@ fn map_key_rejection_reason(
             | BuiltinTy::Bool
             | BuiltinTy::String
             | BuiltinTy::Any
-            | BuiltinTy::Unit
             | BuiltinTy::Never
             | BuiltinTy::Error,
         ) => None,
+        TypeExpr::Builtin(BuiltinTy::Unit) => Some("a unit key is represented as null".to_string()),
         // A type parameter or an uninstantiated var is undecidable here.
         TypeExpr::Generic(..) | TypeExpr::Infer(..) => None,
         TypeExpr::App {

@@ -1,4 +1,4 @@
-use crate::common::{run_node, test_mid, ws_with, ws_with_named};
+use crate::common::{run_node, test_fn_ref, test_mid, ws_with, ws_with_named};
 use ustr::Ustr;
 
 fn run_program(file: &str, source: &str, extra_runtime: &[&str], after_program: &str) -> String {
@@ -63,6 +63,31 @@ fn main() {
     };
     assert!(
         error.message.contains("`value` struct"),
+        "{}",
+        error.message
+    );
+    let roots = [(test_fn_ref(&invalid, "main"), "main".to_string())];
+    let error = skull_codegen_js::emit::emit_with_closure(&invalid, &roots)
+        .expect_err("selected roots must also reject aggregate keys");
+    assert!(
+        error.message.contains("`value` struct"),
+        "{}",
+        error.message
+    );
+
+    let unit_key = ws_with(
+        r#"
+fn main() {
+    let map: Map<(), string> = map_new()
+    map[()] = "value"
+}
+"#,
+    );
+    let roots = [(test_fn_ref(&unit_key, "main"), "main".to_string())];
+    let error = skull_codegen_js::emit::emit_with_closure(&unit_key, &roots)
+        .expect_err("a unit key has no distinct runtime key");
+    assert!(
+        error.message.contains("represented as null"),
         "{}",
         error.message
     );

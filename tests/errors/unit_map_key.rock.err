@@ -1,0 +1,14 @@
+//=== TEST CASE: unit_map_key_Generic ===
+//! expect: unit key is represented as null
+fn main() {
+    let m: Map<(), int> = map_new()
+    m[()] = 42
+}
+
+//=== TEST CASE: unit_newtype_map_key_Generic ===
+//! expect: unit key is represented as null
+newtype UnitKey(())
+fn main() {
+    let m: Map<UnitKey, int> = map_new()
+    m[UnitKey(())] = 42
+}

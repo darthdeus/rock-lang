@@ -211,14 +211,12 @@ fn build_program_session(
     extra_roots: &[(FuncRef, String)],
     program_mode: bool,
 ) -> Result<ProgramBuild, CompilerError> {
-    if program_mode {
-        for module in ws.source_modules() {
-            if let Some((why, span)) = skull_mir::lower::map_key_rejection(ws, module.id) {
-                return Err(CompilerError::new_with_label(
-                    span,
-                    format!("this `Map` key is not value-keyed and would silently miss: {why}"),
-                ));
-            }
+    for module in ws.source_modules() {
+        if let Some((why, span)) = skull_mir::lower::map_key_rejection(ws, module.id) {
+            return Err(CompilerError::new_with_label(
+                span,
+                format!("this `Map` key is not value-keyed and would silently miss: {why}"),
+            ));
         }
     }
     let shaders = skull_mir::lower::collect_shader_collection(ws)?;
