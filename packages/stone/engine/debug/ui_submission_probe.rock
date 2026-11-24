@@ -9,28 +9,9 @@ global UI_SUBMISSION_PROBE_DRAW_HOOK: (fn(GpuDraw, GpuFullscreenGeometry))? = nu
 global UI_SUBMISSION_PROBE_GLYPH_HOOK: (fn(RenderBatch, TextLayout, TextGlyph, GlyphPose?, Vec2, int, GlyphData, float))? = null
 global UI_SUBMISSION_PROBE_REFUSAL_HOOK: (fn(string, string))? = null
 
-extern(ffi, "stone") fn stone_ui_probe_context(phase: string, pass: string, surface: string, space: string)
-
 pub fn ui_submission_probe_context(phase: string, pass: string, surface: string, space: string) {
     stone_ui_probe_context(phase, pass, surface, space)
 }
-
-extern(ffi, "stone") fn stone_ui_probe_begin(windowless: bool)
-extern(ffi, "stone") fn stone_ui_probe_stop()
-pub extern(ffi, "stone") fn stone_ui_probe_accept(kind: string, key: string, detail: string) -> int
-pub extern(ffi, "stone") fn stone_ui_probe_expect_vertices(id: int, vertices: Ptr<Vertex>, count: int, stride: int) -> bool
-extern(ffi, "stone") fn stone_ui_probe_observe(kind: string, detail: string) -> bool
-extern(ffi, "stone") fn stone_ui_probe_custom_consumed()
-pub extern(ffi, "stone") fn stone_ui_probe_end_operation()
-extern(ffi, "stone") fn stone_ui_probe_refuse(kind: string, detail: string) -> bool
-pub extern(ffi, "stone") fn stone_ui_probe_check_population(accepted: int, refused: int, observed: int) -> bool
-pub extern(ffi, "stone") fn stone_ui_probe_check(expected: int) -> bool
-pub extern(ffi, "stone") fn stone_ui_probe_accepted() -> int
-pub extern(ffi, "stone") fn stone_ui_probe_consumed() -> int
-pub extern(ffi, "stone") fn stone_ui_probe_z(index: int) -> int
-pub extern(ffi, "stone") fn stone_ui_probe_vertex(index: int, lane: int) -> float
-pub extern(ffi, "stone") fn stone_ui_probe_retire(kind: string, handle: uint) -> bool
-pub extern(ffi, "stone") fn stone_ui_probe_resource(kind: string, handle: uint, source: string, generation: int) -> bool
 
 pub fn ui_submission_probe_begin(windowless: bool = false) {
     UI_SUBMISSION_PROBE_BATCH_HOOK = ui_submission_probe_batch

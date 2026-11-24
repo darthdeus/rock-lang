@@ -167,7 +167,8 @@ fn cdef_sources() -> Vec<(String, String)> {
     let root = workspace_root();
     let mut sources = Vec::new();
     for rel in [
-        "packages/stone/engine/stone.h",
+        "packages/stone/engine/runtime_ffi.h",
+        "packages/stone/engine/rendering_ffi.h",
         "packages/stone-native/stone_native.h",
         "packages/stone/engine/debug/lua_alloc_split.h",
     ] {
@@ -558,7 +559,8 @@ fn rock_externs_match_their_cdef_shape() {
 #[test]
 fn stone_event_cdef_layout_matches_rust() {
     let header =
-        std::fs::read_to_string(workspace_root().join("packages/stone/engine/stone.h")).unwrap();
+        std::fs::read_to_string(workspace_root().join("packages/stone/engine/runtime_ffi.h"))
+            .unwrap();
     let decls: Vec<String> = c_declarations(&header)
         .into_iter()
         .filter(|decl| {
