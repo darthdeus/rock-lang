@@ -1,7 +1,7 @@
 //! Opt-in UI submission snapshots. No pointer or borrowed buffer survives a hook.
 use serde_json::{json, Value};
 use std::cell::RefCell;
-use std::ffi::{c_char, c_int, CStr};
+use std::ffi::{c_char, c_int, c_void, CStr};
 
 #[path = "ui_submission_probe_imgui.rs"]
 mod imgui_capture;
@@ -343,6 +343,7 @@ const BUILTIN_RESOURCES: [(&str, &str); 5] = [
     ("gl_texture", "builtin:none"),
 ];
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_ui_probe_begin(windowless: bool) {
     let resources = BUILTIN_RESOURCES
@@ -361,11 +362,13 @@ pub extern "C" fn stone_ui_probe_begin(windowless: bool) {
     });
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_ui_probe_stop() {
     PROBE.with(|p| p.borrow_mut().on = false);
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_ui_probe_context(
     phase: *const c_char,
@@ -381,6 +384,7 @@ pub extern "C" fn stone_ui_probe_context(
     })
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_ui_probe_accept(
     kind: *const c_char,
@@ -393,6 +397,7 @@ pub extern "C" fn stone_ui_probe_accept(
     })
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_ui_probe_end_operation() {
     hook((), (), |p| {
@@ -401,6 +406,7 @@ pub extern "C" fn stone_ui_probe_end_operation() {
     })
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_ui_probe_custom_consumed() {
     hook((), (), |p| {
@@ -410,10 +416,12 @@ pub extern "C" fn stone_ui_probe_custom_consumed() {
     crate::with_gl(device_state);
 }
 
+/// Copy Vertex rows using the Rock compiler's stride in f32 lanes.
+/// rock-ffi stone-rendering rename:data=vertices view:data=Vertex
 #[no_mangle]
 pub extern "C" fn stone_ui_probe_expect_vertices(
     id: c_int,
-    data: *const f32,
+    data: *const c_void,
     count: c_int,
     stride: c_int,
 ) -> bool {
@@ -421,7 +429,7 @@ pub extern "C" fn stone_ui_probe_expect_vertices(
         if id < 0 || count <= 0 || stride <= 0 {
             return Err("invalid expected vertex range".into());
         }
-        let vertices = unsafe { vertices(data, stride as usize, 0..count as usize) }?;
+        let vertices = unsafe { vertices(data.cast(), stride as usize, 0..count as usize) }?;
         let Some(row) = p.semantic.get_mut(id as usize) else {
             return Ok(false);
         };
@@ -430,6 +438,7 @@ pub extern "C" fn stone_ui_probe_expect_vertices(
     })
 }
 
+/// rock-ffi stone-rendering uint:handle
 #[no_mangle]
 pub extern "C" fn stone_ui_probe_resource(
     kind: *const c_char,
@@ -464,6 +473,7 @@ pub extern "C" fn stone_ui_probe_resource(
     })
 }
 
+/// rock-ffi stone-rendering uint:handle
 #[no_mangle]
 pub extern "C" fn stone_ui_probe_retire(kind: *const c_char, handle: u64) -> bool {
     hook(true, false, |p| {
@@ -479,6 +489,7 @@ pub extern "C" fn stone_ui_probe_retire(kind: *const c_char, handle: u64) -> boo
     })
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_ui_probe_observe(kind: *const c_char, detail: *const c_char) -> bool {
     hook(true, false, |p| {
@@ -492,6 +503,7 @@ pub extern "C" fn stone_ui_probe_observe(kind: *const c_char, detail: *const c_c
     })
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_ui_probe_refuse(kind: *const c_char, detail: *const c_char) -> bool {
     hook(true, false, |p| {
@@ -502,6 +514,7 @@ pub extern "C" fn stone_ui_probe_refuse(kind: *const c_char, detail: *const c_ch
     })
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_ui_probe_check_population(
     accepted: c_int,
@@ -519,27 +532,32 @@ pub extern "C" fn stone_ui_probe_check_population(
     })
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_ui_probe_check(expected: c_int) -> bool {
     expected > 0 && PROBE.with(|p| p.borrow().population_ok(expected as usize))
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_ui_probe_accepted() -> c_int {
     PROBE.with(|p| p.borrow().semantic.len() as c_int)
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_ui_probe_consumed() -> c_int {
     PROBE.with(|p| p.borrow().host.len() as c_int)
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_ui_probe_z(index: c_int) -> c_int {
     let z = PROBE.with(|p| p.borrow().semantic.get(index as usize)?["detail"]["z"].as_i64());
     z.unwrap_or(i32::MIN as i64) as c_int
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_ui_probe_vertex(index: c_int, lane: c_int) -> f64 {
     let semantic = |p: &Probe| {
@@ -652,7 +670,7 @@ mod tests {
         let data = [1.25f32, -0.0, 3.5];
         assert!(stone_ui_probe_expect_vertices(
             id as c_int,
-            data.as_ptr(),
+            data.as_ptr().cast(),
             1,
             3
         ));
@@ -670,7 +688,7 @@ mod tests {
         let mut data = [1.25f32, -0.0, 3.5];
         assert!(stone_ui_probe_expect_vertices(
             id as c_int,
-            data.as_ptr(),
+            data.as_ptr().cast(),
             1,
             3
         ));
