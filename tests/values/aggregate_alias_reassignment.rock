@@ -1,0 +1,47 @@
+enum Choice { Pair(int, int), Single(int) }
+
+fn choose(pair: bool) -> Choice {
+    if pair { return Choice::Pair(1, 7) }
+    return Choice::Single(2)
+}
+
+fn replace(first: Choice, next: Choice) -> int {
+    let original = first
+    let copy = original
+    original = next
+    let before = match copy { Choice::Pair(n, _) => n, Choice::Single(n) => n }
+    let after = match original { Choice::Pair(n, _) => n, Choice::Single(n) => n }
+    return before * 10 + after
+}
+
+@test
+fn reassigning_an_enum_local_does_not_change_its_copy() {
+    assert_eq(replace(choose(true), choose(false)), 12)
+    assert_eq(replace(choose(false), choose(true)), 21)
+}
+struct R { n: int }
+
+@test(output = "1 2")
+fn alias_should_follow_object_not_root_after_reassignment() {
+    let root = R { n: 1 }
+    let other = root
+    root = R { n: 2 }
+    print("{other.n} {root.n}")
+}
+
+@test(output = "9 2")
+fn alias_should_follow_object_before_reassignment() {
+    let root = R { n: 1 }
+    let other = root
+    root.n = 9
+    root = R { n: 2 }
+    print("{other.n} {root.n}")
+}
+
+@test(output = "1 2")
+fn reassigning_a_tuple_keeps_the_copied_tuple() {
+    let root = (1, "first")
+    let copy = root
+    root = (2, "second")
+    print("{copy.0} {root.0}")
+}

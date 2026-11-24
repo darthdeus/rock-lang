@@ -158,6 +158,8 @@ struct Families {
     cell_enum: Vec<Option<ustr::Ustr>>,
     // A mutable record alias shares its root's field cells.
     alias: Vec<Option<Idx<Cell>>>,
+    alias_read: Vec<Option<Idx<Inst>>>,
+    store_count: Vec<u8>,
     // Only a known non-null value can be rebuilt from its scalar fields when it escapes.
     value_order: HashMap<usize, ValueOrder>,
     /// Each alias member's ctor-rooted representative (itself when none).
@@ -233,6 +235,72 @@ fn store_inputs(func: &MirFunc) -> (Vec<bool>, Vec<Option<ustr::Ustr>>, Vec<u32>
     (disqualified, enum_hints, uses)
 }
 
+/// Scalar projections may move a load later in the CFG. They must still read
+/// the same object, including when the original load was an alias initializer.
+struct StoreSites {
+    positions: Vec<Option<(Idx<Block>, usize)>>,
+    predecessors: std::cell::OnceCell<Vec<Vec<Idx<Block>>>>,
+}
+
+impl StoreSites {
+    fn new(func: &MirFunc) -> Self {
+        let mut positions = vec![None; func.insts.len()];
+        for (block, body) in func.blocks.iter() {
+            for (pos, &inst) in body.insts.iter().enumerate() {
+                positions[raw(inst)] = Some((block, pos));
+            }
+        }
+        Self {
+            positions,
+            predecessors: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn between(&self, func: &MirFunc, cell: usize, read: Idx<Inst>, used: Idx<Inst>) -> bool {
+        let (start, start_pos) = self.positions[raw(read)].expect("load has a position");
+        let (end, end_pos) = self.positions[raw(used)].expect("use has a position");
+        let writes = |block: Idx<Block>, first, end| {
+            func.blocks[block].insts[first..end].iter().any(|&inst| {
+                matches!(func.insts[inst], Inst::Store { cell: dest, .. } if raw(dest) == cell)
+            })
+        };
+        if start == end && start_pos < end_pos {
+            return writes(start, start_pos + 1, end_pos);
+        }
+        let predecessors = self.predecessors.get_or_init(|| {
+            let mut predecessors = vec![Vec::new(); func.blocks.len()];
+            for (block, body) in func.blocks.iter() {
+                skull_mir::cfg::successors(&body.term, |to| predecessors[raw(to)].push(block));
+            }
+            predecessors
+        });
+        let mut pending = vec![(end, end_pos, false)];
+        let mut seen = HashSet::default();
+        let mut found_load = false;
+        while let Some((block, end, written)) = pending.pop() {
+            let first = if block == start && start_pos < end {
+                start_pos + 1
+            } else {
+                0
+            };
+            let written = written || writes(block, first, end);
+            if first != 0 {
+                found_load = true;
+                if written {
+                    return true;
+                }
+                continue;
+            }
+            for &pred in &predecessors[raw(block)] {
+                if seen.insert((pred, written)) {
+                    pending.push((pred, func.blocks[pred].insts.len(), written));
+                }
+            }
+        }
+        !found_load
+    }
+}
+
 fn field_write_ancestors(func: &MirFunc) -> HashSet<Idx<Inst>> {
     let mut projections = HashSet::default();
     for &site in func.blocks.values().flat_map(|b| &b.insts) {
@@ -267,12 +335,15 @@ impl Families {
         // Only the main CFG -- a cell touched inside a closure body is opaque (the
         // closure may run on any call), so leave it whole.
         let mut alias: Vec<Option<Idx<Cell>>> = vec![None; nc];
+        let mut alias_read = vec![None; nc];
+        let mut store_count = vec![0u8; nc];
         let main: HashSet<Idx<Block>> = top_level_blocks(func).into_iter().collect();
         for (bid, b) in func.blocks.iter() {
             let in_main = main.contains(&bid);
             for &i in &b.insts {
                 if let Inst::Store { cell, value } = &func.insts[i] {
                     let ck = raw(*cell);
+                    store_count[ck] = store_count[ck].saturating_add(1);
                     if !in_main {
                         disq[ck] = true;
                         continue;
@@ -282,6 +353,7 @@ impl Families {
                             disq[ck] = true;
                         } else {
                             alias[ck] = Some(*o);
+                            alias_read[ck] = Some(*value);
                         }
                         continue;
                     }
@@ -330,6 +402,8 @@ impl Families {
             disq,
             cell_enum,
             alias,
+            alias_read,
+            store_count,
             value_order,
             rep: (0..nc).collect(),
             copy_alias: vec![None; nc],
@@ -378,8 +452,7 @@ impl Families {
         }
     }
 
-    /// Value aliases and captured enum aliases get their own field cells.
-    /// Otherwise a later write to the root could change the captured snapshot.
+    /// Copy value aliases and give enum or tuple joins their own field cells.
     fn split_copy_aliases(&mut self, func: &MirFunc) {
         let captured = std::cell::OnceCell::new();
         let Families {
@@ -390,6 +463,7 @@ impl Families {
             value_order,
             rep,
             copy_alias,
+            store_count,
             ..
         } = self;
         for k in 0..*nc {
@@ -397,11 +471,17 @@ impl Families {
                 continue;
             }
             let cell = Idx::from_raw(RawIdx::from_u32(k as u32));
-            let copies_binding = matches!(cand[rep[k]], Some(StructId::Value(_)))
-                || (matches!(cand[rep[k]], Some(StructId::Enum(_)))
-                    && captured
-                        .get_or_init(|| captured_cells(func))
-                        .contains(&cell));
+            let copies_binding = match cand[rep[k]] {
+                Some(StructId::Value(_)) => true,
+                Some(StructId::Enum(_)) => {
+                    store_count[k] > 1
+                        || captured
+                            .get_or_init(|| captured_cells(func))
+                            .contains(&cell)
+                }
+                Some(StructId::Tuple(_)) => store_count[k] > 1,
+                _ => false,
+            };
             if !copies_binding {
                 continue;
             }
@@ -421,18 +501,41 @@ impl Families {
             cand_fields,
             disq,
             alias,
+            alias_read,
+            store_count,
             rep,
             copy_alias,
             ..
         } = self;
         let mut uses = LoadUses::default();
+        let writes = std::cell::OnceCell::new();
+        let crossed_store = |cell, read, use_site| {
+            store_count[cell] > 1
+                && writes
+                    .get_or_init(|| StoreSites::new(func))
+                    .between(func, cell, read, use_site)
+        };
         let field_write_ancestors = std::cell::OnceCell::new();
         let mut load_cell: HashMap<Idx<Inst>, Idx<Cell>> = HashMap::default();
         for (_, b) in func.blocks.iter() {
             for &i in &b.insts {
                 if let Inst::Load(c) = &func.insts[i] {
                     let ck = raw(*c);
-                    if cand[ck].is_some() && !disq[ck] {
+                    if cand[ck].is_none() || disq[ck] {
+                        continue;
+                    }
+                    let root = rep[ck];
+                    let mut member = ck;
+                    while member != root {
+                        let source = alias[member].expect("resolved alias has a source");
+                        let read = alias_read[member].expect("resolved alias has a load");
+                        if store_count[member] > 1 || crossed_store(raw(source), read, i) {
+                            disq[ck] = true;
+                            break;
+                        }
+                        member = raw(source);
+                    }
+                    if !disq[ck] {
                         load_cell.insert(i, *c);
                     }
                 }
@@ -442,6 +545,10 @@ impl Families {
             for &i in &b.insts {
                 func.insts[i].uses_each(&mut |op| {
                     if let Some(&c) = load_cell.get(&op) {
+                        if crossed_store(rep[raw(c)], op, i) {
+                            disq[raw(c)] = true;
+                            return;
+                        }
                         let known = |f: &ustr::Ustr| {
                             cand_fields[rep[raw(c)]]
                                 .as_ref()
