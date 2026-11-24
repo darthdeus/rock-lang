@@ -26,21 +26,21 @@ fn check_generated(path: &Path, generated: String, out: &Path, stale: &mut Vec<S
     stale.push(format!("copy {} to {}", updated.display(), path.display()));
 }
 
-fn stone_native_ffi() {
-    use ffi_codegen::{GENERATED, STONE_NATIVE, STONE_NATIVE_SOURCES};
+fn package_ffi(module: &ffi_codegen::Module, root: &str, header: &str, sources: &[(&str, &str)]) {
+    use ffi_codegen::GENERATED;
 
-    let rock = Path::new("../packages/stone-native");
-    let out = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo OUT_DIR"));
+    let rock = Path::new(root);
+    let out = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo OUT_DIR")).join(module.package);
+    fs::create_dir_all(&out).unwrap();
     for path in [
-        "ffi_codegen.rs",
-        "../packages/stone-native/stone_native.h",
-        "../packages/stone-native/bindings.rock",
-        "../packages/stone-native/wire_layouts.rock",
-        "../packages/stone-native/tests/ffi_layouts.rock",
+        header,
+        "bindings.rock",
+        "wire_layouts.rock",
+        "tests/ffi_layouts.rock",
     ] {
-        println!("cargo:rerun-if-changed={path}");
+        println!("cargo:rerun-if-changed={}", rock.join(path).display());
     }
-    let sources: Vec<_> = STONE_NATIVE_SOURCES
+    let sources: Vec<_> = sources
         .iter()
         .map(|(file, module)| {
             let path = Path::new("src").join(file);
@@ -48,22 +48,22 @@ fn stone_native_ffi() {
             (*module, read(&path))
         })
         .collect();
-    let generated = STONE_NATIVE
+    let generated = module
         .bindings(
             sources
                 .iter()
                 .map(|(module, text)| (*module, text.as_str())),
         )
-        .unwrap_or_else(|e| panic!("Stone native FFI: {e}"));
-    let header = rock.join("stone_native.h");
+        .unwrap_or_else(|e| panic!("{} FFI: {e}", module.package));
+    let header = rock.join(header);
     let existing = read(&header);
-    let (inline_lua, _) = existing
+    let (authored, _) = existing
         .split_once(GENERATED)
         .expect("FFI declaration marker");
     let mut stale = Vec::new();
     check_generated(
         &header,
-        format!("{inline_lua}{GENERATED}{}", generated.cdef),
+        format!("{authored}{GENERATED}{}", generated.cdef),
         &out,
         &mut stale,
     );
@@ -75,14 +75,15 @@ fn stone_native_ffi() {
     );
     assert!(
         stale.is_empty(),
-        "stale Stone native ABI:\n{}",
+        "stale {} ABI:\n{}",
+        module.package,
         stale.join("\n")
     );
 
     let layout_source = rock.join("wire_layouts.rock");
-    let (layouts, tests) = STONE_NATIVE
+    let (layouts, tests) = module
         .layouts("wire_layouts.rock", &read(&layout_source))
-        .unwrap_or_else(|e| panic!("Stone native layout: {e}"));
+        .unwrap_or_else(|e| panic!("{} layout: {e}", module.package));
     check_generated(
         &rock.join("tests/ffi_layouts.rock"),
         tests,
@@ -91,12 +92,19 @@ fn stone_native_ffi() {
     );
     assert!(
         stale.is_empty(),
-        "stale Stone native layouts:\n{}",
+        "stale {} layouts:\n{}",
+        module.package,
         stale.join("\n")
     );
 
-    let file = out.join("stone_native_ffi.rs");
-    let rust = format!("{layouts}{}", generated.rust);
+    let file = out.join("ffi.rs");
+    let c_layout = module
+        .c_owned_layout
+        .map(|generate| {
+            generate(authored).unwrap_or_else(|e| panic!("{} layout: {e}", module.package))
+        })
+        .unwrap_or_default();
+    let rust = format!("{layouts}{c_layout}{}", generated.rust);
     if !fs::read_to_string(&file)
         .as_deref()
         .is_ok_and(|stored| stored == rust)
@@ -106,12 +114,28 @@ fn stone_native_ffi() {
 }
 
 fn main() {
+    use ffi_codegen::{STONE_ENGINE, STONE_ENGINE_SOURCES, STONE_NATIVE, STONE_NATIVE_SOURCES};
+
+    println!("cargo:rerun-if-changed=ffi_codegen.rs");
     rayon::ThreadPoolBuilder::new()
         .num_threads(1)
         .stack_size(rock_core::nesting::COMPILER_STACK_BYTES)
         .build()
         .expect("compiler worker")
-        .install(stone_native_ffi);
+        .install(|| {
+            package_ffi(
+                &STONE_NATIVE,
+                "../packages/stone-native",
+                "stone_native.h",
+                STONE_NATIVE_SOURCES,
+            );
+            package_ffi(
+                &STONE_ENGINE,
+                "../packages/stone",
+                "engine/stone.h",
+                STONE_ENGINE_SOURCES,
+            );
+        });
 
     // Target (not host) platform, for cross-compilation: CARGO_CFG_TARGET_OS is
     // set by Cargo to the platform being compiled FOR.

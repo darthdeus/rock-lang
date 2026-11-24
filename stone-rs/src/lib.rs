@@ -315,8 +315,14 @@ mod light_table;
 mod meadow;
 mod nav;
 mod native_ffi {
-    include!(concat!(env!("OUT_DIR"), "/stone_native_ffi.rs"));
+    include!(concat!(env!("OUT_DIR"), "/stone-native/ffi.rs"));
 }
+mod engine_ffi {
+    include!(concat!(env!("OUT_DIR"), "/stone/ffi.rs"));
+}
+use engine_ffi::STONE_TEXT_INPUT_BYTES;
+pub use engine_ffi::{GraphicsStats, StoneEvent};
+
 mod relight_jobs;
 mod screenshot;
 #[cfg(test)]
@@ -881,27 +887,6 @@ pub enum StoneEventType {
     TextInput = 13,
 }
 
-const STONE_TEXT_INPUT_BYTES: usize = 32;
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct StoneEvent {
-    pub event_type: StoneEventType,
-    pub key: c_int,
-    pub scancode: c_int,
-    pub modifiers: c_int,
-    pub repeat: bool,
-    pub mouse_button: c_int,
-    pub mouse_x: c_int,
-    pub mouse_y: c_int,
-    pub pad_instance_id: c_int,
-    pub pad_button: *const c_char,
-    pub pad_axis: *const c_char,
-    pub pad_value: c_int,
-    pub pad_sync: bool,
-    pub text: [c_char; STONE_TEXT_INPUT_BYTES],
-}
-
 #[cfg(test)]
 impl StoneEvent {
     fn text(&self) -> &str {
@@ -1025,26 +1010,6 @@ fn stone_event_from_sdl(event: &Event) -> Option<StoneEvent> {
         _ => return None,
     }
     Some(translated)
-}
-
-#[repr(C)]
-#[derive(Debug, Default, Clone, Copy)]
-pub struct GraphicsStats {
-    pub draw_calls: c_int,
-    pub text_draw_calls: c_int,
-    pub canvas_switches: c_int,
-    pub shader_switches: c_int,
-    pub stream_upload_calls: c_int,
-    pub stream_storage_replacements: c_int,
-    pub stream_upload_bytes: c_int,
-    pub streamed_vertices: c_int,
-    pub retained_upload_calls: c_int,
-    pub retained_upload_bytes: c_int,
-    pub retained_uploaded_vertices: c_int,
-    pub images: c_int,
-    pub canvases: c_int,
-    pub texture_memory_mib: c_int,
-    pub instanced_draws: c_int,
 }
 
 // We use thread-local storage for the window since SDL2 isn't thread-safe anyway
@@ -3173,6 +3138,7 @@ fn texture_bytes_to_mib(bytes: u64) -> c_int {
     })
 }
 
+/// rock-ffi stone return-out
 #[no_mangle]
 pub extern "C" fn stone_get_graphics_stats(stats: *mut GraphicsStats) {
     if stats.is_null() {

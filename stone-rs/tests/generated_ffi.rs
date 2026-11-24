@@ -183,3 +183,51 @@ fn a_byte_is_a_rock_integer_without_the_boolean_projection() {
     assert!(generated.cdef.contains("uint8_t example(void);"));
     assert!(generated.rock.contains("fn example() -> bool"));
 }
+
+#[test]
+fn engine_stats_prototypes_are_generated() {
+    let header = include_str!("../../packages/stone/engine/stone.h");
+    let (_, generated) = header
+        .split_once(ffi_codegen::GENERATED)
+        .expect("generated engine declarations");
+    for name in [
+        "stone_get_graphics_stats",
+        "stone_get_image_frame_stats",
+        "stone_get_image_profile_stats",
+    ] {
+        assert!(generated.contains(name), "{name}");
+    }
+}
+
+#[test]
+fn graphics_stats_requires_a_writable_result_slot() {
+    let rust = include_str!("../src/lib.rs");
+    assert!(rust.contains("fn stone_get_graphics_stats(stats: *mut GraphicsStats)"));
+    let changed = rust.replace(
+        "fn stone_get_graphics_stats(stats: *mut GraphicsStats)",
+        "fn stone_get_graphics_stats(stats: *const GraphicsStats)",
+    );
+    let problem = ffi_codegen::STONE_ENGINE
+        .bindings([("", changed.as_str())])
+        .err()
+        .unwrap();
+    assert!(
+        problem.contains("stone_get_graphics_stats: return-out needs a leading mutable pointer")
+    );
+}
+
+#[test]
+fn stone_event_layout_comes_from_the_c_header() {
+    let generated = include_str!(concat!(env!("OUT_DIR"), "/stone/ffi.rs"));
+    assert!(generated.contains("pub struct StoneEvent {"));
+}
+
+#[test]
+fn stone_event_text_extent_follows_the_c_layout() {
+    let header = include_str!("../../packages/stone/engine/stone.h");
+    assert!(header.contains("char text[32];"));
+    let changed = header.replace("char text[32];", "char text[48];");
+    let generate = ffi_codegen::STONE_ENGINE.c_owned_layout.unwrap();
+    let generated = generate(&changed).unwrap();
+    assert!(generated.contains("const STONE_TEXT_INPUT_BYTES: usize = 48;"));
+}

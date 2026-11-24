@@ -8,20 +8,7 @@ use crate::handles::Class;
 use crate::image_publication::{PublicationSite, RequestClass};
 use crate::{asset_registry, image_decode, log_once, with_gl};
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ImageLoadStats {
-    pub load_calls: c_int,
-    pub load_failures: c_int,
-    pub decoded_bytes: c_int,
-    pub load_us: c_int,
-    pub upload_calls: c_int,
-    pub upload_bytes: c_int,
-    pub wait_us: c_int,
-    pub upload_us: c_int,
-    pub active_frames: c_int,
-    pub max_wait_us: c_int,
-}
+pub use crate::engine_ffi::ImageLoadStats;
 
 thread_local! {
     static FRAME_IMAGE_LOAD_STATS: RefCell<ImageLoadStats> = RefCell::new(ImageLoadStats::default());
@@ -114,6 +101,7 @@ pub extern "C" fn stone_reset_image_profile_stats_to_frame() {
     PROFILE_IMAGE_LOAD_STATS.with(|stats| *stats.borrow_mut() = frame);
 }
 
+/// rock-ffi stone return-out
 #[no_mangle]
 pub extern "C" fn stone_get_image_frame_stats(out: *mut ImageLoadStats) {
     if out.is_null() {
@@ -122,6 +110,7 @@ pub extern "C" fn stone_get_image_frame_stats(out: *mut ImageLoadStats) {
     FRAME_IMAGE_LOAD_STATS.with(|stats| unsafe { *out = *stats.borrow() });
 }
 
+/// rock-ffi stone return-out
 #[no_mangle]
 pub extern "C" fn stone_get_image_profile_stats(out: *mut ImageLoadStats) {
     if out.is_null() {
