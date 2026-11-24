@@ -5,7 +5,21 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 // Two signed words preserve Rock's exact integer range without exposing i64
 // cdata to Lua arithmetic. Lengths count values, not words.
-include!(concat!(env!("OUT_DIR"), "/stone_nav_ffi.rs"));
+pub(super) use crate::native_ffi::NativeNavIntWire;
+
+/// rock-ffi-array stone-native NAV_SPACE_LAYOUT
+type SpaceLayoutRow = [NativeNavIntWire; 3];
+/// rock-ffi-array stone-native NAV_LINK
+type LinkRow = [NativeNavIntWire; 8];
+/// rock-ffi-array stone-native NAV_ROUTE
+type RouteRow = [NativeNavIntWire; 3];
+/// rock-ffi-array stone-native NAV_PLACE
+type PlaceRow = [NativeNavIntWire; 3];
+
+const WORD_BYTES: usize = std::mem::size_of::<NativeNavIntWire>();
+const SPACE_LANES: usize = std::mem::size_of::<SpaceLayoutRow>() / WORD_BYTES;
+const LINK_LANES: usize = std::mem::size_of::<LinkRow>() / WORD_BYTES;
+const ROUTE_LANES: usize = std::mem::size_of::<RouteRow>() / WORD_BYTES;
 
 impl NativeNavIntWire {
     pub(super) fn value(self) -> int {
@@ -223,9 +237,13 @@ unsafe fn input<'a, T>(ptr: *const T, len: int) -> &'a [T] {
     std::slice::from_raw_parts(ptr, len)
 }
 fn links(values: &[NativeNavIntWire]) -> IdxVec<NavLinkInput> {
-    assert_eq!(values.len() % 8, 0, "navigation link record length");
+    assert_eq!(
+        values.len() % LINK_LANES,
+        0,
+        "navigation link record length"
+    );
     values
-        .as_chunks::<8>()
+        .as_chunks::<LINK_LANES>()
         .0
         .iter()
         .map(|v| NavLinkInput {
@@ -238,6 +256,7 @@ fn links(values: &[NativeNavIntWire]) -> IdxVec<NavLinkInput> {
         .into()
 }
 
+/// rock-ffi stone-native
 #[no_mangle]
 pub unsafe extern "C" fn stone_nav_create(
     layout: *const NativeNavIntWire,
@@ -246,15 +265,19 @@ pub unsafe extern "C" fn stone_nav_create(
     corners: *const NativeNavIntWire,
     extra: *const NativeNavIntWire,
     tiles: int,
-    link_data: *const NativeNavIntWire,
+    links: *const NativeNavIntWire,
     link_len: int,
     cluster_size: int,
 ) -> int {
     let result = std::panic::catch_unwind(|| {
         let layout = input(layout, layout_len);
-        assert_eq!(layout.len() % 3, 0, "navigation space record length");
+        assert_eq!(
+            layout.len() % SPACE_LANES,
+            0,
+            "navigation space record length"
+        );
         let spaces: Vec<_> = layout
-            .as_chunks::<3>()
+            .as_chunks::<SPACE_LANES>()
             .0
             .iter()
             .map(|v| NavSpaceLayout {
@@ -279,7 +302,7 @@ pub unsafe extern "C" fn stone_nav_create(
             .map(|v| v.value())
             .collect::<Vec<_>>()
             .into();
-        let links = links(input(link_data, link_len));
+        let links = self::links(input(links, link_len));
         let graph =
             nav_graph_create_owned(&spaces, blocked, corners, extra, &links.0, cluster_size);
         let mut query = NavQuery::default();
@@ -309,6 +332,7 @@ pub unsafe extern "C" fn stone_nav_create(
         }
     }
 }
+/// rock-ffi stone-native
 #[no_mangle]
 pub extern "C" fn stone_nav_fork(handle: int) -> int {
     with_nav(handle, |source| {
@@ -323,11 +347,13 @@ pub extern "C" fn stone_nav_fork(handle: int) -> int {
     })
 }
 
+/// rock-ffi stone-native
 #[no_mangle]
 pub extern "C" fn stone_nav_free(handle: int) {
     navs().lock().unwrap().remove(&handle);
 }
 
+/// rock-ffi stone-native
 #[no_mangle]
 pub unsafe extern "C" fn stone_nav_set_links(
     handle: int,
@@ -341,6 +367,7 @@ pub unsafe extern "C" fn stone_nav_set_links(
         1
     })
 }
+/// rock-ffi stone-native
 #[no_mangle]
 pub extern "C" fn stone_nav_edit(
     handle: int,
@@ -393,6 +420,7 @@ pub extern "C" fn stone_nav_edit(
         _ => panic!("unknown navigation edit {}", op),
     })
 }
+/// rock-ffi stone-native
 #[no_mangle]
 pub extern "C" fn stone_nav_get(handle: int, op: int, a: int, b: int, c: int) -> int {
     with_nav(handle, |n| {
@@ -451,6 +479,7 @@ pub extern "C" fn stone_nav_get(handle: int, op: int, a: int, b: int, c: int) ->
         }
     })
 }
+/// rock-ffi stone-native
 #[no_mangle]
 pub extern "C" fn stone_nav_request(
     handle: int,
@@ -484,6 +513,7 @@ pub extern "C" fn stone_nav_request(
         id.slot
     })
 }
+/// rock-ffi stone-native
 #[no_mangle]
 pub extern "C" fn stone_nav_plan(
     handle: int,
@@ -530,6 +560,7 @@ pub extern "C" fn stone_nav_plan(
         }
     })
 }
+/// rock-ffi stone-native
 #[no_mangle]
 pub unsafe extern "C" fn stone_nav_step(
     handle: int,
@@ -558,10 +589,7 @@ pub unsafe extern "C" fn stone_nav_step(
             NavStep::Unreachable => 4,
             NavStep::Blocked => 5,
             NavStep::Step(p) | NavStep::Teleport(p) => {
-                assert!(!out.is_null(), "null navigation step output");
-                *out = p.space.value.into();
-                *out.add(1) = p.grid.x.into();
-                *out.add(2) = p.grid.y.into();
+                write_place(out, p);
                 if matches!(step, NavStep::Step(_)) {
                     1
                 } else {
@@ -571,6 +599,7 @@ pub unsafe extern "C" fn stone_nav_step(
         }
     })
 }
+/// rock-ffi stone-native
 #[no_mangle]
 pub unsafe extern "C" fn stone_nav_route_copy(
     handle: int,
@@ -581,21 +610,22 @@ pub unsafe extern "C" fn stone_nav_route_copy(
 ) -> int {
     with_nav(handle, |n| {
         let plan = nav_plan_get(&n.query, NavPlanId { slot, generation });
-        if len < plan.route.len() * 3 {
+        if len < plan.route.len() * ROUTE_LANES as int {
             return -1;
         }
         if plan.route.len() > 0 {
             assert!(!out.is_null(), "null navigation route output");
         }
         for (i, tile) in plan.route.iter().enumerate() {
-            *out.add(i * 3) = tile.x.into();
-            *out.add(i * 3 + 1) = tile.y.into();
-            *out.add(i * 3 + 2) = tile.link.into();
+            *out.add(i * ROUTE_LANES) = tile.x.into();
+            *out.add(i * ROUTE_LANES + 1) = tile.y.into();
+            *out.add(i * ROUTE_LANES + 2) = tile.link.into();
         }
         plan.route.len()
     })
 }
 
+/// rock-ffi stone-native
 #[no_mangle]
 pub unsafe extern "C" fn stone_nav_route_restore(
     handle: int,
@@ -609,17 +639,21 @@ pub unsafe extern "C" fn stone_nav_route_restore(
 ) -> int {
     with_nav(handle, |n| {
         let values = input(data, len);
-        assert_eq!(values.len() % 3, 0, "navigation route record length");
+        assert_eq!(
+            values.len() % ROUTE_LANES,
+            0,
+            "navigation route record length"
+        );
         let id = NavPlanId { slot, generation };
         nav_plan_get(&n.query, id);
-        let route_len = (values.len() / 3) as int;
+        let route_len = (values.len() / ROUTE_LANES) as int;
         assert!(route_len > 0, "cannot restore an empty navigation route");
         assert!(
             path_pos >= 0 && path_pos < route_len,
             "navigation route position is out of range"
         );
         let mut route = Vec::with_capacity(route_len as usize);
-        for v in values.as_chunks::<3>().0 {
+        for v in values.as_chunks::<ROUTE_LANES>().0 {
             let tile = NavRouteTile {
                 x: v[0].value(),
                 y: v[1].value(),
@@ -666,11 +700,13 @@ pub unsafe extern "C" fn stone_nav_route_restore(
     })
 }
 
+/// rock-ffi stone-native
 #[no_mangle]
 pub extern "C" fn stone_nav_edge_cost(step: int, ea: int, eb: int) -> int {
     nav_edge_cost(step, ea, eb)
 }
 
+/// rock-ffi stone-native
 #[no_mangle]
 pub extern "C" fn stone_nav_metric(handle: int, field: int) -> f64 {
     let nav = navs().lock().unwrap().get(&handle).cloned();
@@ -693,10 +729,10 @@ pub extern "C" fn stone_nav_metric(handle: int, field: int) -> f64 {
 
 unsafe fn write_place(out: *mut NativeNavIntWire, p: Place) {
     assert!(!out.is_null(), "null navigation place output");
-    *out = p.space.value.into();
-    *out.add(1) = p.grid.x.into();
-    *out.add(2) = p.grid.y.into();
+    let row: PlaceRow = [p.space.value.into(), p.grid.x.into(), p.grid.y.into()];
+    out.cast::<PlaceRow>().write(row);
 }
+/// rock-ffi stone-native
 #[no_mangle]
 pub extern "C" fn stone_nav_descend_prepare(
     handle: int,
@@ -714,6 +750,7 @@ pub extern "C" fn stone_nav_descend_prepare(
         n.descend.as_ref().map_or(0, |s| s.candidates.len() as int)
     })
 }
+/// rock-ffi stone-native
 #[no_mangle]
 pub unsafe extern "C" fn stone_nav_descend_candidate(
     handle: int,
@@ -734,6 +771,7 @@ pub unsafe extern "C" fn stone_nav_descend_candidate(
         }
     })
 }
+/// rock-ffi stone-native
 #[no_mangle]
 pub extern "C" fn stone_nav_descend_accept(handle: int, index: int, phase: int) -> int {
     with_nav(handle, |n| {
@@ -744,6 +782,7 @@ pub extern "C" fn stone_nav_descend_accept(handle: int, index: int, phase: int) 
         1
     })
 }
+/// rock-ffi stone-native
 #[no_mangle]
 pub unsafe extern "C" fn stone_nav_descend_result(handle: int, out: *mut NativeNavIntWire) -> int {
     with_nav(handle, |n| {
@@ -756,6 +795,7 @@ pub unsafe extern "C" fn stone_nav_descend_result(handle: int, out: *mut NativeN
     })
 }
 
+/// rock-ffi stone-native
 #[no_mangle]
 pub unsafe extern "C" fn stone_nav_layout_valid(
     data: *const NativeNavIntWire,
@@ -764,11 +804,11 @@ pub unsafe extern "C" fn stone_nav_layout_valid(
 ) -> int {
     std::panic::catch_unwind(|| {
         let values = input(data, len);
-        if values.len() % 3 != 0 {
+        if values.len() % SPACE_LANES != 0 {
             return 0;
         }
         let spaces: Vec<_> = values
-            .as_chunks::<3>()
+            .as_chunks::<SPACE_LANES>()
             .0
             .iter()
             .map(|v| NavSpaceLayout {

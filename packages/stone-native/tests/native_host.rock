@@ -75,7 +75,7 @@ fn native_image_fill_rejects_invalid_handle() {
 @test
 fn navigation_reads_rock_value_layout() {
     stone_native_load()
-    let layout = native_nav_buffer(6)
+    let layout = native_nav_buffer(2 * NAV_SPACE_LAYOUT_LANES)
     layout[0] = native_nav_int(1)
     layout[1] = native_nav_int(-120)
     layout[2] = native_nav_int(0)
@@ -87,4 +87,22 @@ fn navigation_reads_rock_value_layout() {
     layout[3] = native_nav_int(1)
     assert_eq(stone_nav_layout_valid(layout.ptr, layout.len, 10), 0,
         "Rust reads the updated Rock buffer and rejects the duplicate ID")
+}
+
+@test
+fn meadow_reads_and_writes_packed_words() {
+    stone_native_load()
+    let point = native_buffer_u8(MEADOW_BASE_HEADER_BYTES)
+    meadow_snapshot_set(point, 4, 3.5)
+    meadow_snapshot_set(point, 5, -2.25)
+    meadow_snapshot_set(point, 6, 1.5)
+    meadow_snapshot_set(point, 7, 1.0)
+    assert_eq(stone_meadow_distance(point.ptr, point.len, 6.0, -2.25), 1.0,
+        "Rust decodes the base fields written by Rock")
+
+    let profile = native_buffer_u8(MEADOW_PROFILE_BYTES)
+    assert_eq(stone_meadow_profile(3.5, -2.25, profile.ptr), 0)
+    for i in 0..MEADOW_PROFILE_LANES {
+        assert(meadow_snapshot_get(profile, i) > 0.0, "Rock reads the Rust output lanes")
+    }
 }

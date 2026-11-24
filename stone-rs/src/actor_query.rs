@@ -1,9 +1,15 @@
 use crate::ffi_array::{slice, slice_mut, Span};
 
-const LANES_PER_RECORD: usize = 5;
+/// rock-ffi-array stone-native ACTOR_RECORD
+type ActorRecord = [i32; 5];
+/// rock-ffi-array stone-native ACTOR_QUERY_HEADER
+type QueryHeader = [i32; 2];
+const LANES_PER_RECORD: usize = std::mem::size_of::<ActorRecord>() / std::mem::size_of::<i32>();
+const HEADER_LANES: usize = std::mem::size_of::<QueryHeader>() / std::mem::size_of::<i32>();
 
 /// `records` has five i32 lanes per slot: `[active, x, y, generation, installed]`.
 /// `output` receives `[matched_count, examined_count, matching_slot...]`, slots ascending.
+/// rock-ffi stone-native
 #[no_mangle]
 pub extern "C" fn stone_actor_query_rect(
     records: *const i32,
@@ -29,7 +35,7 @@ pub extern "C" fn stone_actor_query_rect(
     if !record_lanes.is_multiple_of(LANES_PER_RECORD)
         || slot_count > i32::MAX as usize
         || candidate_count > slot_count
-        || output_capacity < candidate_count + 2
+        || output_capacity < candidate_count + HEADER_LANES
     {
         return false;
     }
@@ -59,7 +65,7 @@ pub extern "C" fn stone_actor_query_rect(
         return false;
     }
 
-    let result = unsafe { slice_mut(output, candidate_count + 2) };
+    let result = unsafe { slice_mut(output, candidate_count + HEADER_LANES) };
     let mut matched_count = 0usize;
     let mut examined_count = 0usize;
     for &slot in candidates {
@@ -70,12 +76,12 @@ pub extern "C" fn stone_actor_query_rect(
         examined_count += 1;
         let (x, y) = (record[1], record[2]);
         if x >= min_x && x <= max_x && y >= min_y && y <= max_y {
-            result[2 + matched_count] = slot;
+            result[HEADER_LANES + matched_count] = slot;
             matched_count += 1;
         }
     }
 
-    result[2..2 + matched_count].sort_unstable();
+    result[HEADER_LANES..HEADER_LANES + matched_count].sort_unstable();
     result[0] = matched_count as i32;
     result[1] = examined_count as i32;
     true

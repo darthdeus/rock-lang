@@ -1,7 +1,27 @@
 //! Pure terrain sampling and meadow geometry over copied, double-precision snapshots.
 //! The game supplies fields, prop footprints, layout and damage addressing.
 
-use std::slice;
+use crate::native_ffi::NativeMeadowGrowth;
+use std::{mem::size_of, slice};
+
+/// rock-ffi-array stone-native MEADOW_WORD
+type MeadowWord = [f64; 1];
+const WORD_BYTES: usize = size_of::<MeadowWord>();
+
+/// rock-ffi-array stone-native MEADOW_SNAPSHOT_HEADER
+type SnapshotHeader = [f64; 27];
+/// rock-ffi-array stone-native MEADOW_BASE_HEADER
+type BaseHeader = [f64; 9];
+/// rock-ffi-array stone-native MEADOW_POINT
+type MeadowPoint = [f64; 2];
+/// rock-ffi-array stone-native MEADOW_PARAMS
+type MeadowParams = [f64; 15];
+/// rock-ffi-array stone-native MEADOW_PROFILE
+type MeadowProfile = [f64; 3];
+
+const SNAPSHOT_HEADER: usize = size_of::<SnapshotHeader>() / WORD_BYTES;
+const BASE_HEADER: usize = size_of::<BaseHeader>() / WORD_BYTES;
+const POINT_LANES: usize = size_of::<MeadowPoint>() / WORD_BYTES;
 
 #[inline(always)]
 fn floor(x: f64) -> f64 {
@@ -67,7 +87,7 @@ fn field(f: &[f64], x: f64, y: f64) -> f64 {
 fn edge_noise(x: f64, y: f64) -> f64 {
     (x * 7.13 + y * 3.71).sin() * 0.08 + (y * 12.7 - x * 4.1).sin() * 0.04
 }
-fn profile(x: f64, y: f64) -> [f64; 3] {
+fn profile(x: f64, y: f64) -> MeadowProfile {
     let broad = noise(x / 6.5 + 13.7, y / 6.5 + 29.1);
     let clump = noise(x / 1.1 + 41.3, y / 1.1 + 7.9);
     let cover = smooth(0.28, 0.72, broad * 0.68 + clump * 0.32);
@@ -80,7 +100,7 @@ fn profile(x: f64, y: f64) -> [f64; 3] {
 }
 
 struct Snapshot {
-    fields: [f64; 27],
+    fields: SnapshotHeader,
     bases: Vec<Base>,
 }
 struct Base {
@@ -99,10 +119,10 @@ impl Base {
         if n >= 3 {
             let mut prev = n - 1;
             for i in 0..n {
-                let ax = b[9 + i * 2];
-                let ay = b[10 + i * 2];
-                let bx = b[9 + prev * 2];
-                let by = b[10 + prev * 2];
+                let ax = b[BASE_HEADER + i * POINT_LANES];
+                let ay = b[BASE_HEADER + i * POINT_LANES + 1];
+                let bx = b[BASE_HEADER + prev * POINT_LANES];
+                let by = b[BASE_HEADER + prev * POINT_LANES + 1];
                 if (ay > y) != (by > y) && x < (bx - ax) * (y - ay) / (by - ay) + ax {
                     inside = !inside;
                 }
@@ -115,10 +135,10 @@ impl Base {
         let mut nearest = 1000000.0f64;
         let mut prev = n.saturating_sub(1);
         for i in 0..n {
-            let ax = b[9 + prev * 2];
-            let ay = b[10 + prev * 2];
-            let ex = b[9 + i * 2] - ax;
-            let ey = b[10 + i * 2] - ay;
+            let ax = b[BASE_HEADER + prev * POINT_LANES];
+            let ay = b[BASE_HEADER + prev * POINT_LANES + 1];
+            let ex = b[BASE_HEADER + i * POINT_LANES] - ax;
+            let ey = b[BASE_HEADER + i * POINT_LANES + 1] - ay;
             let dx = x - ax;
             let dy = y - ay;
             let along = ((dx * ex + dy * ey) / (ex * ex + ey * ey).max(0.000001)).clamp(0.0, 1.0);
@@ -134,14 +154,14 @@ fn parse_bases(data: &[f64]) -> Option<Vec<Base>> {
     let mut bases = Vec::new();
     let mut at = 0;
     while at < data.len() {
-        if data.len() - at < 9 {
+        if data.len() - at < BASE_HEADER {
             return None;
         }
         let n = data[at + 8];
         if !n.is_finite() || n < 0.0 || n.fract() != 0.0 || n > 65536.0 {
             return None;
         }
-        let end = at + 9 + n as usize * 2;
+        let end = at + BASE_HEADER + n as usize * POINT_LANES;
         if end > data.len() {
             return None;
         }
@@ -153,7 +173,11 @@ fn parse_bases(data: &[f64]) -> Option<Vec<Base>> {
     Some(bases)
 }
 unsafe fn doubles(ptr: *const u8, len: i32) -> Option<Vec<f64>> {
-    if len < 0 || len % 8 != 0 || len > 8 * 1024 * 1024 || (len > 0 && ptr.is_null()) {
+    if len < 0
+        || len % WORD_BYTES as i32 != 0
+        || len > 8 * 1024 * 1024
+        || (len > 0 && ptr.is_null())
+    {
         return None;
     }
     if len == 0 {
@@ -161,7 +185,7 @@ unsafe fn doubles(ptr: *const u8, len: i32) -> Option<Vec<f64>> {
     }
     Some(
         slice::from_raw_parts(ptr, len as usize)
-            .as_chunks::<8>()
+            .as_chunks::<WORD_BYTES>()
             .0
             .iter()
             .map(|v| f64::from_ne_bytes(*v))
@@ -170,12 +194,12 @@ unsafe fn doubles(ptr: *const u8, len: i32) -> Option<Vec<f64>> {
 }
 unsafe fn snapshot(ptr: *const u8, len: i32) -> Option<Snapshot> {
     let data = doubles(ptr, len)?;
-    if data.len() < 27 {
+    if data.len() < SNAPSHOT_HEADER {
         return None;
     }
     Some(Snapshot {
-        fields: data[..27].try_into().unwrap(),
-        bases: parse_bases(&data[27..])?,
+        fields: data[..SNAPSHOT_HEADER].try_into().unwrap(),
+        bases: parse_bases(&data[SNAPSHOT_HEADER..])?,
     })
 }
 fn cover_profile(wx: f64, wy: f64, woodland: bool) -> [f64; 3] {
@@ -231,24 +255,31 @@ fn cover(
         p[2],
     ]
 }
-unsafe fn output3(out: *mut u8, p: [f64; 3]) -> i32 {
+unsafe fn output3(out: *mut u8, p: MeadowProfile) -> i32 {
     if out.is_null() {
         return -1;
     }
     for (i, value) in p.iter().enumerate() {
-        std::ptr::copy_nonoverlapping(value.to_ne_bytes().as_ptr(), out.add(i * 8), 8);
+        std::ptr::copy_nonoverlapping(
+            value.to_ne_bytes().as_ptr(),
+            out.add(i * WORD_BYTES),
+            WORD_BYTES,
+        );
     }
     0
 }
 
+/// rock-ffi stone-native
 #[no_mangle]
 pub extern "C" fn stone_terrain_noise(x: f64, y: f64) -> f64 {
     noise(x, y)
 }
+/// rock-ffi stone-native
 #[no_mangle]
 pub extern "C" fn stone_terrain_random(x: f64, y: f64, stream: f64, seed: f64) -> f64 {
     random(x, y, stream, seed)
 }
+/// rock-ffi stone-native
 #[no_mangle]
 pub extern "C" fn stone_terrain_field(
     a: f64,
@@ -268,10 +299,12 @@ pub extern "C" fn stone_terrain_field(
 ) -> f64 {
     field(&[a, b, c, d, e, f, g, h, i], x, y) + if noisy != 0 { edge_noise(wx, wy) } else { 0.0 }
 }
+/// rock-ffi stone-native
 #[no_mangle]
-pub unsafe extern "C" fn stone_meadow_profile(x: f64, y: f64, out: *mut u8) -> i32 {
-    output3(out, profile(x, y))
+pub unsafe extern "C" fn stone_meadow_profile(x: f64, y: f64, output: *mut u8) -> i32 {
+    output3(output, profile(x, y))
 }
+/// rock-ffi stone-native
 #[no_mangle]
 pub unsafe extern "C" fn stone_meadow_cover(
     input: *const u8,
@@ -283,7 +316,7 @@ pub unsafe extern "C" fn stone_meadow_cover(
     wx: f64,
     wy: f64,
     woodland: i32,
-    out: *mut u8,
+    output: *mut u8,
 ) -> i32 {
     let Some(s) = snapshot(input, len) else {
         return -1;
@@ -292,8 +325,9 @@ pub unsafe extern "C" fn stone_meadow_cover(
         return -1;
     }
     let open = cover_profile(wx, wy, woodland != 0);
-    output3(out, cover(&s, gx, gy, x, y, wx, wy, open))
+    output3(output, cover(&s, gx, gy, x, y, wx, wy, open))
 }
+/// rock-ffi stone-native
 #[no_mangle]
 pub unsafe extern "C" fn stone_meadow_distance(input: *const u8, len: i32, x: f64, y: f64) -> f64 {
     let Some(data) = doubles(input, len) else {
@@ -308,15 +342,9 @@ pub unsafe extern "C" fn stone_meadow_distance(input: *const u8, len: i32, x: f6
     bases[0].distance(x, y)
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Growth {
-    blade: [f32; 7],
-    cell: i32,
-}
-
 // Params: layout origin XY, projected origin XY, tile XY, woodland, candidates,
 // seed, projected tile scales XY, damage chunk XY, damage subdivision/side.
+/// rock-ffi stone-native
 #[no_mangle]
 pub unsafe extern "C" fn stone_meadow_blades(
     input: *const u8,
@@ -332,8 +360,10 @@ pub unsafe extern "C" fn stone_meadow_blades(
     let Some(p) = doubles(params, params_len) else {
         return -1;
     };
-    if p.len() != 15
-        || p.iter().any(|v| !v.is_finite())
+    let Ok(p) = <&MeadowParams>::try_from(p.as_slice()) else {
+        return -1;
+    };
+    if p.iter().any(|v| !v.is_finite())
         || output.is_null()
         || capacity < 0
         || p[7] < 0.0
@@ -368,22 +398,20 @@ pub unsafe extern "C" fn stone_meadow_blades(
         let stature = random(sx, sy, 89.0 + stream, p[8]);
         let cell_x = floor(x * p[13]) - p[11] * p[14];
         let cell_y = floor(y * p[13]) - p[12] * p[14];
-        let growth = Growth {
-            blade: [
-                ((x + y) * p[9] + p[2]) as f32,
-                ((x - y) * p[10] + p[3]) as f32,
-                (0.055 + random(sx, sy, 87.0 + stream, p[8]) * 0.055) as f32,
-                (profile[1] * (0.72 + stature * 0.56)) as f32,
-                variation as f32,
-                random(sx, sy, 91.0 + stream, p[8]) as f32,
-                profile[2] as f32,
-            ],
+        let growth = NativeMeadowGrowth {
+            root_x: ((x + y) * p[9] + p[2]) as f32,
+            root_y: ((x - y) * p[10] + p[3]) as f32,
+            width: (0.055 + random(sx, sy, 87.0 + stream, p[8]) * 0.055) as f32,
+            height: (profile[1] * (0.72 + stature * 0.56)) as f32,
+            variation: variation as f32,
+            angle: random(sx, sy, 91.0 + stream, p[8]) as f32,
+            clump: profile[2] as f32,
             cell: (cell_y * p[14] + cell_x) as i32,
         };
         std::ptr::copy_nonoverlapping(
-            (&growth as *const Growth).cast::<u8>(),
-            output.add(count * 32),
-            32,
+            (&raw const growth).cast::<u8>(),
+            output.add(count * size_of::<NativeMeadowGrowth>()),
+            size_of::<NativeMeadowGrowth>(),
         );
         count += 1;
     }
@@ -413,6 +441,7 @@ pub unsafe extern "C" fn stone_meadow_blades(
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
+/// rock-ffi-array stone-native MEADOW_BLADE
 type Blade = [f32; 7];
 fn sort_blades(blades: &mut [Blade]) {
     if blades.len() < 2 {
@@ -465,6 +494,7 @@ fn sort_blades(blades: &mut [Blade]) {
 
 /// Sort caller-owned, contiguous seven-float blade records by descending root Y.
 /// The caller keeps the buffer exclusively writable for the synchronous call.
+/// rock-ffi stone-native
 #[no_mangle]
 pub unsafe extern "C" fn stone_meadow_sort(blades: *mut f32, count: i32) -> i32 {
     if count < 0 {

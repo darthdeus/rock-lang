@@ -2222,7 +2222,6 @@ dependencies = [
  "once_cell",
  "rayon",
  "rock-core",
- "rock-host",
  "rock-log",
  "rodio",
  "sdl2",

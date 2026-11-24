@@ -4,7 +4,9 @@ use crate::ffi_array::{slice, slice_mut, Span};
 
 const MAX_EXACT_FLOAT_TEXELS: usize = 1 << 24;
 const LIGHT_ROW_TEXELS: usize = 2;
-const LANES_PER_TEXEL: usize = 4;
+/// rock-ffi-array stone-native LIGHT_TABLE_TEXEL
+type LightTexel = [f32; 4];
+const LANES_PER_TEXEL: usize = std::mem::size_of::<LightTexel>() / std::mem::size_of::<f32>();
 
 #[derive(Clone, Copy)]
 struct TableShape {
@@ -57,7 +59,7 @@ fn clamped_cell(value: f64, limit: usize) -> usize {
     (value.max(0.0) as usize).min(limit)
 }
 
-fn reach(shape: TableShape, position: &[f32; LANES_PER_TEXEL]) -> Option<Reach> {
+fn reach(shape: TableShape, position: &LightTexel) -> Option<Reach> {
     let x = position[0] as f64 / shape.cell_size;
     let z = position[2] as f64 / shape.cell_size;
     let radius = position[3] as f64 / shape.cell_size;
@@ -117,6 +119,7 @@ fn for_each_link(
     true
 }
 
+/// rock-ffi stone-native
 #[no_mangle]
 pub extern "C" fn stone_light_table_measure(
     size: i32,
@@ -161,6 +164,7 @@ pub extern "C" fn stone_light_table_measure(
     }
 }
 
+/// rock-ffi stone-native
 #[no_mangle]
 pub extern "C" fn stone_light_table_pack(
     size: i32,

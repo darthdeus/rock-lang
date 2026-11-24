@@ -60,7 +60,6 @@ serde_json = "1"
 
 [dev-dependencies]
 bone-semantic = { workspace = true }
-rock-host = { workspace = true }
 skull-mir = { workspace = true }
 skull-parser = { workspace = true }
 syn = { version = "3.0.9", features = ["full"] }
@@ -92,7 +91,6 @@ bundled-sdl2 = ["sdl2/bundled", "sdl2/static-link"]
 rayon = { workspace = true }
 rock-core = { workspace = true }
 bone-semantic = { workspace = true }
-rock-host = { workspace = true }
 skull-mir = { workspace = true }
 skull-parser = { workspace = true }
 syn = { version = "3.0.9", features = ["full"] }

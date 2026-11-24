@@ -199,6 +199,7 @@ fn compute_flow_with_cancel(
     })
 }
 
+/// rock-ffi stone-native
 #[no_mangle]
 pub extern "C" fn stone_flow_submit(
     width: i32,
@@ -207,7 +208,7 @@ pub extern "C" fn stone_flow_submit(
     goal_y: i32,
     cap: i32,
     walkable: *const u8,
-    walkable_len: i64,
+    len: i64,
 ) -> u64 {
     if width <= 0 || height <= 0 || cap < 0 {
         crate::log_once!("FLOW", "stone_flow_submit: invalid request shape");
@@ -216,7 +217,7 @@ pub extern "C" fn stone_flow_submit(
     let (width, height) = (width as usize, height as usize);
     let output_cells = width * height;
     let padded_cells = (width + 2) * (height + 2);
-    if output_cells > MAX_FLOW_CELLS || i64::try_from(padded_cells) != Ok(walkable_len) {
+    if output_cells > MAX_FLOW_CELLS || i64::try_from(padded_cells) != Ok(len) {
         crate::log_once!("FLOW", "stone_flow_submit: invalid request shape");
         return 0;
     }
@@ -244,13 +245,14 @@ pub extern "C" fn stone_flow_submit(
     )
 }
 
+/// rock-ffi stone-native
 #[no_mangle]
 pub extern "C" fn stone_terrain_submit(
     width: i32,
     height: i32,
     sub: i32,
     solid: *const u8,
-    solid_len: i64,
+    len: i64,
 ) -> u64 {
     if width <= 0 || height <= 0 || sub <= 0 {
         crate::log_once!("FIELD", "stone_terrain_submit: invalid request shape");
@@ -263,7 +265,7 @@ pub extern "C" fn stone_terrain_submit(
         .and_then(|n| n.checked_mul(sub))
         .filter(|&samples| samples <= MAX_FLOW_CELLS)
         .map(|samples| cells + samples * size_of::<f32>());
-    if i64::try_from(cells) != Ok(solid_len) || bytes.is_none_or(|bytes| bytes > MAX_FLOW_BYTES) {
+    if i64::try_from(cells) != Ok(len) || bytes.is_none_or(|bytes| bytes > MAX_FLOW_BYTES) {
         crate::log_once!("FIELD", "stone_terrain_submit: invalid request shape");
         return 0;
     }
@@ -307,30 +309,33 @@ fn submit_field(
     }
 }
 
+/// rock-ffi stone-native
 #[no_mangle]
 pub extern "C" fn stone_flow_poll(handle: u64) -> i32 {
     FIELD_JOBS.poll(handle)
 }
 
+/// rock-ffi stone-native
 #[no_mangle]
 pub extern "C" fn stone_flow_wait(handle: u64) -> i32 {
     FIELD_JOBS.wait(handle)
 }
 
+/// rock-ffi stone-native
 #[no_mangle]
-pub extern "C" fn stone_flow_copy(handle: u64, output: *mut f32, output_len: i64) -> i32 {
-    if output_len < 0 {
+pub extern "C" fn stone_flow_copy(handle: u64, output: *mut f32, len: i64) -> i32 {
+    if len < 0 {
         return -1;
     }
     let fits = |result: &FlowResult| {
         let required = result.distances.len();
-        let fits = !output.is_null() && output_len as usize >= required;
+        let fits = !output.is_null() && len as usize >= required;
         if !fits {
             crate::log_once!(
                 "FLOW",
                 "stone_flow_copy: output buffer is too small (need {}, got {})",
                 required,
-                output_len
+                len
             );
         }
         fits
@@ -352,6 +357,7 @@ pub extern "C" fn stone_flow_copy(handle: u64, output: *mut f32, output_len: i64
     }
 }
 
+/// rock-ffi stone-native
 #[no_mangle]
 pub extern "C" fn stone_flow_cancel(handle: u64) {
     FIELD_JOBS.cancel(handle);

@@ -314,6 +314,9 @@ mod jobs;
 mod light_table;
 mod meadow;
 mod nav;
+mod native_ffi {
+    include!(concat!(env!("OUT_DIR"), "/stone_native_ffi.rs"));
+}
 mod relight_jobs;
 mod screenshot;
 #[cfg(test)]
