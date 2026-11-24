@@ -1,0 +1,83 @@
+value Row { x: float, generation: int }
+
+inline(lua) fn offset(ptr: Ptr<Row>, n: int) -> Ptr<Row> = "return ptr + n"
+
+inline(lua) fn rejects(f: fn()) -> bool = """
+    local ok, err = pcall(f)
+    return not ok and tostring(err):find("NativeBuffer.copy_from", 1, true) ~= nil
+"""
+
+fn fill(rows: NativeBuffer<Row>) {
+    for i in 0..rows.len {
+        rows[i] = Row { x: (i as float) + 0.5, generation: i }
+    }
+}
+
+fn check_row(rows: NativeBuffer<Row>, at: int, from: int) {
+    assert_eq(rows[at].x, (from as float) + 0.5)
+    assert_eq(rows[at].generation, from)
+}
+
+fn copy_live_prefix(capacity: int) {
+    let src: FlatVec<Row> = flat_vec_new(capacity)
+    let dst: NativeBuffer<Row> = native_buffer_alloc(capacity)
+    for i in 0..3 { src.push(Row { x: (i as float) + 0.5, generation: i }) }
+    dst[4] = Row { x: 9.5, generation: 9 }
+
+    dst.copy_from(1, src.buf, 0, src.len)
+    for i in 0..src.len { check_row(dst, i + 1, i) }
+    check_row(dst, 4, 9)
+    src[0].generation = 12
+    check_row(dst, 1, 0)
+    assert_eq(dst.len, capacity)
+
+    dst.copy_from(0, src.buf, 1, 2)
+    check_row(dst, 0, 1)
+    check_row(dst, 1, 2)
+}
+
+@test(backends = "lua")
+fn copies_within_reserved_capacity() {
+    copy_live_prefix(8)
+    copy_live_prefix(4096)
+}
+
+@test(backends = "lua")
+fn handles_overlapping_descriptors_in_both_directions() {
+    let rows: NativeBuffer<Row> = native_buffer_alloc(6)
+    let tail = NativeBuffer { ptr: offset(rows.ptr, 1), len: 5 }
+    fill(rows)
+
+    tail.copy_from(0, rows, 0, 5)
+    check_row(rows, 0, 0)
+    for i in 1..6 { check_row(rows, i, i - 1) }
+
+    fill(rows)
+    rows.copy_from(0, tail, 0, 5)
+    for i in 0..5 { check_row(rows, i, i + 1) }
+    check_row(rows, 5, 5)
+
+    rows.copy_from(0, rows, 0, 6)
+    for i in 0..5 { check_row(rows, i, i + 1) }
+}
+
+@test(backends = "lua")
+fn checks_both_ranges_before_copying() {
+    let src = native_buffer_int(4)
+    let dst = native_buffer_int(3)
+    src[0] = 23
+    dst[0] = 7
+    assert(rejects(() => dst.copy_from(-1, src, 0, 1)))
+    assert(rejects(() => dst.copy_from(0, src, -1, 1)))
+    assert(rejects(() => dst.copy_from(0, src, 0, -1)))
+    assert(rejects(() => dst.copy_from(0, src, 3, 2)))
+    assert(rejects(() => dst.copy_from(2, src, 0, 2)))
+    assert(rejects(() => dst.copy_from(4, src, 0, 0)))
+    assert(rejects(() => dst.copy_from(0, src, 5, 0)))
+    assert_eq(dst[0], 7)
+    dst.copy_from(dst.len, src, src.len, 0)
+    let empty = native_buffer_int(0)
+    empty.copy_from(0, empty, 0, 0)
+    dst.copy_from(0, src, 0, 1)
+    assert_eq(dst[0], 23)
+}

@@ -935,15 +935,16 @@ impl RepArena {
         ws: &Workspace,
         target: FnBackend,
         element: &crate::monoty::MonoTy,
+        operation: &str,
     ) -> Result<(Ustr, Option<RepId>), RepError> {
-        let element_name = element.render();
-        let (element, nullable) = element.peel_nullable();
         let reject = |reason: String| RepError {
             span: None,
             message: format!(
-                "`native_buffer_alloc<{element_name}>` requires a valid native-buffer element ctype: {reason}"
+                "`{operation}<{}>` requires a valid native-buffer element ctype: {reason}",
+                element.render()
             ),
         };
+        let (element, nullable) = element.peel_nullable();
         if nullable {
             return Err(reject(
                 "nullable elements have no native C-array ctype".into(),
@@ -983,7 +984,7 @@ impl RepArena {
                     .map_err(|error| reject(error.message))?;
                 Ok((*name, Some(id)))
             }
-            _ => Err(reject(format!("`{element_name}` is not C-mappable"))),
+            _ => Err(reject(format!("`{}` is not C-mappable", element.render()))),
         }
     }
 

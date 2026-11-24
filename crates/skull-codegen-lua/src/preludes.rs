@@ -359,7 +359,11 @@ if not _G.__ROCK_NB_OFFHEAP then
     live_bytes = 0, live_count = 0, since_cycle = 0, allocated_bytes = 0, credited_bytes = 0,
     forced_steps = 0, forced_collections = 0, step_clock = 0
   }
-  pcall(ffi.cdef, "void *calloc(size_t, size_t); void free(void *);")
+  pcall(ffi.cdef, [[
+    void *calloc(size_t, size_t);
+    void free(void *);
+    void *memmove(void *, const void *, size_t);
+  ]])
   -- A sentinel runs before pending cdata finalizers. Buffers born after
   -- marking also survive that cycle. Credit only allocations from two
   -- sentinel boundaries ago, after a complete intervening cycle has drained.
@@ -389,6 +393,11 @@ if not _G.__ROCK_NB_OFFHEAP_CYCLE_HARD then _G.__ROCK_NB_OFFHEAP_CYCLE_HARD = 10
 local __rock_nb_step_seconds, __rock_nb_step_interval = 0.0005, 0.004
 -- Windows LuaJIT may not expose the CRT allocator through its default namespace.
 local __rock_nb_crt = ffi.os == "Windows" and ffi.load("ucrtbase") or ffi.C
+function __rock_nb_move(dst, dst_start, src, src_start, count)
+  local first = src + src_start
+  local bytes = ffi.cast("const uint8_t *", first + count) - ffi.cast("const uint8_t *", first)
+  __rock_nb_crt.memmove(dst + dst_start, first, bytes)
+end
 local __rock_nb_elems = {}
 -- ffi.gc keeps a callback alive until its buffers are finalized. Weak values
 -- let unused sizes disappear without making their buffers reachable.

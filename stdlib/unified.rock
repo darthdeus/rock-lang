@@ -66,6 +66,17 @@ value NativeBuffer<T> {
     return native_buffer_alloc(n)
 }
 
+// Copy count elements at zero-based offsets. Overlapping ranges use memmove semantics.
+@writes_elems @intrinsic @native_required inline(lua) fn NativeBuffer<T>.copy_from(dst, dst_start: int, src: NativeBuffer<T>, src_start: int, count: int) = """
+    if not (count >= 0 and dst_start >= 0 and src_start >= 0
+            and count <= dst.len - dst_start and count <= src.len - src_start) then
+        error("NativeBuffer.copy_from: range out of bounds", 2)
+    end
+    if count ~= 0 then
+        __rock_nb_move(dst.ptr, dst_start, src.ptr, src_start, count)
+    end
+"""
+
 // Direct pointer access lets LuaJIT fold the field load and index into one trace.
 @nowrite @intrinsic @native_required inline(lua) fn nb_get(b: NativeBuffer<float>, i: int) -> float = "return b.ptr[i]"
 @writes_elems @intrinsic @native_required inline(lua) fn nb_set(b: NativeBuffer<float>, i: int, v: float) = "b.ptr[i] = v"
