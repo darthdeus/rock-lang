@@ -458,11 +458,7 @@ impl<'a> Builder<'a> {
             let Some(name) = ty.peel_nullable().0.nominal() else {
                 return HashSet::default();
             };
-            if let Some(eid) = self
-                .ws
-                .nominals
-                .enum_id(crate::enum_instance::decl_name(name))
-            {
+            if let Some(eid) = self.ws.nominals.enum_id(name) {
                 let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
                 return ed.variants.iter().map(|v| v.name).collect();
             }
@@ -476,12 +472,7 @@ impl<'a> Builder<'a> {
     pub(crate) fn scrut_enum_name(&self, e: Idx<Expr>) -> Option<Ustr> {
         if let Some(ty) = self.concrete_expr_ty(e) {
             let name = ty.peel_nullable().0.nominal()?;
-            return self
-                .ws
-                .nominals
-                .enum_id(crate::enum_instance::decl_name(name))
-                .is_some()
-                .then_some(name);
+            return self.ws.nominals.enum_id(name).is_some().then_some(name);
         }
         None
     }

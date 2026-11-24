@@ -24,12 +24,9 @@ pub(crate) const MAX_COLUMN_LEAVES: usize = 4;
 
 pub(crate) fn is_json_value(ws: &Workspace, name: Ustr) -> bool {
     name.as_str() == "JsonValue"
-        && ws
-            .nominals
-            .enum_id(crate::enum_instance::decl_name(name))
-            .is_some_and(|id| {
-                bone_core::modules::is_stdlib_module_file(ws.module(id.module).file.as_str())
-            })
+        && ws.nominals.enum_id(name).is_some_and(|id| {
+            bone_core::modules::is_stdlib_module_file(ws.module(id.module).file.as_str())
+        })
 }
 
 pub(crate) fn dense_flat_enum_vec_eligible(ws: &Workspace, name: Ustr) -> bool {
@@ -72,7 +69,7 @@ pub(crate) fn dense_flat_enum_vec_eligible(ws: &Workspace, name: Ustr) -> bool {
     if shape.leaf_count() <= MAX_COLUMN_LEAVES {
         return false;
     }
-    let Some(eid) = ws.nominals.enum_id(crate::enum_instance::decl_name(name)) else {
+    let Some(eid) = ws.nominals.enum_id(name) else {
         return false;
     };
     ws.modules[eid.module.index()].enums[eid.def]
@@ -448,7 +445,7 @@ impl FieldShape {
 
 pub(crate) struct PlannedValue {
     pub(crate) storage: ValueStorage,
-    shape: ValueShape,
+    pub(super) shape: ValueShape,
     cdata: Option<CLayout>,
     pub(crate) scalarizable: bool,
     pub(crate) gc_contains_nobox: bool,
@@ -472,9 +469,9 @@ pub(super) fn nominal_name_from_ty(ws: &Workspace, ty: TyId) -> Option<(Ustr, bo
         TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
             params,
-        } if !params.is_empty() && is_generic_enum(ws, name) => {
-            // A layout that depends on an unbound generic has no name to plan
-            // under, so it stays opaque.
+        } if !params.is_empty() && is_generic_nominal(ws, name) => {
+            // An enum layout that depends on an unbound generic has no name to
+            // plan under, so it stays opaque; a struct keeps its declaration.
             let inner = if nullable {
                 let TypeExpr::Nullable(inner) = static_ty(ws, ty)? else {
                     return None;
@@ -483,8 +480,11 @@ pub(super) fn nominal_name_from_ty(ws: &Workspace, ty: TyId) -> Option<(Ustr, bo
             } else {
                 ty
             };
-            let mono = crate::monoty::convert_decl(ws, inner, &MonoSubst::default()).ok()?;
-            Some((mono.nominal()?, nullable))
+            match crate::monoty::convert_decl(ws, inner, &MonoSubst::default()) {
+                Ok(mono) => Some((mono.nominal()?, nullable)),
+                Err(_) if ws.nominals.struct_id(name).is_some() => Some((name, nullable)),
+                Err(_) => None,
+            }
         }
         TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
@@ -504,28 +504,28 @@ pub fn enum_decl(ws: &Workspace, name: Ustr) -> Option<&EnumDef> {
     enum_definition(ws, name)
 }
 
-/// A payload type of `enum_name` substituted for that instance, when it names
-/// one of the instance's generics.
-pub fn instance_payload_ty(ws: &Workspace, enum_name: Ustr, ty: TyId) -> Option<MonoTy> {
-    let inst = crate::enum_instance::instance(enum_name)?;
-    let subst = crate::enum_instance::instance_subst(ws, &inst)?;
-    match PayloadTy::of(ws, ty, Some(&subst))? {
+/// A payload or field type of the layout `owner` substituted for that
+/// instance, when it names one of the instance's generics.
+pub fn instance_payload_ty(ws: &Workspace, owner: Ustr, ty: TyId) -> Option<MonoTy> {
+    substituted(ws, ty, &crate::layout_instance::layout_subst(ws, owner)?)
+}
+
+pub(crate) fn substituted(ws: &Workspace, ty: TyId, subst: &MonoSubst) -> Option<MonoTy> {
+    match PayloadTy::of(ws, ty, Some(subst))? {
         PayloadTy::Mono(mono) => Some(mono),
         PayloadTy::Decl(_) => None,
     }
 }
 
-/// Every enum instance a build reaches through its types, declarations and
-/// plans, sorted by name so emission is deterministic.
-pub fn enum_instances_in(ws: &Workspace, arena: &RepArena) -> Vec<Ustr> {
+/// Every struct and enum instance a build reaches through its types,
+/// declarations and plans, sorted by name so emission is deterministic.
+pub fn layout_instances_in(ws: &Workspace, arena: &RepArena) -> Vec<Ustr> {
     fn mono(ty: &MonoTy, out: &mut Vec<Ustr>) {
         match ty {
             MonoTy::Nullable(inner) => mono(inner, out),
             MonoTy::Tuple(parts) => parts.iter().for_each(|part| mono(part, out)),
             MonoTy::App { ctor, params } => {
-                if let MonoCtor::Nominal(name) = ctor
-                    && crate::enum_instance::instance(*name).is_some()
-                {
+                if let MonoCtor::Nominal(name) = ctor {
                     out.push(*name);
                 }
                 params.iter().for_each(|param| mono(param, out));
@@ -538,9 +538,7 @@ pub fn enum_instances_in(ws: &Workspace, arena: &RepArena) -> Vec<Ustr> {
         }
     }
     fn shape(vs: &ValueShape, out: &mut Vec<Ustr>) {
-        if crate::enum_instance::instance(vs.name).is_some() {
-            out.push(vs.name);
-        }
+        out.push(vs.name);
         for (_, field) in &vs.fields {
             if let FieldShape::Nested(child) = field {
                 shape(child, out);
@@ -550,18 +548,7 @@ pub fn enum_instances_in(ws: &Workspace, arena: &RepArena) -> Vec<Ustr> {
     let mut work = Vec::new();
     arena.interner().iter().for_each(|ty| mono(ty, &mut work));
     for module in ws.modules.iter() {
-        for (_, sd) in module.structs.iter() {
-            for field in &sd.fields {
-                if let Some(name) = static_layout_nominal(ws, field.ty)
-                    && crate::enum_instance::instance(name).is_some()
-                {
-                    work.push(name);
-                }
-            }
-            if let Some(plan) = planned_value(ws, sd.name) {
-                shape(&plan.shape, &mut work);
-            }
-        }
+        work.extend(module.structs.iter().map(|(_, sd)| sd.name));
         work.extend(module.enums.iter().map(|(_, ed)| ed.name));
     }
     let mut seen = HashSet::default();
@@ -570,8 +557,24 @@ pub fn enum_instances_in(ws: &Workspace, arena: &RepArena) -> Vec<Ustr> {
         if !seen.insert(name) {
             continue;
         }
-        if crate::enum_instance::instance(name).is_some() {
+        if crate::layout_instance::instance(name).is_some() {
             out.push(name);
+        }
+        if let Some(id) = ws.nominals.struct_id(name) {
+            let subst = crate::layout_instance::layout_subst(ws, name);
+            for field in &ws.modules[id.module.index()].structs[id.def].fields {
+                match subst
+                    .as_ref()
+                    .and_then(|subst| substituted(ws, field.ty, subst))
+                {
+                    Some(ty) => mono(&ty, &mut work),
+                    None => work.extend(static_layout_nominal(ws, field.ty)),
+                }
+            }
+            if let Some(plan) = planned_value(ws, name) {
+                shape(&plan.shape, &mut work);
+            }
+            continue;
         }
         let Some(flat) = EnumPlan::for_name(ws, name).and_then(|plan| plan.flat().cloned()) else {
             continue;
@@ -587,12 +590,20 @@ pub fn enum_instances_in(ws: &Workspace, arena: &RepArena) -> Vec<Ustr> {
     out
 }
 
-pub(crate) fn is_generic_enum(ws: &Workspace, name: Ustr) -> bool {
+fn is_generic_nominal(ws: &Workspace, name: Ustr) -> bool {
     enum_definition(ws, name).is_some_and(|ed| !ed.generics.is_empty())
+        || ws.nominals.struct_id(name).is_some_and(|id| {
+            !ws.modules[id.module.index()].structs[id.def]
+                .generics
+                .is_empty()
+        })
 }
 
 fn is_registry_handle(name: Ustr) -> bool {
-    matches!(name.as_str(), "Arena" | "Entity" | "Scene")
+    matches!(
+        crate::layout_instance::decl_name(name).as_str(),
+        "Arena" | "Entity" | "Scene"
+    )
 }
 
 fn planned_value_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Option<PlannedValue> {
@@ -627,28 +638,23 @@ fn planned_value_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Op
     let mut gc_contains_nobox = false;
     let mut fields = Vec::with_capacity(sd.fields.len());
 
+    let subst = crate::layout_instance::layout_subst(ws, name);
     for field in &sd.fields {
-        let ty = static_ty(ws, field.storage_ty);
-        let primitive = match ty {
-            Some(TypeExpr::Builtin(BuiltinTy::Int)) if handle => Some("double"),
-            Some(TypeExpr::App {
-                ctor: TypeCtor::Nominal(name),
-                ..
-            }) if is_payload_free_enum(ws, name) => Some("int"),
-            Some(ty) => primitive_c_type(&ty),
-            None => None,
-        };
+        let storage = PayloadTy::of(ws, field.storage_ty, subst.as_ref());
+        let primitive = storage.as_ref().and_then(|ty| match ty.nominal(ws) {
+            Some((name, false)) if is_payload_free_enum(ws, name) => Some("int"),
+            _ if handle && ty.is_int(ws) => Some("double"),
+            _ => ty.primitive_c_type(ws),
+        });
         let (shape, ctype) = if let Some(primitive) = primitive {
             (FieldShape::Prim, Some(CMember::Scalar(primitive)))
         } else {
-            let child = match ty {
-                Some(TypeExpr::App {
-                    ctor: TypeCtor::Nominal(_),
-                    ..
-                }) => nominal_name_from_ty(ws, field.storage_ty),
-                Some(TypeExpr::Nullable(_)) => nominal_name_from_ty(ws, field.ty)
+            let child = match storage.as_ref().and_then(|ty| ty.nominal(ws)) {
+                Some((child, false)) => Some((child, false)),
+                Some(_) => PayloadTy::of(ws, field.ty, subst.as_ref())
+                    .and_then(|ty| ty.nominal(ws))
                     .filter(|&(child, nullable)| nullable && is_nobox_nominal(ws, child)),
-                _ => None,
+                None => None,
             };
             let mut member = None;
             let shape = match child {
@@ -725,6 +731,7 @@ struct ShapeMemo {
     planned: rustc_hash::FxHashMap<Ustr, Option<Rc<PlannedValue>>>,
     enums: rustc_hash::FxHashMap<Ustr, Rc<EnumPlan>>,
     gc_inline: rustc_hash::FxHashMap<(FnBackend, Ustr), Option<Rc<[GcTableField]>>>,
+    same_layout: rustc_hash::FxHashMap<Ustr, bool>,
 }
 
 thread_local! {
@@ -749,6 +756,7 @@ impl ShapeMemo {
                 memo.planned.clear();
                 memo.enums.clear();
                 memo.gc_inline.clear();
+                memo.same_layout.clear();
             }
             get(&memo)
         });
@@ -789,6 +797,23 @@ pub(crate) fn gc_table_inline_fields(
     )
 }
 
+/// Whether the layout instance `name` lays out like its declaration.
+pub(crate) fn instance_matches_declaration(ws: &Workspace, name: Ustr) -> bool {
+    ShapeMemo::with_active(
+        |memo| memo.same_layout.get(&name).copied(),
+        |memo, same| {
+            memo.same_layout.insert(name, *same);
+        },
+        || {
+            if ws.nominals.enum_id(name).is_some() {
+                EnumPlan::instance_matches_declaration(ws, name)
+            } else {
+                super::struct_instance_matches_declaration(ws, name)
+            }
+        },
+    )
+}
+
 /// Nests, restoring the enclosing scope on drop.
 pub(crate) struct ShapeMemoScope {
     previous: u64,
@@ -822,7 +847,7 @@ pub(crate) fn planned_value_contains_flat_enum(ws: &Workspace, name: Ustr) -> bo
 
 /// Accepts an instance name and answers its declaration.
 pub(super) fn enum_definition(ws: &Workspace, name: Ustr) -> Option<&EnumDef> {
-    let id = ws.nominals.enum_id(crate::enum_instance::decl_name(name))?;
+    let id = ws.nominals.enum_id(name)?;
     Some(&ws.modules[id.module.index()].enums[id.def])
 }
 
@@ -1222,10 +1247,7 @@ pub(crate) fn uniform_values_return_shape(
             "`{block_name}.leaves` must contain a named canonical leaf enum"
         ));
     };
-    let Some(eid) = ws
-        .nominals
-        .enum_id(crate::enum_instance::decl_name(leaf_enum))
-    else {
+    let Some(eid) = ws.nominals.enum_id(leaf_enum) else {
         return Err(format!("canonical leaf type `{leaf_enum}` is not an enum"));
     };
     let ed = &ws.modules[eid.module.index()].enums[eid.def];
@@ -1625,23 +1647,37 @@ pub fn gc_field_eq(ws: &Workspace, ty: TyId) -> GcFieldEq {
         Some(TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
             ..
-        }) => {
-            if is_value_struct(ws, name)
-                || is_payload_free_enum(ws, name)
-                || EnumPlan::for_name(ws, name).is_some_and(|plan| plan.cdata().is_some())
-            {
-                GcFieldEq::Native
-            } else if ws
-                .nominals
-                .enum_id(crate::enum_instance::decl_name(name))
-                .is_some()
-            {
-                GcFieldEq::Structural
-            } else {
-                GcFieldEq::Reference
-            }
-        }
+        }) => nominal_gc_eq(ws, name),
         _ => GcFieldEq::Reference,
+    }
+}
+
+/// [`gc_field_eq`] of a field of the layout `owner`, substituted when `owner`
+/// is an instance.
+pub(crate) fn owner_field_eq(ws: &Workspace, owner: Ustr, ty: TyId) -> GcFieldEq {
+    let Some(mono) = instance_payload_ty(ws, owner, ty) else {
+        return gc_field_eq(ws, ty);
+    };
+    match mono.peel_nullable().0 {
+        MonoTy::Int | MonoTy::Uint | MonoTy::Float | MonoTy::Bool => GcFieldEq::Native,
+        MonoTy::App {
+            ctor: MonoCtor::Nominal(name),
+            ..
+        } => nominal_gc_eq(ws, *name),
+        _ => GcFieldEq::Reference,
+    }
+}
+
+fn nominal_gc_eq(ws: &Workspace, name: Ustr) -> GcFieldEq {
+    if is_value_struct(ws, name)
+        || is_payload_free_enum(ws, name)
+        || EnumPlan::for_name(ws, name).is_some_and(|plan| plan.cdata().is_some())
+    {
+        GcFieldEq::Native
+    } else if ws.nominals.enum_id(name).is_some() {
+        GcFieldEq::Structural
+    } else {
+        GcFieldEq::Reference
     }
 }
 
@@ -1910,7 +1946,7 @@ impl EnumPlan {
     /// Whether an instance plans exactly like its declaration, which then
     /// serves it under the declaration's name.
     pub(crate) fn instance_matches_declaration(ws: &Workspace, name: Ustr) -> bool {
-        let base = crate::enum_instance::decl_name(name);
+        let base = crate::layout_instance::decl_name(name);
         match (Self::for_name(ws, name), Self::for_name(ws, base)) {
             (Some(inst), Some(decl)) => match (&inst.layout, &decl.layout) {
                 (EnumLayout::Flat(inst), EnumLayout::Flat(decl)) => inst.same_layout(decl),
@@ -1943,15 +1979,15 @@ impl EnumPlan {
     }
 }
 
-/// A payload's declared type, or its substitution when it names a generic of
-/// the instance being planned.
-enum PayloadTy {
+/// A payload's or field's declared type, or its substitution when it names a
+/// generic of the instance being planned.
+pub(crate) enum PayloadTy {
     Decl(TyId),
     Mono(MonoTy),
 }
 
 impl PayloadTy {
-    fn of(ws: &Workspace, ty: TyId, subst: Option<&MonoSubst>) -> Option<Self> {
+    pub(crate) fn of(ws: &Workspace, ty: TyId, subst: Option<&MonoSubst>) -> Option<Self> {
         match subst {
             Some(subst) if mentions_generic(ws, ty) => crate::monoty::convert_decl(ws, ty, subst)
                 .ok()
@@ -1960,13 +1996,31 @@ impl PayloadTy {
         }
     }
 
-    fn nominal(&self, ws: &Workspace) -> Option<(Ustr, bool)> {
+    pub(crate) fn nominal(&self, ws: &Workspace) -> Option<(Ustr, bool)> {
         match self {
             Self::Decl(ty) => nominal_name_from_ty(ws, *ty),
             Self::Mono(ty) => {
                 let (inner, nullable) = ty.peel_nullable();
                 Some((inner.nominal()?, nullable))
             }
+        }
+    }
+
+    fn is_int(&self, ws: &Workspace) -> bool {
+        match self {
+            Self::Decl(ty) => matches!(static_ty(ws, *ty), Some(TypeExpr::Builtin(BuiltinTy::Int))),
+            Self::Mono(ty) => *ty == MonoTy::Int,
+        }
+    }
+
+    fn primitive_c_type(&self, ws: &Workspace) -> Option<&'static str> {
+        match self {
+            Self::Decl(ty) => primitive_c_type(&static_ty(ws, *ty)?),
+            Self::Mono(MonoTy::Int) => Some("int"),
+            Self::Mono(MonoTy::Uint) => Some("uint32_t"),
+            Self::Mono(MonoTy::Float) => Some("double"),
+            Self::Mono(MonoTy::Bool) => Some("bool"),
+            Self::Mono(_) => None,
         }
     }
 
@@ -1979,7 +2033,7 @@ impl PayloadTy {
     }
 }
 
-fn mentions_generic(ws: &Workspace, ty: TyId) -> bool {
+pub(crate) fn mentions_generic(ws: &Workspace, ty: TyId) -> bool {
     let TyId::Static(mid, idx) = ty else {
         return false;
     };
@@ -2026,7 +2080,7 @@ fn flat_payload_shape(
     let ed = enum_definition(ws, n)?;
     if visiting
         .iter()
-        .any(|v| crate::enum_instance::decl_name(*v) == ed.name)
+        .any(|v| crate::layout_instance::decl_name(*v) == ed.name)
         || nonflat_enum_layout(ws, ed).is_some()
     {
         return None;
@@ -2041,8 +2095,8 @@ fn flat_enum_shape(
     name: Ustr,
     visiting: &mut Vec<Ustr>,
 ) -> EnumFlatShape {
-    let subst = crate::enum_instance::instance(name)
-        .and_then(|inst| crate::enum_instance::instance_subst(ws, &inst));
+    let subst = crate::layout_instance::instance(name)
+        .and_then(|inst| crate::layout_instance::instance_subst(ws, &inst));
     build_flat_enum_shape(ws, ed, name, subst.as_ref(), visiting)
 }
 
@@ -2074,10 +2128,10 @@ fn reaches_enum_in_mono(
             let MonoCtor::Nominal(n) = ctor else {
                 return false;
             };
-            let decl = crate::enum_instance::decl_name(*n);
+            let decl = crate::layout_instance::decl_name(*n);
             if goals
                 .iter()
-                .any(|goal| crate::enum_instance::decl_name(*goal) == decl)
+                .any(|goal| crate::layout_instance::decl_name(*goal) == decl)
             {
                 return true;
             }
@@ -2095,8 +2149,8 @@ fn reaches_enum_in_mono(
             let Some(ed) = enum_definition(ws, decl) else {
                 return false;
             };
-            let subst = crate::enum_instance::instance(*n)
-                .and_then(|inst| crate::enum_instance::instance_subst(ws, &inst));
+            let subst = crate::layout_instance::instance(*n)
+                .and_then(|inst| crate::layout_instance::instance_subst(ws, &inst));
             let payload_reaches =
                 |ty: TyId, seen: &mut HashSet<Ustr>| match PayloadTy::of(ws, ty, subst.as_ref()) {
                     Some(PayloadTy::Mono(mono)) => reaches(&mono, seen),
@@ -2150,7 +2204,7 @@ fn reaches_enum_in(
             };
             if goals
                 .iter()
-                .any(|goal| crate::enum_instance::decl_name(*goal) == n)
+                .any(|goal| crate::layout_instance::decl_name(*goal) == n)
             {
                 return true;
             }
@@ -2161,7 +2215,7 @@ fn reaches_enum_in(
                 let sd = &ws.modules[sid.module.index()].structs[sid.def];
                 return sd.is_value && sd.fields.iter().any(|f| reaches(f.ty, seen));
             }
-            if let Some(eid) = ws.nominals.enum_id(crate::enum_instance::decl_name(n)) {
+            if let Some(eid) = ws.nominals.enum_id(n) {
                 let ed = &ws.modules[eid.module.index()].enums[eid.def];
                 return ed.variants.iter().any(|v| match &v.payload {
                     VariantPayload::Unit => false,
@@ -2187,7 +2241,7 @@ fn flat_enum_equality_is_leafwise_inner(
     if visiting.contains(&name) {
         return false;
     }
-    let Some(eid) = ws.nominals.enum_id(crate::enum_instance::decl_name(name)) else {
+    let Some(eid) = ws.nominals.enum_id(name) else {
         return false;
     };
     visiting.push(name);

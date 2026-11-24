@@ -32,7 +32,7 @@ impl<'a> Builder<'a> {
             ..
         } = self.body.expr_arena[value]
         {
-            if self.variant_enum(value, enum_name) == shape.name {
+            if self.literal_layout(value, enum_name) == shape.name {
                 let (positional, rec_args) = match args {
                     VariantArgs::Unit => (Vec::new(), Vec::new()),
                     VariantArgs::Tuple(range) => (
@@ -187,7 +187,7 @@ impl<'a> Builder<'a> {
     pub(crate) fn variant_is_unit(&self, enum_name: Ustr, variant: Ustr) -> bool {
         self.ws
             .nominals
-            .enum_id(crate::enum_instance::decl_name(enum_name))
+            .enum_id(enum_name)
             .map(|eid| &self.ws.modules[eid.module.index()].enums[eid.def])
             .and_then(|ed| ed.variants.iter().find(|v| v.name == variant))
             .is_some_and(|v| matches!(v.payload, VariantPayload::Unit))
@@ -343,11 +343,7 @@ impl<'a> Builder<'a> {
         self.store_cell(result, absent);
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = box_bb;
-        let eid = self
-            .ws
-            .nominals
-            .enum_id(crate::enum_instance::decl_name(shape.name))
-            .unwrap();
+        let eid = self.ws.nominals.enum_id(shape.name).unwrap();
         let units: Vec<_> = self.ws.modules[eid.module.index()].enums[eid.def]
             .variants
             .iter()
@@ -434,10 +430,7 @@ impl<'a> Builder<'a> {
 
 impl EnumFlatShape {
     pub fn box_layout(&self, ws: &Workspace, variant: Ustr) -> (usize, Vec<Ustr>) {
-        let eid = ws
-            .nominals
-            .enum_id(crate::enum_instance::decl_name(self.name))
-            .unwrap();
+        let eid = ws.nominals.enum_id(self.name).unwrap();
         let payload = &ws.modules[eid.module.index()].enums[eid.def]
             .variants
             .iter()

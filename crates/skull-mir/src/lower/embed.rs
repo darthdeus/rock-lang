@@ -360,7 +360,7 @@ impl<'a> Builder<'a> {
         {
             // A functional-update base reads unwritten fields off another instance; the
             // general path owns that base-copy rule.
-            if name == cname
+            if self.literal_layout(value, name) == cname
                 && bases.into_iter().next().is_none()
                 && self.sibling_defaults(name).is_none()
             {
@@ -472,7 +472,7 @@ impl<'a> Builder<'a> {
             let nil = self.emit_cur(Inst::Const(Lit::Nil));
             return Ok((nil, paths.into_iter().map(|k| (k, nil)).collect()));
         }
-        if matches!(self.body.expr_arena[value], Expr::StructLiteral { name, .. } if name == cname)
+        if matches!(self.body.expr_arena[value], Expr::StructLiteral { name, .. } if self.literal_layout(value, name) == cname)
         {
             let leaves = self.embed_leaf_values(cname, value)?;
             let present = self.emit_cur(Inst::Const(Lit::Bool(true)));

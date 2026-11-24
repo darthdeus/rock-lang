@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use bone_core::hir::{FnBackend, StructDef, TypeCtor, TypeExpr};
+use bone_core::hir::{FnBackend, TypeCtor, TypeExpr};
 use bone_core::prelude::TyId;
 use bone_core::workspace::Workspace;
 use ustr::Ustr;
 
-use super::shape::{GcFieldEq, declared_value_storage, static_ty};
+use super::shape::{GcFieldEq, PayloadTy, declared_value_storage, static_ty};
 use super::{EnumFlatShape, EnumPlan, RepArena, RepError, RepId, ValueShape, ValueStorage};
 use crate::lua_nesting::{LuaDisplayPart, display_record};
 use crate::mir::{Inst, MirFunc};
@@ -272,13 +272,23 @@ pub fn struct_field_plan(
             "struct `{sname}` has no field `{field}`"
         )));
     };
-    let (resolved, nullable) = resolved_field_type(ws, fdef.ty)?;
-    let child_name = match resolved {
-        TypeExpr::App {
-            ctor: TypeCtor::Nominal(_),
-            ..
-        } => super::shape::nominal_name_from_ty(ws, fdef.ty).map(|(name, _)| name),
-        _ => None,
+    let subst = crate::layout_instance::layout_subst(ws, sname);
+    let (child_name, nullable) = match PayloadTy::of(ws, fdef.ty, subst.as_ref()) {
+        Some(PayloadTy::Mono(ty)) => {
+            let (inner, nullable) = ty.peel_nullable();
+            (inner.nominal(), nullable)
+        }
+        _ => {
+            let (resolved, nullable) = resolved_field_type(ws, fdef.ty)?;
+            let child = match resolved {
+                TypeExpr::App {
+                    ctor: TypeCtor::Nominal(_),
+                    ..
+                } => super::shape::nominal_name_from_ty(ws, fdef.ty).map(|(name, _)| name),
+                _ => None,
+            };
+            (child, nullable)
+        }
     };
     let Some(child_name) = child_name else {
         return Ok(StructFieldPlan::Direct {
@@ -292,10 +302,7 @@ pub fn struct_field_plan(
         .map(|sid| &ws.modules[sid.module.index()].structs[sid.def]);
     let known_nominal = bone_core::modules::is_intrinsic_key(child_name, "Coroutine")
         || child.is_some()
-        || ws
-            .nominals
-            .enum_id(crate::enum_instance::decl_name(child_name))
-            .is_some()
+        || ws.nominals.enum_id(child_name).is_some()
         || ws.nominals.newtype_id(child_name).is_some();
     if !known_nominal {
         return Err(plan_error(format!(
@@ -349,12 +356,38 @@ pub fn struct_field_plan(
     })
 }
 
+/// Whether a struct instance lays out exactly like its declaration, which then
+/// serves it under the declaration's name. A boxed child's type is not layout,
+/// and a `@lua_named` struct's keys are a Lua contract, never respecialized.
+pub(crate) fn struct_instance_matches_declaration(ws: &Workspace, name: Ustr) -> bool {
+    let base = crate::layout_instance::decl_name(name);
+    let Some(sid) = ws.nominals.struct_id(base) else {
+        return true;
+    };
+    let sd = &ws.modules[sid.module.index()].structs[sid.def];
+    if sd.lua_named {
+        return true;
+    }
+    let physical = |owner: Ustr, field: Ustr| {
+        struct_field_plan(ws, FnBackend::Lua, owner, field, false)
+            .ok()
+            .filter(|plan| !plan.is_direct())
+    };
+    let value = |owner: Ustr| {
+        super::shape::planned_value(ws, owner).map(|plan| (plan.storage, plan.shape.fields.clone()))
+    };
+    sd.fields
+        .iter()
+        .all(|field| physical(name, field.name) == physical(base, field.name))
+        && value(name) == value(base)
+}
+
 /// One declared field of a `<Name>_vt` box: a single key, or an inline child
 /// keyed by dotted path with its presence tag at the field's own name.
 #[derive(Clone, Debug)]
 pub struct GcTableField {
     pub name: Ustr,
-    pub ty: TyId,
+    eq: GcFieldEq,
     pub(crate) inline: Option<ValueShape>,
 }
 
@@ -374,7 +407,7 @@ impl GcTableField {
 
     pub fn keys_eq(&self, ws: &Workspace) -> Vec<GcFieldEq> {
         let Some(sub) = &self.inline else {
-            return vec![super::shape::gc_field_eq(ws, self.ty)];
+            return vec![self.eq];
         };
         let mut out = Vec::new();
         leaf_eq(ws, sub, true, &mut out);
@@ -394,11 +427,7 @@ fn leaf_eq(ws: &Workspace, shape: &ValueShape, nested: bool, out: &mut Vec<GcFie
     if shape.nullable && nested {
         out.push(GcFieldEq::Native);
     }
-    if ws
-        .nominals
-        .enum_id(crate::enum_instance::decl_name(shape.name))
-        .is_some()
-    {
+    if ws.nominals.enum_id(shape.name).is_some() {
         // Native equality on flat enum payload slots would skip the enum's contents walk.
         let payload_eq = if super::shape::flat_enum_equality_is_leafwise(ws, shape.name) {
             GcFieldEq::Native
@@ -417,7 +446,9 @@ fn leaf_eq(ws: &Workspace, shape: &ValueShape, nested: bool, out: &mut Vec<GcFie
         match fs {
             super::FieldShape::Prim => out.push(
                 decl.and_then(|s| s.fields.iter().find(|f| f.name == *fname))
-                    .map_or(GcFieldEq::Native, |f| super::shape::gc_field_eq(ws, f.ty)),
+                    .map_or(GcFieldEq::Native, |f| {
+                        super::shape::owner_field_eq(ws, shape.name, f.ty)
+                    }),
             ),
             super::FieldShape::Nested(sub) => leaf_eq(ws, sub, true, out),
         }
@@ -477,7 +508,7 @@ fn lua_display_inline(ws: &Workspace, shape: &ValueShape, prefix: &str) -> Vec<L
             lua,
         }];
     }
-    let name = bone_core::modules::display_name(shape.name.as_str());
+    let name = crate::layout_instance::display_name(shape.name);
     let fields = lua_display_fields(ws, shape, &format!("{prefix}."));
     let body = if fields.is_empty() {
         vec![LuaDisplayPart::literal(&format!("{} {{ }}", name))]
@@ -536,7 +567,7 @@ pub fn gc_table_fields(
             };
             Ok(GcTableField {
                 name: f.name,
-                ty: f.ty,
+                eq: super::shape::owner_field_eq(ws, name, f.ty),
                 inline,
             })
         })
@@ -545,24 +576,26 @@ pub fn gc_table_fields(
 
 /// A heap record's physical keys in slot order: declared fields, an inline
 /// child's dotted leaves and presence tag, and a flat enum's slots. `None` for
-/// a self-embedding record.
-pub fn record_keys(ws: &Workspace, def: &StructDef) -> Option<Vec<Ustr>> {
+/// a self-embedding record. `name` is a declaration or one of its instances.
+pub fn record_keys(ws: &Workspace, name: Ustr) -> Option<Vec<Ustr>> {
     let mut keys = Vec::new();
-    record_fields(ws, def, "", &mut keys, &mut Vec::new())?;
+    record_fields(ws, name, "", &mut keys, &mut Vec::new())?;
     Some(keys)
 }
 
 fn record_fields(
     ws: &Workspace,
-    def: &StructDef,
+    name: Ustr,
     prefix: &str,
     out: &mut Vec<Ustr>,
     visiting: &mut Vec<Ustr>,
 ) -> Option<()> {
-    if visiting.contains(&def.name) {
+    if visiting.contains(&name) {
         return None;
     }
-    visiting.push(def.name);
+    let id = ws.nominals.struct_id(name)?;
+    let def = &ws.module(id.module).structs[id.def];
+    visiting.push(name);
     let key = |name: Ustr| {
         if prefix.is_empty() {
             name
@@ -572,7 +605,7 @@ fn record_fields(
     };
     for field in &def.fields {
         let plan =
-            struct_field_plan(ws, FnBackend::Lua, def.name, field.name, !prefix.is_empty()).ok()?;
+            struct_field_plan(ws, FnBackend::Lua, name, field.name, !prefix.is_empty()).ok()?;
         if let Some((name, nullable)) = plan.embed() {
             if let Some(leaves) = nobox_leaf_paths(ws, name) {
                 let field = key(field.name);
@@ -586,9 +619,7 @@ fn record_fields(
                 }
                 continue;
             }
-            let id = ws.nominals.struct_id(name)?;
-            let child = &ws.module(id.module).structs[id.def];
-            record_fields(ws, child, &format!("{}.", key(field.name)), out, visiting)?;
+            record_fields(ws, name, &format!("{}.", key(field.name)), out, visiting)?;
             if nullable {
                 out.push(key(field.name));
             }

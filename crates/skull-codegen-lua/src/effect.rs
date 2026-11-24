@@ -345,11 +345,7 @@ fn cell_never_nil(ws: &Workspace, ty: Option<bone_core::prelude::TyId>) -> bool 
         TypeExpr::App { ctor, .. } => match ctor {
             TypeCtor::Array | TypeCtor::Map | TypeCtor::Ref => true,
             TypeCtor::Nominal(name) => {
-                ws.nominals.struct_id(*name).is_some()
-                    || ws
-                        .nominals
-                        .enum_id(skull_mir::enum_instance::decl_name(*name))
-                        .is_some()
+                ws.nominals.struct_id(*name).is_some() || ws.nominals.enum_id(*name).is_some()
             }
         },
         TypeExpr::Function { .. } | TypeExpr::Tuple { .. } => true,

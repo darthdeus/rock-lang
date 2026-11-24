@@ -62,7 +62,7 @@ pub(super) fn emit_tostring_ty(
         let Some(storage) = plan.value_storage() else {
             continue;
         };
-        let display_name = bone_core::modules::display_name(name.as_str());
+        let display_name = skull_mir::layout_instance::display_name(name);
         let open = format!("{display_name} {{ ");
         let fields: Vec<(String, Vec<LuaDisplayPart>)> = match storage {
             ValueStorage::CData => {
@@ -196,10 +196,7 @@ pub(super) fn emit_inspect_cdata_enums(ws: &Workspace) -> String {
         let cdata = skull_mir::lower::EnumPlan::for_name(ws, name)
             .and_then(|plan| plan.cdata().cloned())
             .is_some();
-        let Some(eid) = ws
-            .nominals
-            .enum_id(skull_mir::enum_instance::decl_name(name))
-        else {
+        let Some(eid) = ws.nominals.enum_id(name) else {
             continue;
         };
         let ed = &ws.modules[eid.module.index()].enums[eid.def];
@@ -298,10 +295,10 @@ pub(super) fn emit_inspect_enum_payloads(
 
     let mut names: Vec<ustr::Ustr> = ws.nominals.enum_names().collect();
     names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-    let instances = skull_mir::lower::enum_instances_in(ws, arena);
+    let instances = skull_mir::lower::layout_instances_in(ws, arena);
     let mut out = String::new();
     for &name in &instances {
-        let decl = skull_mir::enum_instance::decl_name(name);
+        let decl = skull_mir::layout_instance::decl_name(name);
         out.push_str(&format!(
             "__rock_type_display[{}] = {};\n",
             js_string_lit(skull_mir::mangle::type_symbol(ws, name).as_str()),
@@ -314,10 +311,7 @@ pub(super) fn emit_inspect_enum_payloads(
         else {
             continue;
         };
-        let Some(eid) = ws
-            .nominals
-            .enum_id(skull_mir::enum_instance::decl_name(name))
-        else {
+        let Some(eid) = ws.nominals.enum_id(name) else {
             continue;
         };
         let ed = &ws.modules[eid.module.index()].enums[eid.def];
@@ -784,7 +778,7 @@ fn build_inspect_ty_defs(
         let header = js_string_lit(
             skull_mir::mangle::type_symbol(ws, ustr::Ustr::from(name.as_str())).as_str(),
         );
-        let display_header = js_string_lit(bone_core::modules::display_name(name.as_str()));
+        let display_header = js_string_lit(skull_mir::layout_instance::display_name(*name));
         let value_plan = if skull_mir::lower::has_value_plan(s) {
             let representation = plans.get(name).ok_or_else(|| {
                 err(format!(

@@ -185,9 +185,10 @@ impl Emitter<'_> {
                     out.push_str("setmetatable(");
                 }
                 out.push('{');
-                let layout = nominal.and_then(|name| self.ctx.record_slots.get(&name));
-                if let Some((slots, named)) =
-                    layout.and_then(|layout| self.slot_order(layout, fields))
+                let layout = nominal.and_then(|name| self.ctx.record_slots.get(self.ws, name));
+                if let Some((slots, named)) = layout
+                    .as_deref()
+                    .and_then(|layout| self.slot_order(layout, fields))
                 {
                     for (i, id) in slots.into_iter().enumerate() {
                         if i > 0 {
@@ -208,7 +209,9 @@ impl Emitter<'_> {
                         if i > 0 {
                             out.push_str(", ");
                         }
-                        if let Some(slot) = layout.and_then(|layout| layout.slots.get(name)) {
+                        if let Some(slot) =
+                            layout.as_deref().and_then(|layout| layout.slots.get(name))
+                        {
                             out.push('[');
                             push_uint(out, *slot);
                             out.push_str("] = ");
@@ -623,7 +626,7 @@ impl Emitter<'_> {
                     return;
                 }
                 if let Some(owner) = owner
-                    && self.ctx.record_slots.contains_key(&owner)
+                    && self.ctx.uses_record_slots(self.ws, owner)
                 {
                     out.push_str("[__rock_box_mts[");
                     write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, owner).as_str());

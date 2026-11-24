@@ -293,7 +293,7 @@ pub(super) fn globals_directory_lua(
                     ctor: bone_semantic::hir::TypeCtor::Nominal(name),
                     ..
                 } = node
-                    && cg.uses_record_slots(name)
+                    && cg.uses_record_slots(ws, name)
                 {
                     private_record = ",private_record=true";
                     return true;

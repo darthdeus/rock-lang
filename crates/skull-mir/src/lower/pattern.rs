@@ -533,11 +533,7 @@ impl<'a> Builder<'a> {
             Some(mono) => mono.nominal()?,
             None => shape::static_layout_nominal(self.ws, ty)?,
         };
-        self.ws
-            .nominals
-            .enum_id(crate::enum_instance::decl_name(n))
-            .is_some()
-            .then_some(n)
+        self.ws.nominals.enum_id(n).is_some().then_some(n)
     }
 
     /// A flattened enum field stays a `Scrut::Flat` read from the parent's slots,
@@ -1033,11 +1029,7 @@ impl<'a> Builder<'a> {
         else {
             return None;
         };
-        let (generics, decl) = if let Some(eid) = self
-            .ws
-            .nominals
-            .enum_id(crate::enum_instance::decl_name(*name))
-        {
+        let (generics, decl) = if let Some(eid) = self.ws.nominals.enum_id(*name) {
             let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
             let v = ed.variants.iter().find(|v| v.name == owner)?;
             let decl = match (&v.payload, member) {
@@ -1278,7 +1270,7 @@ fn enum_layout(ty: Option<&MonoTy>, en: Option<Ustr>) -> Option<Ustr> {
     let concrete = ty
         .and_then(|ty| ty.peel_nullable().0.nominal())
         .filter(|name| {
-            crate::enum_instance::decl_name(*name) == crate::enum_instance::decl_name(en)
+            crate::layout_instance::decl_name(*name) == crate::layout_instance::decl_name(en)
         });
     Some(concrete.unwrap_or(en))
 }

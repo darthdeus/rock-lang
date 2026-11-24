@@ -87,25 +87,20 @@ impl JsonTypes {
             // A key can name both a stdlib struct and a user enum. Lua writes
             // structs, then newtypes, then enums into one table keyed by
             // symbol, so the later kind wins; resolve in that priority.
-            let entries = if ws
-                .nominals
-                .enum_id(skull_mir::enum_instance::decl_name(key))
-                .is_some()
-            {
+            let entries = if ws.nominals.enum_id(key).is_some() {
                 skull_mir::type_table::enum_entries(ws, key)
             } else if ws.nominals.newtype_id(key).is_some() {
                 vec![Entry::Newtype {
                     name: skull_mir::mangle::type_symbol(ws, key),
                 }]
-            } else if let Some(sid) = ws.nominals.struct_id(key) {
-                let s = &ws.module(sid.module).structs[sid.def];
+            } else if ws.nominals.struct_id(key).is_some() {
                 skull_mir::type_table::struct_entries(
                     ws,
                     bone_core::hir::FnBackend::Js,
                     &self.arena,
                     &is_gc,
                     &table,
-                    s,
+                    key,
                 )?
             } else {
                 Vec::new()
@@ -163,6 +158,7 @@ impl JsonTypes {
                     kind,
                     fields,
                     vec_columns,
+                    ..
                 } => {
                     let fields = fields.iter().map(field_js).collect::<Vec<_>>();
                     let columns = match vec_columns {

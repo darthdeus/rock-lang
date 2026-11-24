@@ -546,16 +546,16 @@ impl<'a> Builder<'a> {
                 fields,
                 bases,
             } if self.is_value_struct(name) => {
-                let r = self.value_literal_repr(name, fields, bases)?;
+                let r = self.value_literal_repr(self.literal_layout(e, name), fields, bases)?;
                 self.pack_maybe_absent(r)
             }
             Expr::StructLiteral {
                 name,
                 fields,
                 bases,
-            } => self.lower_struct_literal(e, name, fields, bases),
+            } => self.lower_struct_literal(e, self.literal_layout(e, name), fields, bases),
             Expr::EnumVariant { enum_name, .. }
-                if EnumPlan::for_name(self.ws, self.variant_enum(e, enum_name))
+                if EnumPlan::for_name(self.ws, self.literal_layout(e, enum_name))
                     .is_some_and(|plan| plan.flat().is_some()) =>
             {
                 let r = self.lower_expr_repr(e)?.into_value();
@@ -566,7 +566,7 @@ impl<'a> Builder<'a> {
                 variant,
                 args,
                 ..
-            } => self.lower_enum_variant(self.variant_enum(e, enum_name), variant, args),
+            } => self.lower_enum_variant(self.literal_layout(e, enum_name), variant, args),
 
             Expr::Assign { target, value } => {
                 self.lower_assign_effect(target, value)?;

@@ -8,7 +8,7 @@ fn null_text() -> Lit {
 }
 
 fn source_name(name: Ustr) -> String {
-    bone_core::modules::display_name(crate::enum_instance::decl_name(name).as_str()).to_string()
+    crate::layout_instance::display_name(name).to_string()
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -93,12 +93,7 @@ impl FmtNode {
 
 /// Enums, value records and handles format structurally; identity structs keep `inspect`.
 pub(crate) fn formats_structurally(ws: &Workspace, name: Ustr) -> bool {
-    if handle_fields(name).is_some()
-        || ws
-            .nominals
-            .enum_id(crate::enum_instance::decl_name(name))
-            .is_some()
-    {
+    if handle_fields(name).is_some() || ws.nominals.enum_id(name).is_some() {
         return true;
     }
     super::shape::is_value_struct(ws, name)
@@ -269,7 +264,7 @@ fn nominal_tree(
             inner: Box::new(field_tree(def.wrapped, &subst, visiting)?),
         });
     }
-    if let Some(eid) = ws.nominals.enum_id(crate::enum_instance::decl_name(name)) {
+    if let Some(eid) = ws.nominals.enum_id(name) {
         if is_payload_free_enum(ws, name) {
             return Ok(FmtNode::Leaf {
                 route: StringifyRoute::EnumNames(name),

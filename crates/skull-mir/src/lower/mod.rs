@@ -78,6 +78,8 @@ pub use abi::{
 };
 
 mod struct_plan;
+pub(crate) use shape::{instance_matches_declaration, mentions_generic};
+use struct_plan::struct_instance_matches_declaration;
 pub use struct_plan::{
     CDATA_LEAF_PREFIX, GcTableField, StructFieldPlan, StructRegistryPlan, cdata_leaf_alias,
     gc_table_fields, nobox_leaf_paths, record_keys, struct_field_plan,
@@ -2980,11 +2982,7 @@ fn map_key_rejection_reason(
             }
             // A payload-free enum lowers to an int ordinal; one payload variant makes the
             // type cdata- or table-carrying.
-            if ws
-                .nominals
-                .enum_id(crate::enum_instance::decl_name(name))
-                .is_some()
-            {
+            if ws.nominals.enum_id(name).is_some() {
                 return (!is_payload_free_enum(ws, name)).then(|| {
                     format!(
                         "`{name}` has payload-carrying variants, keyed by cdata or object \

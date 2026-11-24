@@ -834,19 +834,30 @@ fn is_value_struct(ws: &Workspace, name: ustr::Ustr) -> bool {
 }
 
 /// Deduped, name-sorted `value` structs.
-fn canonical_value_structs(ws: &Workspace) -> Vec<&bone_semantic::hir::StructDef> {
-    let mut v: Vec<_> = ws
-        .nominals
-        .values()
-        .filter_map(|def| {
-            let bone_core::prelude::Nominal::Struct(sid) = def else {
-                return None;
-            };
-            let s = &ws.modules.get(sid.module.index())?.structs[sid.def];
-            skull_mir::lower::has_value_plan(s).then_some(s)
-        })
+/// A value struct's layout name (a declaration or one of its instances) and
+/// its declaration.
+type ValueStruct<'a> = (ustr::Ustr, &'a bone_semantic::hir::StructDef);
+
+/// `instances` are the layout instances the build reaches.
+fn canonical_value_structs<'a>(
+    ws: &'a Workspace,
+    instances: &[ustr::Ustr],
+) -> Vec<ValueStruct<'a>> {
+    let decl = |name: ustr::Ustr| {
+        let sid = ws.nominals.struct_id(name)?;
+        let s = &ws.modules.get(sid.module.index())?.structs[sid.def];
+        skull_mir::lower::has_value_plan(s).then_some((name, s))
+    };
+    let declared = ws.nominals.values().filter_map(|def| match def {
+        bone_core::prelude::Nominal::Struct(sid) => {
+            decl(ws.modules[sid.module.index()].structs[sid.def].name)
+        }
+        _ => None,
+    });
+    let mut v: Vec<_> = declared
+        .chain(instances.iter().copied().filter_map(decl))
         .collect();
-    v.sort_by(|a, b| display_name(a.name.as_str()).cmp(display_name(b.name.as_str())));
+    v.sort_by(|a, b| display_name(a.0.as_str()).cmp(display_name(b.0.as_str())));
     v
 }
 
@@ -899,7 +910,7 @@ fn cdata_alias_fields(
 /// Emit C declarations in dependency order and report which types use GC tables.
 fn value_struct_defs(
     ws: &Workspace,
-    vstructs: &[&bone_semantic::hir::StructDef],
+    vstructs: &[ValueStruct],
     rep_arena: &skull_mir::lower::RepArena,
     value_ctors: &mut ValueCtors,
 ) -> Result<
@@ -918,17 +929,17 @@ fn value_struct_defs(
 
     // GC-carrying value structs are Lua tables (`_vt`), never cdef.
     let mut ffi_structs = Vec::new();
-    for &s in vstructs {
+    for &(name, _) in vstructs {
         let storage = rep_arena
-            .nominal_value_storage_required(ws, bone_semantic::hir::FnBackend::Lua, s.name)
+            .nominal_value_storage_required(ws, bone_semantic::hir::FnBackend::Lua, name)
             .map_err(|e| CompilerError::new_no_location(e.message))?;
         if storage != skull_mir::lower::ValueStorage::CData {
-            gc.insert(s.name);
+            gc.insert(name);
         } else {
-            ffi_structs.push(s);
+            ffi_structs.push(name);
         }
     }
-    let ffi_names: rustc_hash::FxHashSet<ustr::Ustr> = ffi_structs.iter().map(|s| s.name).collect();
+    let ffi_names: rustc_hash::FxHashSet<ustr::Ustr> = ffi_structs.iter().copied().collect();
 
     let mut typedefs = String::new();
     let mut ctors = String::new();
@@ -937,10 +948,10 @@ fn value_struct_defs(
     while !remaining.is_empty() {
         let mut next = Vec::new();
         let mut progress = false;
-        for s in remaining {
+        for name in remaining {
             let mut body = String::new();
             let mut blocked = false;
-            let fields = skull_mir::lower::value_c_fields(ws, s.name)
+            let fields = skull_mir::lower::value_c_fields(ws, name)
                 .expect("CData representation must have C fields");
             use skull_mir::lower::CFieldType;
             for (field, ctype) in fields {
@@ -953,7 +964,7 @@ fn value_struct_defs(
                         }
                         let field_type = skull_mir::mangle::type_symbol(ws, dep);
                         // Keep the nested aggregate's native ABI classification.
-                        let aliases = cdata_alias_fields(ws, s.name, dep, field.as_str())?;
+                        let aliases = cdata_alias_fields(ws, name, dep, field.as_str())?;
                         body.push_str(&format!(
                             "  union {{ {field_type} {field}; struct {{ {aliases} }}; }};\n"
                         ));
@@ -961,32 +972,28 @@ fn value_struct_defs(
                 }
             }
             if blocked {
-                next.push(s);
+                next.push(name);
             } else {
-                let sym = skull_mir::mangle::type_symbol(ws, s.name);
+                let sym = skull_mir::mangle::type_symbol(ws, name);
                 typedefs.push_str(&format!("typedef struct {{\n{}}} {};\n", body, sym));
                 ctors.push_str(&format!("{n}_ct = ffi.typeof(\"{n}\")\n", n = sym));
                 // LuaJIT has no brace elision, so a nested field cannot be passed as
                 // loose scalars to `_ct`; allocate and write leaves instead.
                 let paths = rep_arena
-                    .nominal_value_leaf_paths_required(
-                        ws,
-                        bone_semantic::hir::FnBackend::Lua,
-                        s.name,
-                    )
+                    .nominal_value_leaf_paths_required(ws, bone_semantic::hir::FnBackend::Lua, name)
                     .map_err(|e| CompilerError::new_no_location(e.message))?;
                 if paths.iter().any(|p| p.contains('.')) {
                     value_ctors.push((
                         ustr::Ustr::from(&format!("{sym}_lct")),
-                        leaf_ctor_def(ws, s.name, &paths),
+                        leaf_ctor_def(ws, name, &paths),
                     ));
                 }
-                emitted.insert(s.name);
+                emitted.insert(name);
                 progress = true;
             }
         }
         if !progress {
-            let names: Vec<&str> = next.iter().map(|s| s.name.as_str()).collect();
+            let names: Vec<&str> = next.iter().map(|name| name.as_str()).collect();
             return Err(CompilerError::new_no_location(format!(
                 "skull: value-struct cdef ordering made no progress — \
                  cyclic value-struct fields among: {}",
@@ -1110,19 +1117,18 @@ fn value_leaf_layout_checks(
 /// Emit constructors and metamethods for GC-backed value structs.
 fn value_struct_gc_defs(
     ws: &Workspace,
-    vstructs: &[&bone_semantic::hir::StructDef],
+    vstructs: &[ValueStruct],
     gc: &rustc_hash::FxHashSet<ustr::Ustr>,
     rep_arena: &skull_mir::lower::RepArena,
     value_ctors: &mut ValueCtors,
 ) -> Result<String, CompilerError> {
     let mut out = String::new();
-    for s in vstructs {
-        if !gc.contains(&s.name) {
+    for &(n, s) in vstructs {
+        if !gc.contains(&n) {
             continue;
         }
-        let n = s.name;
         let sym = skull_mir::mangle::type_symbol(ws, n);
-        let shown = display_name(n.as_str());
+        let shown = display_name(s.name.as_str());
         let mt = skull_codegen_lua::value_struct_metatable_name(sym.as_str());
         out.push_str(&format!(
             "{mt} = __rock_box_mts[{sym:?}]\n",
@@ -1375,7 +1381,7 @@ fn enum_variant_display(
 ) -> String {
     use bone_semantic::hir::VariantPayload;
     let mut ts = String::new();
-    let name = skull_mir::enum_instance::decl_name(name);
+    let name = skull_mir::layout_instance::decl_name(name);
     let Some(eid) = ws.nominals.enum_id(name) else {
         return ts;
     };
@@ -1446,22 +1452,21 @@ pub(crate) fn cdata_metatype_trampolines(syms: &[String]) -> String {
 /// symbol goes to `syms` for `cdata_metatype_trampolines`.
 fn value_struct_metatypes(
     ws: &Workspace,
-    vstructs: &[&bone_semantic::hir::StructDef],
+    vstructs: &[ValueStruct],
     emitted: &rustc_hash::FxHashSet<ustr::Ustr>,
     syms: &mut Vec<String>,
 ) -> String {
     let mut out = String::new();
     {
-        for s in vstructs {
-            if !emitted.contains(&s.name) {
+        for &(n, s) in vstructs {
+            if !emitted.contains(&n) {
                 continue;
             }
             if syms.is_empty() {
                 out.push_str("_G.__ROCK_C_METATYPE = _G.__ROCK_C_METATYPE or {}\n");
             }
-            let n = s.name;
             let sym = skull_mir::mangle::type_symbol(ws, n);
-            let shown = display_name(n.as_str());
+            let shown = display_name(s.name.as_str());
             out.push_str(&format!("_G.__ROCK_C_METATYPE[\"{sym}\"] = {{\n"));
             out.push_str("  __eq = function(a, b)\n");
             if s.generics.is_empty() {
@@ -1587,12 +1592,14 @@ pub(crate) fn enum_names_defs(ws: &Workspace, read: &rustc_hash::FxHashSet<ustr:
 
 /// Mixed enums keep unit singletons across reloads, so preserved values keep
 /// their identity.
-fn enum_runtime_defs(ws: &Workspace, arena: &skull_mir::lower::RepArena) -> String {
+fn enum_runtime_defs(ws: &Workspace, instances: &[ustr::Ustr]) -> String {
     use bone_semantic::hir::VariantPayload;
     let mut out = String::new();
     // An instance box has its own metatable and shares its declaration's units.
-    for name in skull_mir::lower::enum_instances_in(ws, arena) {
-        out.push_str(&enum_tostring_def(ws, name));
+    for &name in instances {
+        if ws.nominals.enum_id(name).is_some() {
+            out.push_str(&enum_tostring_def(ws, name));
+        }
     }
     for module in ws.modules.iter() {
         for (_, e) in module.enums.iter() {
@@ -1654,7 +1661,7 @@ fn enum_tostring_def(ws: &Workspace, name: ustr::Ustr) -> String {
 /// Register inspection and copy functions for C-backed values.
 fn c_struct_inspect_defs(
     ws: &Workspace,
-    vstructs: &[&bone_semantic::hir::StructDef],
+    vstructs: &[ValueStruct],
     emitted: &rustc_hash::FxHashSet<ustr::Ustr>,
 ) -> String {
     let mut out = String::new();
@@ -1679,13 +1686,12 @@ fn c_struct_inspect_defs(
                 copy_args.join(", ")
             ));
         }
-        for s in vstructs {
-            if !emitted.contains(&s.name) {
+        for &(n, s) in vstructs {
+            if !emitted.contains(&n) {
                 continue;
             }
-            let n = s.name;
             let sym = skull_mir::mangle::type_symbol(ws, n);
-            let n = display_name(n.as_str());
+            let n = display_name(s.name.as_str());
             let mut fields: Vec<_> = s.fields.iter().collect();
             fields.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
             out.push_str(&format!(
@@ -1871,6 +1877,7 @@ fn type_entry_lua(entry: &skull_mir::type_table::Entry, out: &mut String, decls:
         }
         Entry::Struct {
             name,
+            display,
             kind,
             fields,
             vec_columns,
@@ -1933,11 +1940,14 @@ fn type_entry_lua(entry: &skull_mir::type_table::Entry, out: &mut String, decls:
                     format!(", vec_columns = {{ {keys} }}")
                 })
                 .unwrap_or_default();
+            let display = display.map_or_else(String::new, |shown| {
+                format!(", display = {:?}", shown.as_str())
+            });
             push_decl(
                 decls,
                 name,
                 &format!(
-                    "{{ kind = \"{kind}\", fields = {{ {f} }}{vec_columns} }}",
+                    "{{ kind = \"{kind}\", fields = {{ {f} }}{vec_columns}{display} }}",
                     f = fields.join(", ")
                 ),
             );
@@ -2054,23 +2064,29 @@ fn type_table_defs(
     ws: &Workspace,
     gc: &rustc_hash::FxHashSet<ustr::Ustr>,
     arena: &skull_mir::lower::RepArena,
+    instances: &[ustr::Ustr],
 ) -> Result<String, CompilerError> {
     use skull_mir::type_table;
     let factories = type_table::json_field_factories(ws);
     let is_gc = |name| gc.contains(&name);
     let mut out = String::from("_G.__ROCK_ENUM_FLAT_LAYOUT = {}\n_G.__ROCK_STRIDED_ROWS = {}\n");
     let mut decls = String::new();
+    let (struct_instances, enum_instances): (Vec<ustr::Ustr>, Vec<ustr::Ustr>) = instances
+        .iter()
+        .partition(|name| ws.nominals.struct_id(**name).is_some());
+    let struct_entries = |name| {
+        type_table::struct_entries(
+            ws,
+            bone_semantic::hir::FnBackend::Lua,
+            arena,
+            &is_gc,
+            &factories,
+            name,
+        )
+    };
     for module in ws.modules.iter() {
         for (_, s) in module.structs.iter() {
-            let entries = type_table::struct_entries(
-                ws,
-                bone_semantic::hir::FnBackend::Lua,
-                arena,
-                &is_gc,
-                &factories,
-                s,
-            )?;
-            entries
+            struct_entries(s.name)?
                 .iter()
                 .for_each(|e| type_entry_lua(e, &mut out, &mut decls));
         }
@@ -2084,12 +2100,16 @@ fn type_table_defs(
             );
         }
     }
-    let instances = skull_mir::lower::enum_instances_in(ws, arena);
+    for name in struct_instances {
+        struct_entries(name)?
+            .iter()
+            .for_each(|e| type_entry_lua(e, &mut out, &mut decls));
+    }
     let enums = ws
         .modules
         .iter()
         .flat_map(|module| module.enums.iter().map(|(_, e)| e.name));
-    for name in enums.chain(instances) {
+    for name in enums.chain(enum_instances) {
         for entry in type_table::enum_entries(ws, name) {
             type_entry_lua(&entry, &mut out, &mut decls);
         }

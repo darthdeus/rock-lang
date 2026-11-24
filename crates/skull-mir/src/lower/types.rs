@@ -1,5 +1,5 @@
 use super::*;
-use crate::monoty::MonoTy;
+use crate::monoty::{MonoCtor, MonoTy};
 
 impl<'a> Builder<'a> {
     pub(crate) fn is_null_lit(&self, e: Idx<Expr>) -> bool {
@@ -20,13 +20,13 @@ impl<'a> Builder<'a> {
         scx.interner().get_ref(id)
     }
 
-    /// The layout name a variant expression of the declared enum `enum_name`
+    /// The layout name a variant or struct literal of the declaration `decl`
     /// builds: the instance its concrete type names, if any.
-    pub(crate) fn variant_enum(&self, e: Idx<Expr>, enum_name: Ustr) -> Ustr {
+    pub(crate) fn literal_layout(&self, e: Idx<Expr>, decl: Ustr) -> Ustr {
         self.concrete_expr_ty(e)
             .and_then(|ty| ty.peel_nullable().0.nominal())
-            .filter(|name| crate::enum_instance::decl_name(*name) == enum_name)
-            .unwrap_or(enum_name)
+            .filter(|name| crate::layout_instance::decl_name(*name) == decl)
+            .unwrap_or(decl)
     }
 
     pub(crate) fn concrete_expr_ty(&self, e: Idx<Expr>) -> Option<&'a MonoTy> {
@@ -134,7 +134,7 @@ impl<'a> Builder<'a> {
             Some(ty) => std::borrow::Cow::Borrowed(ty),
             None => {
                 let enum_name = match self.body.expr_arena[e] {
-                    Expr::EnumVariant { enum_name, .. } => Some(self.variant_enum(e, enum_name)),
+                    Expr::EnumVariant { enum_name, .. } => Some(self.literal_layout(e, enum_name)),
                     _ => match self.expr_ty(e) {
                         Some(TypeExpr::App {
                             ctor: TypeCtor::Nominal(name),
@@ -267,6 +267,7 @@ impl<'a> Builder<'a> {
             bases,
         } = self.body.expr_arena[op]
         {
+            let name = self.literal_layout(op, name);
             let decl = self
                 .struct_field_names(name)
                 .ok_or_else(|| gap(format!("spread operand `{name}` has no known fields")))?;
@@ -525,23 +526,45 @@ impl<'a> Builder<'a> {
         self.dispatch().expr_ty(e)
     }
 
-    /// Field lookup sees through a reference to its referent.
+    /// Field lookup sees through a reference to its referent. A nominal names
+    /// the layout instance the base's concrete type plans under.
     pub(crate) fn field_base_ty(&self, base: Idx<Expr>) -> Option<TypeExpr> {
         let dispatch = self.dispatch();
         let mut ty = *self.inf?.expr_types.get(base)?;
-        loop {
+        let node = loop {
             match dispatch.raw_ty_node(ty)? {
                 TypeExpr::Infer(var, _) => ty = self.inf?.substitutions.get(var)?,
                 TypeExpr::Nullable(inner) => ty = ty.with_idx(inner),
                 TypeExpr::App {
                     ctor: TypeCtor::Ref,
                     params,
-                } => {
-                    return dispatch.resolve_ty(ty.with_idx(params.into_iter().next()?));
-                }
-                other => return Some(other),
+                } => break dispatch.resolve_ty(ty.with_idx(params.into_iter().next()?))?,
+                other => break other,
             }
+        };
+        let TypeExpr::App {
+            ctor: TypeCtor::Nominal(decl),
+            params,
+        } = node
+        else {
+            return Some(node);
+        };
+        let mut concrete = self.concrete_expr_ty(base).map(|ty| ty.peel_nullable().0);
+        if let Some(MonoTy::App {
+            ctor: MonoCtor::Ref,
+            params,
+        }) = concrete
+        {
+            concrete = params.first().map(|ty| ty.peel_nullable().0);
         }
+        let name = concrete
+            .and_then(MonoTy::nominal)
+            .filter(|name| crate::layout_instance::decl_name(*name) == decl)
+            .unwrap_or(decl);
+        Some(TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            params,
+        })
     }
 
     pub(crate) fn current_expr_storage_ty_id(&self) -> Option<TyId> {

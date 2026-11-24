@@ -261,7 +261,9 @@ fn concrete_struct_field_types(
                 else {
                     return Err(MonoTyReason::NoNode);
                 };
-                if *actual != *name || def.generics.len() != params.len() {
+                if crate::layout_instance::decl_name(*actual) != *name
+                    || def.generics.len() != params.len()
+                {
                     return Err(MonoTyReason::NoNode);
                 }
                 params.to_vec()

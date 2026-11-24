@@ -396,11 +396,7 @@ impl Emitter<'_> {
             let plan = skull_mir::lower::EnumPlan::for_name(self.ws, ty)
                 .expect("dynamic enum has a representation plan");
             let shape = plan.flat().expect("dynamic enum has a flat shape");
-            let eid = self
-                .ws
-                .nominals
-                .enum_id(skull_mir::enum_instance::decl_name(ty))
-                .unwrap();
+            let eid = self.ws.nominals.enum_id(ty).unwrap();
             let mut groups = EnumBoxGroups::new();
             for variant in &self.ws.modules[eid.module.index()].enums[eid.def].variants {
                 if matches!(variant.payload, bone_core::hir::VariantPayload::Unit) {

@@ -701,7 +701,7 @@ impl Emitter<'_> {
             .ok_or_else(|| err(format!("`{name}` is not a GC-free value struct")))?;
         order.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         let (exact, groups) = split_leaf_paths(fields.iter().copied());
-        let display_name = bone_core::modules::display_name(name.as_str());
+        let display_name = skull_mir::layout_instance::display_name(name);
         let multiline = order.len() > 2;
         let mut expr = if multiline {
             js_string_lit(&format!("{display_name} {{\n"))

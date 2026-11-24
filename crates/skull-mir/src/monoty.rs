@@ -101,7 +101,7 @@ impl MonoTy {
                     MonoCtor::Map => out.push_str("Map"),
                     MonoCtor::Ref => out.push_str("ref"),
                     MonoCtor::Nominal(n) => {
-                        out.push_str(crate::enum_instance::decl_name(*n).as_str())
+                        out.push_str(crate::layout_instance::decl_name(*n).as_str())
                     }
                 }
                 if !params.is_empty() {
@@ -208,7 +208,7 @@ impl MonoTy {
                     MonoCtor::Map => out.push('m'),
                     MonoCtor::Ref => out.push('r'),
                     MonoCtor::Nominal(name) => {
-                        let name = &crate::enum_instance::decl_name(*name);
+                        let name = &crate::layout_instance::decl_name(*name);
                         // The length prefix measures the spelled text, so the encoding stays
                         // self-delimiting under either spelling.
                         let spelled = match spelling {
@@ -798,7 +798,7 @@ fn convert_at<S: std::hash::BuildHasher>(
                 TypeCtor::Map => MonoCtor::Map,
                 TypeCtor::Ref => MonoCtor::Ref,
                 TypeCtor::Nominal(n) => {
-                    MonoCtor::Nominal(crate::enum_instance::layout_name(ws, n, &ps))
+                    MonoCtor::Nominal(crate::layout_instance::layout_name(ws, n, &ps))
                 }
             };
             MonoTy::App { ctor, params: ps }

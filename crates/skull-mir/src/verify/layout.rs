@@ -139,7 +139,7 @@ impl Check<'_> {
         match object {
             Object::Record(name) => {
                 let def = self.struct_def(name)?;
-                for key in crate::lower::record_keys(ws, def)? {
+                for key in crate::lower::record_keys(ws, name)? {
                     keys.insert(key, Kind::Unknown);
                 }
                 for field in &def.fields {

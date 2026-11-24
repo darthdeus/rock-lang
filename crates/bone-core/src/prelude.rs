@@ -159,23 +159,50 @@ impl std::ops::DerefMut for Nominals {
     }
 }
 
+/// The declaration part of `Name<args>`: the text before the `<` matching the
+/// final `>`, since a module path or an argument may spell `<..>` too.
+fn instance_base(name: &str) -> Option<&str> {
+    let mut depth = 0usize;
+    for (at, c) in name.char_indices().rev() {
+        match c {
+            '>' => depth += 1,
+            '<' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(&name[..at]);
+                }
+            }
+            _ if depth == 0 => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
 impl Nominals {
+    /// A layout instance `Name<args>`, which the backend plans apart from its
+    /// generic declaration, resolves to that declaration.
+    fn nominal(&self, name: Ustr) -> Option<&Nominal> {
+        self.get(&name)
+            .or_else(|| self.get(&Ustr::from_existing(instance_base(&name)?)?))
+    }
+
     pub fn struct_id(&self, name: Ustr) -> Option<StructId> {
-        match self.get(&name)? {
+        match self.nominal(name)? {
             Nominal::Struct(id) => Some(*id),
             _ => None,
         }
     }
 
     pub fn enum_id(&self, name: Ustr) -> Option<EnumId> {
-        match self.get(&name)? {
+        match self.nominal(name)? {
             Nominal::Enum(id) => Some(*id),
             _ => None,
         }
     }
 
     pub fn newtype_id(&self, name: Ustr) -> Option<NewtypeId> {
-        match self.get(&name)? {
+        match self.nominal(name)? {
             Nominal::Newtype(id) => Some(*id),
             _ => None,
         }

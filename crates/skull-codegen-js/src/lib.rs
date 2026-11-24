@@ -892,7 +892,7 @@ function __rock_inspect_value(v, indent, path, visited, precision) {
   }
   var header = (type_name !== undefined && variant !== undefined)
     ? ((__rock_type_display[type_name] || type_name) + "::" + variant)
-    : (type_name !== undefined ? type_name : "");
+    : (type_name !== undefined ? (__rock_type_display[type_name] || type_name) : "");
   var result;
   // A boxed enum's positional payload takes native 0-based keys ("0".., for `==`
   // and `TupleIndex`); luajit's box uses 1-based array keys and inspect renders

@@ -712,7 +712,10 @@ impl<'a> Builder<'a> {
                 "generic struct default `{struct_name}` has a non-struct concrete type"
             )));
         };
-        if name.as_str() != struct_name.as_str() || params.len() != generics {
+        if crate::layout_instance::decl_name(*name)
+            != crate::layout_instance::decl_name(struct_name)
+            || params.len() != generics
+        {
             return Err(gap(format!(
                 "generic struct default `{struct_name}` has mismatched concrete arguments"
             )));

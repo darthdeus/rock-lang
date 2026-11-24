@@ -65,7 +65,9 @@ pub fn args_at(
         MonoTy::App {
             ctor: MonoCtor::Nominal(n),
             params,
-        } if n == struct_name && params.len() == generics => Ok(Args::At(params)),
+        } if crate::layout_instance::decl_name(n) == struct_name && params.len() == generics => {
+            Ok(Args::At(params))
+        }
         other => Err(ArgsError::NotThisStruct(other.render())),
     }
 }

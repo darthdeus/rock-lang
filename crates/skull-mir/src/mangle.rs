@@ -94,8 +94,8 @@ pub(crate) fn ident_of_name(name: ustr::Ustr) -> ustr::Ustr {
         if let Some(ident) = cache.borrow().get(&name) {
             return *ident;
         }
-        if let Some(inst) = crate::enum_instance::instance(name) {
-            let ident = crate::enum_instance::instance_symbol(&inst);
+        if let Some(inst) = crate::layout_instance::instance(name) {
+            let ident = crate::layout_instance::instance_symbol(&inst);
             cache.borrow_mut().insert(name, ident);
             return ident;
         }
@@ -132,7 +132,7 @@ pub fn type_symbol(ws: &Workspace, key: ustr::Ustr) -> ustr::Ustr {
 /// usable as a map key.
 /// Instances share their declaration's singletons: a unit variant carries no payload.
 pub fn enum_singleton_global(ws: &Workspace, key: ustr::Ustr, variant: ustr::Ustr) -> ustr::Ustr {
-    let key = crate::enum_instance::decl_name(key);
+    let key = crate::layout_instance::decl_name(key);
     ustr::Ustr::from(format!("__rock_enum_{}_{variant}", type_symbol(ws, key)).as_str())
 }
 

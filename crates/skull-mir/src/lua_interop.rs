@@ -115,11 +115,7 @@ impl Boundary<'_> {
             for field in &def.fields {
                 self.ty(None, field.ty);
             }
-        } else if let Some(id) = self
-            .ws
-            .nominals
-            .enum_id(crate::enum_instance::decl_name(name))
-        {
+        } else if let Some(id) = self.ws.nominals.enum_id(name) {
             for variant in &self.ws.module(id.module).enums[id.def].variants {
                 match &variant.payload {
                     VariantPayload::Unit => {}

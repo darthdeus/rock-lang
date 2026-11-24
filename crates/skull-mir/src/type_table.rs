@@ -1,6 +1,6 @@
 //! Facts come from the target's representation plans, so a walker reads values
 //! in the layout that backend actually stores.
-use bone_core::hir::{BuiltinTy, EnumDef, StructDef, TyId, TypeCtor, TypeExpr, VariantPayload};
+use bone_core::hir::{BuiltinTy, EnumDef, TyId, TypeCtor, TypeExpr, VariantPayload};
 use bone_core::workspace::Workspace;
 use rustc_hash::FxHashMap;
 use skull_parser::{CompilerError, JsonFieldOperation};
@@ -223,6 +223,26 @@ pub fn reflect_field_type(ws: &Workspace, ty: TyId) -> (String, bool) {
     }
 }
 
+/// [`reflect_field_type`] of a substituted type.
+fn reflect_mono(ws: &Workspace, ty: &MonoTy) -> String {
+    match ty {
+        MonoTy::Int => "int".into(),
+        MonoTy::Uint => "uint".into(),
+        MonoTy::Float => "float".into(),
+        MonoTy::Bool => "bool".into(),
+        MonoTy::String => "string".into(),
+        MonoTy::App {
+            ctor: MonoCtor::Nominal(name),
+            ..
+        } => type_symbol(ws, *name).as_str().to_string(),
+        MonoTy::App {
+            ctor: MonoCtor::Array,
+            ..
+        } => "[]".into(),
+        _ => "any".into(),
+    }
+}
+
 pub fn json_field_factories(ws: &Workspace) -> FxHashMap<(Ustr, Ustr, JsonFieldOperation), String> {
     ws.modules
         .iter()
@@ -324,6 +344,8 @@ pub enum Entry {
     },
     Struct {
         name: Ustr,
+        /// An instance shows its declaration's name.
+        display: Option<Ustr>,
         /// `struct`, `value_table` (GC-carrying value) or `c_struct` (GC-free value).
         kind: &'static str,
         fields: Vec<FieldEntry>,
@@ -400,22 +422,33 @@ fn plan_error(message: String) -> CompilerError {
 }
 
 /// The strided row layout, if any, then the struct. `is_gc` names GC-carrying
-/// `value` structs, which are tables rather than GC-free native values.
+/// `value` structs, which are tables rather than GC-free native values. `name`
+/// is a declaration or one of its instances.
 pub fn struct_entries(
     ws: &Workspace,
     target: bone_core::hir::FnBackend,
     arena: &RepArena,
     is_gc: &dyn Fn(Ustr) -> bool,
     factories: &FxHashMap<(Ustr, Ustr, JsonFieldOperation), String>,
-    s: &StructDef,
+    name: Ustr,
 ) -> Result<Vec<Entry>, CompilerError> {
     let mut out = Vec::new();
+    let Some(sid) = ws.nominals.struct_id(name) else {
+        return Ok(out);
+    };
+    let s = &ws.modules[sid.module.index()].structs[sid.def];
+    let subst = crate::layout_instance::layout_subst(ws, name);
+    let field_ty = |ty: TyId| {
+        subst
+            .as_ref()
+            .and_then(|subst| crate::lower::substituted(ws, ty, subst))
+    };
     let mut vec_columns = None;
     if s.is_value {
         let ty = MonoTy::App {
             ctor: MonoCtor::Array,
             params: vec![MonoTy::App {
-                ctor: MonoCtor::Nominal(s.name),
+                ctor: MonoCtor::Nominal(name),
                 params: Vec::new(),
             }],
         };
@@ -432,7 +465,7 @@ pub fn struct_entries(
                     vec_columns = Some(paths);
                 }
                 ContainerStorage::Strided { .. } => out.push(Entry::StridedRows {
-                    name: type_symbol(ws, s.name),
+                    name: type_symbol(ws, name),
                     paths,
                 }),
                 _ => {}
@@ -441,23 +474,27 @@ pub fn struct_entries(
     }
     let kind = if !crate::lower::has_value_plan(s) {
         "struct"
-    } else if is_gc(s.name) {
+    } else if is_gc(name) {
         "value_table"
     } else {
         "c_struct"
     };
     let mut fields = Vec::with_capacity(s.fields.len());
     for f in &s.fields {
-        let plan = crate::lower::struct_field_plan(ws, target, s.name, f.name, false)
+        let plan = crate::lower::struct_field_plan(ws, target, name, f.name, false)
             .map_err(|e| plan_error(e.message))?;
+        let substituted = field_ty(f.ty);
         let (ty, embed) = match &plan {
             StructFieldPlan::Inline { child, flat, .. } => {
                 (type_symbol(ws, *child).as_str().to_string(), flat.is_none())
             }
-            _ => (reflect_field_type(ws, f.ty).0, false),
+            _ => match &substituted {
+                Some(mono) => (reflect_mono(ws, mono), false),
+                None => (reflect_field_type(ws, f.ty).0, false),
+            },
         };
         let leaf = plan.is_direct()
-            && !crate::lower::struct_field_plan(ws, target, s.name, f.name, true)
+            && !crate::lower::struct_field_plan(ws, target, name, f.name, true)
                 .map_err(|e| plan_error(e.message))?
                 .is_direct();
         let factory = |op| factories.get(&(s.name, f.name, op)).cloned();
@@ -468,7 +505,10 @@ pub fn struct_entries(
             embed,
             leaf,
             flat: plan.flat_storage_keys(f.name),
-            shape: type_shape(ws, f.ty),
+            shape: match &substituted {
+                Some(mono) => mono_shape(ws, mono, 0),
+                None => type_shape(ws, f.ty),
+            },
             json_name: bone_core::annotations::json_field_name(&f.annotations),
             json_default: factory(JsonFieldOperation::Default),
             json_omit: factory(JsonFieldOperation::Omit),
@@ -476,7 +516,8 @@ pub fn struct_entries(
         });
     }
     out.push(Entry::Struct {
-        name: type_symbol(ws, s.name),
+        name: type_symbol(ws, name),
+        display: (s.name != name).then(|| type_symbol(ws, s.name)),
         kind,
         fields,
         vec_columns,

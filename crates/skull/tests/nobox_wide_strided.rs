@@ -24,12 +24,12 @@ fn main() {
 "#;
 
 #[test]
-fn wide_generic_rows_keep_one_slot_per_type_argument() {
+fn wide_generic_rows_splice_value_arguments_like_a_concrete_row() {
     let lua = emit_module(GENERIC_WIDE);
     assert_eq!(
         run_luajit(&format!(
             "{lua}\nmain()\nlocal row = __ROCK_STRIDED_ROWS.Wide\nassert(row.a == 1 and row.item == 2 and row.flag == 5)\n"
         )),
-        "5 5 5 5\n7 11 12 2 -1 false",
+        "5 6 5 5\n7 11 12 2 -1 false",
     );
 }

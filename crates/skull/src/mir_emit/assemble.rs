@@ -716,7 +716,8 @@ end
     }
     out.push_str(&crate::enum_cdata_defs(ws));
     let rep_arena = scx.rep_arena();
-    let vstructs = crate::canonical_value_structs(ws);
+    let instances = skull_mir::lower::layout_instances_in(ws, rep_arena);
+    let vstructs = crate::canonical_value_structs(ws, &instances);
     let mut value_ctors = Vec::new();
     let (vdefs, value_emitted, value_gc) =
         crate::value_struct_defs(ws, &vstructs, rep_arena, &mut value_ctors)?;
@@ -738,9 +739,11 @@ end
     out.push_str(&crate::enum_cdata_metatypes(ws, &mut metatype_syms));
     out.push_str(&crate::cdata_metatype_trampolines(&metatype_syms));
     out.push_str(&crate::c_struct_inspect_defs(ws, &vstructs, &value_emitted));
-    out.push_str(&crate::type_table_defs(ws, &value_gc, rep_arena)?);
-    out.push_str(&cg.record_slot_metadata(ws));
-    out.push_str(&crate::enum_runtime_defs(ws, rep_arena));
+    out.push_str(&crate::type_table_defs(
+        ws, &value_gc, rep_arena, &instances,
+    )?);
+    out.push_str(&cg.record_slot_metadata(ws, &instances));
+    out.push_str(&crate::enum_runtime_defs(ws, &instances));
     Ok((out, value_ctors))
 }
 
@@ -1228,8 +1231,9 @@ pub(super) fn assemble(
         && !crate::allocation_report::activation_enabled()
         && !cg.line_directives()
     {
-        for s in crate::canonical_value_structs(ws) {
-            let symbol = skull_mir::mangle::type_symbol(ws, s.name);
+        let instances = skull_mir::lower::layout_instances_in(ws, scx.rep_arena());
+        for (name, s) in crate::canonical_value_structs(ws, &instances) {
+            let symbol = skull_mir::mangle::type_symbol(ws, name);
             for suffix in ["_vt", "_lct"] {
                 let name = format!("{symbol}{suffix}");
                 if runtime_refs.contains(&Ustr::from(&name)) {

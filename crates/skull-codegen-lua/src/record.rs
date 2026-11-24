@@ -1,3 +1,6 @@
+use std::sync::{Arc, Mutex};
+
+use bone_core::hir::StructDef;
 use rustc_hash::FxHashMap;
 use ustr::Ustr;
 
@@ -8,34 +11,73 @@ pub(super) struct RecordLayout {
     pub(super) slots: FxHashMap<Ustr, u32>,
 }
 
-pub(super) type RecordSlots = FxHashMap<Ustr, RecordLayout>;
+/// Slot layouts of declared records, planned up front, and of generic record
+/// instances, planned when lowering first names one.
+pub(super) struct RecordSlots {
+    declared: FxHashMap<Ustr, Arc<RecordLayout>>,
+    instances: Mutex<FxHashMap<Ustr, Option<Arc<RecordLayout>>>>,
+}
+
+fn layout(ws: &Workspace, s: &StructDef, name: Ustr) -> Option<Arc<RecordLayout>> {
+    if s.is_value || s.is_nobox || s.lua_named || s.fields.is_empty() {
+        return None;
+    }
+    let fields = skull_mir::lower::record_keys(ws, name)?;
+    let slots = fields
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (*name, (i + 1) as u32))
+        .collect();
+    Some(Arc::new(RecordLayout { fields, slots }))
+}
 
 pub(super) fn plan(ws: &Workspace) -> RecordSlots {
-    ws.source_modules()
-        .flat_map(|module| module.structs.values())
-        .filter(|s| !s.is_value && !s.is_nobox && !s.lua_named && !s.fields.is_empty())
-        .filter_map(|s| {
-            let fields = skull_mir::lower::record_keys(ws, s)?;
-            let slots = fields
-                .iter()
-                .enumerate()
-                .map(|(i, name)| (*name, (i + 1) as u32))
-                .collect();
-            Some((s.name, RecordLayout { fields, slots }))
-        })
-        .collect()
+    RecordSlots {
+        declared: ws
+            .source_modules()
+            .flat_map(|module| module.structs.values())
+            .filter_map(|s| Some((s.name, layout(ws, s, s.name)?)))
+            .collect(),
+        instances: Mutex::default(),
+    }
+}
+
+impl RecordSlots {
+    pub(super) fn get(&self, ws: &Workspace, name: Ustr) -> Option<Arc<RecordLayout>> {
+        if let Some(layout) = self.declared.get(&name) {
+            return Some(Arc::clone(layout));
+        }
+        skull_mir::layout_instance::instance(name)?;
+        let mut instances = self.instances.lock().expect("record instance slots");
+        instances
+            .entry(name)
+            .or_insert_with(|| {
+                let sid = ws.nominals.struct_id(name)?;
+                if sid.module.is_builtin() {
+                    return None;
+                }
+                layout(ws, &ws.module(sid.module).structs[sid.def], name)
+            })
+            .clone()
+    }
 }
 
 impl CodegenCtx {
-    pub fn uses_record_slots(&self, name: Ustr) -> bool {
-        self.record_slots.contains_key(&name)
+    pub fn uses_record_slots(&self, ws: &Workspace, name: Ustr) -> bool {
+        self.record_slots.get(ws, name).is_some()
     }
 
-    pub fn record_slot_metadata(&self, ws: &Workspace) -> String {
+    /// `instances` are the layout instances the build reaches.
+    pub fn record_slot_metadata(&self, ws: &Workspace, instances: &[Ustr]) -> String {
         let mut out = String::new();
-        let mut records: Vec<_> = self.record_slots.iter().collect();
-        records.sort_unstable_by_key(|&(name, _)| name);
-        for (&name, layout) in records {
+        let mut records: Vec<_> = self.record_slots.declared.keys().copied().collect();
+        records.extend(instances.iter().copied());
+        records.sort_unstable();
+        records.dedup();
+        for name in records {
+            let Some(layout) = self.record_slots.get(ws, name) else {
+                continue;
+            };
             let ty = skull_mir::mangle::type_symbol(ws, name);
             out.push_str("do local mt=__rock_box_mts[");
             write_lua_string(&mut out, ty.as_str());
@@ -90,7 +132,7 @@ impl Emitter<'_> {
         };
         self.ctx
             .record_slots
-            .get(&owner)?
+            .get(self.ws, owner)?
             .slots
             .get(&field)
             .copied()

@@ -204,17 +204,6 @@ fn mk(k: int) -> GBox<NV>? {
 }
 fn main() { print("{mk(2) == null}") }
 
-//=== TEST CASE: generic_struct_field_at_a_nobox_type_Generic ===
-// A generic `T` field is one slot whatever `T` is, so `Wrap<NV>` would hold a
-// box. The concrete `struct W { v: NV }` splices the leaves and works.
-//! expect: nobox value `NV` survived lowering as an implicit materialization
-nobox value NV { x: int, y: int }
-struct Wrap<T> { v: T }
-fn wrap(k: int) -> Wrap<NV> {
-    return Wrap { v: NV { x: k, y: 1 } }   // ERROR: the generic field boxes
-}
-fn main() { print("{wrap(8).v.x}") }
-
 //=== TEST CASE: returns_disagree_across_swapped_recursion ===
 //! expect: returns a `ref` to a flat-stored container element on one path and a differently stored reference on another
 value Inner { v: int }
