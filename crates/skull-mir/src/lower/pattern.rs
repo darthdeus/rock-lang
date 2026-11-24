@@ -73,6 +73,7 @@ impl<'a> Builder<'a> {
             if matches_null && arm.guard.is_none() {
                 nil_possible = false;
             }
+            self.forget_payload_views(&scrut_s);
             self.match_pattern(
                 &scrut_s,
                 arm.pattern,
@@ -857,6 +858,22 @@ impl<'a> Builder<'a> {
         let cont = self.f.new_block();
         self.branch_to(cond, cont, fail);
         self.cur = cont;
+    }
+
+    /// Threaded cells share each payload slot between variants, so a type an
+    /// earlier arm recorded for a slot value is wrong under this arm's variant.
+    fn forget_payload_views(&mut self, scrut: &Scrut) {
+        match scrut {
+            Scrut::Cells { cells, .. } => {
+                for slot in cells.slots() {
+                    self.borrowed_value_children.remove(&slot);
+                }
+            }
+            Scrut::Tuple(parts) => parts
+                .iter()
+                .for_each(|part| self.forget_payload_views(part)),
+            _ => {}
+        }
     }
 
     pub(crate) fn lower_if_let(

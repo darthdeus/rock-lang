@@ -1,0 +1,27 @@
+nobox value Potion { refusal: int = 0, consumed: bool = false }
+value Consumable { potion: Potion? = null }
+value Equip { discharge: int? = null }
+value Inv { changed: bool = false, equipment: Equip? = null, consumable: Consumable? = null }
+enum Receipt { None, Inventory(Inv), Consumable(Consumable) }
+struct Row { receipt: Receipt }
+
+// The threaded local shares payload slots between variants: one slot holds an
+// `Equip?` box for `Inventory` and the potion refusal for `Consumable`.
+fn refusal(row: Row, take: bool) -> int {
+    let receipt = Receipt::None
+    if take { receipt = row.receipt }
+    let result = match receipt {
+        Receipt::Inventory(r) => r.consumable,
+        Receipt::Consumable(r) => r,
+        _ => null,
+    }
+    return result?.potion?.refusal ?? -1
+}
+
+@test fn threaded_enum_arms_read_their_own_payload() {
+    let inventory = Row { receipt: Receipt::Inventory(Inv { consumable: Consumable { potion: Potion { refusal: 2 } } }) }
+    let consumable = Row { receipt: Receipt::Consumable(Consumable { potion: Potion { refusal: 3, consumed: true } }) }
+    assert_eq(refusal(inventory, true), 2)
+    assert_eq(refusal(consumable, true), 3)
+    assert_eq(refusal(consumable, false), -1)
+}
