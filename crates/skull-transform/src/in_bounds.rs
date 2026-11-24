@@ -628,6 +628,8 @@ struct Facts {
     nonneg: HashSet<Key>,
     /// `(k, v)`: the integer at `k` is at most the live length of `v`.
     le_len: HashSet<(Key, Key)>,
+    /// `(k, v)`: `k > len(v)` is false. A true `i < k` excludes a NaN `k`.
+    guarded_len: HashSet<(Key, Key)>,
     /// `(k, v)`: the integer at `k` is below the live length of `v`.
     lt: HashSet<(Key, Key)>,
     // Whole-valued when finite; arithmetic may still produce NaN/infinity.
@@ -647,6 +649,7 @@ impl Facts {
         self.same.retain(|k| other.same.binary_search(k).is_ok());
         self.nonneg.retain(|k| other.nonneg.contains(k));
         self.le_len.retain(|k| other.le_len.contains(k));
+        self.guarded_len.retain(|k| other.guarded_len.contains(k));
         self.lt.retain(|k| other.lt.contains(k));
     }
 
@@ -657,6 +660,7 @@ impl Facts {
             && self.same.is_empty()
             && self.nonneg.is_empty()
             && self.le_len.is_empty()
+            && self.guarded_len.is_empty()
             && self.lt.is_empty()
     }
 
@@ -675,6 +679,7 @@ impl Facts {
             .retain(|(v, p)| !pred(KeyData::Value(*v)) && !m(p));
         self.nonneg.retain(|k| !m(k));
         self.le_len.retain(|(k, v)| !m(k) && !m(v));
+        self.guarded_len.retain(|(k, v)| !m(k) && !m(v));
         self.lt.retain(|(k, v)| !m(k) && !m(v));
     }
 
@@ -695,6 +700,7 @@ impl Facts {
                 || self.nonneg.iter().any(has)
                 || self.ordered.iter().any(|(a, b, _)| has(a) || has(b))
                 || self.le_len.iter().any(|(k, v)| has(k) || has(v))
+                || self.guarded_len.iter().any(|(k, v)| has(k) || has(v))
                 || self.lt.iter().any(|(k, v)| has(k) || has(v))
         };
         if found {
@@ -738,6 +744,7 @@ impl Facts {
     fn forget_lengths(&mut self) {
         self.ordered.clear();
         self.le_len.clear();
+        self.guarded_len.clear();
         self.lt.clear();
     }
 
@@ -1071,6 +1078,18 @@ impl Facts {
             .collect()
     }
 
+    fn guarded_len_of(&self, func: &Body<'_>, id: Idx<Inst>) -> Vec<Key> {
+        if self.guarded_len.is_empty() {
+            return Vec::new();
+        }
+        let keys = self.keys_of(func, id);
+        self.guarded_len
+            .iter()
+            .filter(|(k, _)| keys.contains(k))
+            .map(|&(_, v)| v)
+            .collect()
+    }
+
     /// Subtracting a positive integer does not prove a strict bound:
     /// large floating-point integers and infinity can round back to themselves.
     fn lt_of(&self, func: &Body<'_>, id: Idx<Inst>) -> Vec<Key> {
@@ -1149,7 +1168,7 @@ fn cond_facts(facts: &mut Facts, func: &Body<'_>, cond: Idx<Inst>, truth: bool, 
         Inst::NotEq(a, b) if !truth => equal_capacity_facts(facts, func, a, b),
         Inst::IntLt(a, b) | Inst::IntGt(b, a) => {
             if truth {
-                lt_fact(facts, func, a, b);
+                lt_fact(facts, func, a, b, true);
             } else {
                 leq_fact(facts, func, b, a);
             }
@@ -1158,7 +1177,7 @@ fn cond_facts(facts: &mut Facts, func: &Body<'_>, cond: Idx<Inst>, truth: bool, 
             if truth {
                 leq_fact(facts, func, a, b);
             } else {
-                lt_fact(facts, func, b, a);
+                lt_fact(facts, func, b, a, false);
             }
         }
         _ => {}
@@ -1176,8 +1195,11 @@ fn equal_capacity_facts(facts: &mut Facts, func: &Body<'_>, a: Idx<Inst>, b: Idx
     }
 }
 
-fn lt_fact(facts: &mut Facts, func: &Body<'_>, a: Idx<Inst>, b: Idx<Inst>) {
-    let bounds = facts.le_len_of(func, b);
+fn lt_fact(facts: &mut Facts, func: &Body<'_>, a: Idx<Inst>, b: Idx<Inst>, ordered: bool) {
+    let mut bounds = facts.le_len_of(func, b);
+    if ordered {
+        bounds.extend(facts.guarded_len_of(func, b));
+    }
     for k in facts.keys_of(func, a) {
         for &v in &bounds {
             facts.lt.insert((k, v));
@@ -1196,6 +1218,14 @@ fn lt_fact(facts: &mut Facts, func: &Body<'_>, a: Idx<Inst>, b: Idx<Inst>) {
 }
 
 fn leq_fact(facts: &mut Facts, func: &Body<'_>, a: Idx<Inst>, b: Idx<Inst>) {
+    if !facts.le_len.is_empty() {
+        let lengths = facts.le_len_of(func, b);
+        if !lengths.is_empty() {
+            for k in facts.keys_of(func, a) {
+                facts.guarded_len.extend(lengths.iter().map(|&v| (k, v)));
+            }
+        }
+    }
     if facts.nonneg(func, a) {
         for k in facts.keys_of(func, b) {
             facts.nonneg.insert(k);
@@ -1428,6 +1458,7 @@ fn step(facts: &mut Facts, func: &Body<'_>, ctx: &Ctx<'_>, id: Idx<Inst>, may_re
             let whole = ctx.affine && facts.whole_value(func, *value);
             let nonneg = facts.nonneg(func, *value);
             let le_len = facts.le_len_of(func, *value);
+            let guarded_len = facts.guarded_len_of(func, *value);
             let lt = facts.lt_of(func, *value);
             facts.forget_cell(func, *cell);
             let k = func.key(KeyData::Cell(*cell));
@@ -1452,6 +1483,9 @@ fn step(facts: &mut Facts, func: &Body<'_>, ctx: &Ctx<'_>, id: Idx<Inst>, may_re
             }
             for v in le_len {
                 facts.le_len.insert((k, v));
+            }
+            for v in guarded_len {
+                facts.guarded_len.insert((k, v));
             }
             for v in lt {
                 facts.lt.insert((k, v));

@@ -1,0 +1,61 @@
+value Row { x: float }
+
+@nomangle fn prefix_rows() -> NativeBuffer<Row> {
+    let rows: NativeBuffer<Row> = native_buffer_alloc(4)
+    rows[0].x = 1.0
+    rows[1].x = 2.0
+    rows[2].x = 10.0
+    return rows
+}
+
+@nomangle fn sum_prefix(rows: NativeBuffer<Row>, count: int) -> float {
+    if count > rows.len { return -1.0 }
+    let total = 0.0
+    for i in 0..count { total += rows[i].x }
+    return total
+}
+
+inline(lua) fn shrink(rows: NativeBuffer<Row>) = "rows.len = 0"
+
+@nomangle fn sum_shrinking_prefix(rows: NativeBuffer<Row>, count: int, before_loop: bool) -> float {
+    if count > rows.len { return -1.0 }
+    if before_loop { shrink(rows) }
+    let total = 0.0
+    for i in 0..count {
+        total += rows[i].x
+        if i == 0 { shrink(rows) }
+    }
+    return total
+}
+
+@nomangle fn read_guarded_row(rows: NativeBuffer<Row>, count: int, i: int) -> float {
+    if count > rows.len || i >= count || i < 0 { return -1.0 }
+    return rows[i].x
+}
+
+inline(lua) fn check_prefix() -> bool = """
+    local rows = prefix_rows()
+    local checked, calls = __nb_checked_index, 0
+    __nb_checked_index = function(rows, i)
+        calls = calls + 1
+        return checked(rows, i)
+    end
+    local ok, total = pcall(sum_prefix, rows, 2)
+    __nb_checked_index = checked
+    assert(ok and total == 3.0)
+    assert(calls == 0, "guarded prefix still checked each element")
+    assert(sum_prefix(rows, 5) == -1.0)
+    assert(sum_prefix(rows, -1) == 0.0)
+    assert(sum_prefix(rows, 4) == 13.0)
+    for _, before_loop in ipairs({ true, false }) do
+        local valid, err = pcall(sum_shrinking_prefix, prefix_rows(), 2, before_loop)
+        assert(not valid and tostring(err):find("NativeBuffer index out of bounds", 1, true))
+    end
+    rows.len = 2
+    local valid, err = pcall(read_guarded_row, rows, 0/0, 3)
+    assert(not valid and tostring(err):find("NativeBuffer index out of bounds", 1, true))
+    return true
+"""
+
+@test(backends = "lua")
+fn prefix_length_proof_expires_when_the_buffer_shrinks() { assert(check_prefix()) }
