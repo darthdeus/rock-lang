@@ -85,6 +85,7 @@ fn samplers(gl: &DebugGl) -> Option<[[glow::Sampler; 2]; 3]> {
     })
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_sampler_bound(unit: c_int) -> bool {
     if unit < 0 {
@@ -101,6 +102,7 @@ pub extern "C" fn stone_sampler_bound(unit: c_int) -> bool {
 
 /// A sampler overrides the texture's wrap, so `image` selects the wrap; pass 0 for a canvas
 /// (always CLAMP_TO_EDGE). A negative `mode` releases the unit.
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_bind_sampler(unit: c_int, mode: c_int, image: u64) {
     if unit < 0 {
@@ -145,6 +147,7 @@ const BLEND_MODES: [(u32, Option<[u32; 4]>); 7] = {
     ]
 };
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_set_blend_mode_i(mode: i32) {
     let (equation, factors) = match usize::try_from(mode).ok().and_then(|m| BLEND_MODES.get(m)) {
@@ -213,6 +216,7 @@ thread_local! {
 /// Capture only the ambient pipeline state the GL semantic executor changes.
 /// Target, viewport and target scissor deliberately remain the target binder's
 /// contract (exit to the window), not part of this snapshot.
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_gl_pass_state_begin() -> u32 {
     let Some(state) = with_gl(|gl| unsafe {
@@ -238,6 +242,7 @@ pub extern "C" fn stone_gl_pass_state_begin() -> u32 {
 }
 
 /// A mismatched scope must not consume another transaction's snapshot.
+/// rock-ffi stone-rendering c-bool
 #[no_mangle]
 pub extern "C" fn stone_gl_pass_state_end(scope: u32) -> bool {
     PASS_GL_STATES.with(|states| {
@@ -356,6 +361,7 @@ fn warn_unknown_blend_mode(mode: i32) {
     }
 }
 
+/// rock-ffi stone-rendering rename:compare=compare_mode
 #[no_mangle]
 pub extern "C" fn stone_set_depth_mode(compare: *const c_char, write: bool) {
     let compare_str = if compare.is_null() {
@@ -404,11 +410,13 @@ pub(crate) unsafe fn clear_depth_unmasked(gl: &DebugGl, depth: f32) {
 }
 
 /// Read GL's depth write mask; a depth clear through a closed mask is a no-op.
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_gl_depth_write_enabled() -> bool {
     with_gl(|gl| unsafe { gl.get_parameter_bool(glow::DEPTH_WRITEMASK) }).unwrap_or(false)
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_clear_depth(depth: c_float) {
     with_gl(|gl| unsafe {
@@ -416,6 +424,7 @@ pub extern "C" fn stone_clear_depth(depth: c_float) {
     });
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_set_color_mask(r: bool, g: bool, b: bool, a: bool) {
     with_gl(|gl| unsafe {
@@ -423,6 +432,7 @@ pub extern "C" fn stone_set_color_mask(r: bool, g: bool, b: bool, a: bool) {
     });
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_set_clear_color(r: c_float, g: c_float, b: c_float, a: c_float) {
     with_gl(|gl| unsafe {
@@ -431,6 +441,7 @@ pub extern "C" fn stone_set_clear_color(r: c_float, g: c_float, b: c_float, a: c
 }
 
 /// Set the scissor rectangle and test together; a stale rect confines later clears.
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_set_scissor(enabled: bool, x: c_int, y: c_int, w: c_int, h: c_int) {
     with_gl(|gl| unsafe {
@@ -440,6 +451,7 @@ pub extern "C" fn stone_set_scissor(enabled: bool, x: c_int, y: c_int, w: c_int,
 }
 
 /// Viewport coordinates are bottom-left target pixels, without scaling or Y flip.
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_set_gl_viewport(x: c_int, y: c_int, w: c_int, h: c_int) {
     with_gl(|gl| unsafe {
@@ -451,6 +463,8 @@ pub extern "C" fn stone_set_gl_viewport(x: c_int, y: c_int, w: c_int, h: c_int) 
 /// for both GL_MAX_DRAW_BUFFERS and GL_MAX_COLOR_ATTACHMENTS.
 pub const DRAW_BUFFERS: usize = 8;
 
+/// Bit i selects COLOR_ATTACHMENT i. Gaps below the highest selected slot use GL_NONE.
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_set_draw_buffer_mask(mask: c_int) {
     let bits = (mask as u32) & ((1 << DRAW_BUFFERS) - 1);
@@ -467,6 +481,7 @@ pub extern "C" fn stone_set_draw_buffer_mask(mask: c_int) {
     });
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_restore_after_custom_draw() {
     with_gl(|gl| unsafe {
