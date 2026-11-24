@@ -94,6 +94,10 @@ impl<'a> Builder<'a> {
                     },
                     None => {
                         let v = self.lower_expr_with_expected(lf.value, expected)?;
+                        let v = match expected {
+                            Some(ty) => self.coerced_mono(v, lf.value, ty),
+                            None => v,
+                        };
                         by_value.insert(key, v);
                         v
                     }

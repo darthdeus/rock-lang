@@ -44,3 +44,14 @@ fn aliased_int_to_float_selection_operand_keeps_native_minmax() {
     assert_eq!(register_moves(body), Vec::<&str>::new());
     assert_eq!(run_main(&lua), "2\n2.5\n8.5\n0");
 }
+
+#[test]
+fn an_int_literal_in_a_float_struct_field_is_a_float() {
+    let lua = emit_module(
+        "struct P { x: float, y: float }
+@inline fn len2(p: P) -> float { return p.x * p.x + p.y }
+fn main() { print(len2(P { x: 3, y: 4 })) }
+",
+    );
+    assert_eq!(run_main(&lua), "13");
+}
