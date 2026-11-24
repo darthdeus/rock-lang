@@ -210,6 +210,7 @@ pub extern "C" fn stone_system_report() -> *const c_char {
 /// Puts `text` on the system clipboard through SDL, which owns the selection
 /// for the life of the window (an arboard handle would drop it on Linux).
 /// Returns 1 on success; a failure is logged with SDL's reason.
+/// rock-ffi stone byte-bool
 #[no_mangle]
 pub extern "C" fn stone_set_clipboard_text(text: *const c_char) -> u8 {
     if text.is_null() {

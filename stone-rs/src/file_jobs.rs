@@ -937,6 +937,7 @@ pub extern "C" fn stone_file_write_async(
         .unwrap_or(-1)
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_file_rename_async(source: *const c_char, target: *const c_char) -> i32 {
     let (Some(source), Some(target)) = (parse_path(source), parse_path(target)) else {
@@ -985,11 +986,13 @@ pub extern "C" fn stone_file_write_pair_async(
         .unwrap_or(-1)
 }
 
+/// rock-ffi stone default:wait=false
 #[no_mangle]
 pub extern "C" fn stone_file_write_poll(id: i32, wait: bool) -> i32 {
     poll(jobs(), id, wait)
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_file_transaction_begin() -> i32 {
     jobs().lock().unwrap().begin_transaction().unwrap_or(-1)
@@ -1040,6 +1043,7 @@ pub extern "C" fn stone_file_transaction_publish(
     transaction_write(transaction, path, data, len, append, true)
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_file_transaction_write_png(
     transaction: i32,
@@ -1073,6 +1077,7 @@ pub extern "C" fn stone_file_transaction_write_png(
         })
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_file_transaction_cleanup(
     transaction: i32,
@@ -1090,6 +1095,7 @@ pub extern "C" fn stone_file_transaction_cleanup(
         })
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_file_transaction_cleanup_directory(
     transaction: i32,
@@ -1107,6 +1113,7 @@ pub extern "C" fn stone_file_transaction_cleanup_directory(
         })
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_file_transaction_keep(
     transaction: i32,
@@ -1124,6 +1131,7 @@ pub extern "C" fn stone_file_transaction_keep(
         })
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_file_transaction_commit(transaction: i32) -> i32 {
     jobs()
@@ -1133,11 +1141,13 @@ pub extern "C" fn stone_file_transaction_commit(transaction: i32) -> i32 {
         .unwrap_or(-1)
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_file_transaction_abort(transaction: i32) -> bool {
     jobs().lock().unwrap().abort_transaction(transaction)
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_file_transaction_cancel(job: i32) -> i32 {
     let cancellation = jobs().lock().unwrap().cancellations.get(&job).cloned();
@@ -1146,31 +1156,37 @@ pub extern "C" fn stone_file_transaction_cancel(job: i32) -> i32 {
         .unwrap_or(-1)
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_file_transaction_poll(job: i32, wait: bool) -> i32 {
     poll(jobs(), job, wait)
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_file_jobs_test_pause() -> bool {
     Pause::Worker.pause()
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_file_jobs_test_pause_publication() -> bool {
     Pause::Publication.pause()
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_file_jobs_test_release() -> bool {
     Pause::release_all()
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_file_jobs_test_entered() -> bool {
     Pause::Worker.entered()
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_file_jobs_test_publication_entered() -> bool {
     Pause::Publication.entered()

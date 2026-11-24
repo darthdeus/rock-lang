@@ -61,6 +61,7 @@ fn record_level(level: c_int) -> Option<::log::Level> {
 
 /// Every record at `level` (0 error, 1 warn) this process emitted, Rust and
 /// Rock alike, saturating. What the development error badge counts.
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_log_record_total(level: c_int) -> c_int {
     record_level(level).map_or(0, |l| {

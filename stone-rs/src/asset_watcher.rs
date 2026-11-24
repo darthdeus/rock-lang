@@ -144,6 +144,7 @@ fn on_events(result: Result<Vec<DebouncedEvent>, Vec<notify::Error>>) {
     }
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_watch_asset(path: *const c_char) {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -222,6 +223,7 @@ pub extern "C" fn stone_watch_asset(path: *const c_char) {
     }
 }
 
+/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_poll_changed_assets() -> i32 {
     let keys: Vec<PathBuf> = {
