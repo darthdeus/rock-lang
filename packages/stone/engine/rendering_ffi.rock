@@ -1,18 +1,4 @@
-pub extern(ffi, "stone") fn stone_test_virtual_pad_attach() -> int
-pub extern(ffi, "stone") fn stone_test_virtual_pad_button(index: int, token: string, down: bool) -> bool
-pub extern(ffi, "stone") fn stone_test_virtual_pad_axis(index: int, token: string, value: int) -> bool
-pub extern(ffi, "stone") fn stone_test_virtual_pad_detach(index: int) -> bool
-extern(ffi, "stone") fn stone_pad_connected() -> bool
 extern(lua, "stone.stone_pad_type_name") fn stone_pad_type_name_ptr() -> any
-extern(ffi, "stone") fn stone_is_key_down(key: string) -> bool
-extern(ffi, "stone") fn stone_get_mouse_position(x: Ptr<int>, y: Ptr<int>)
-extern(ffi, "stone") fn stone_get_global_mouse_position(x: Ptr<int>, y: Ptr<int>)
-pub extern(ffi, "stone") fn stone_show_cursor(show: bool)
-pub extern(ffi, "stone") fn stone_create_cursor(path: string, hot_x: int, hot_y: int) -> int
-pub extern(ffi, "stone") fn stone_set_system_cursor(cursor_type: int) -> int
-pub extern(ffi, "stone") fn stone_set_cursor(cursor_id: int)
-extern(ffi, "stone") fn stone_reset_cursor()
-pub extern(ffi, "stone") fn stone_free_cursor(cursor_id: int)
 pub extern(ffi, "stone") fn stone_native_destroy(class: string, handle: int) -> bool
 pub extern(ffi, "stone") fn stone_native_handle_state(class: string, handle: int) -> int
 extern(lua, "stone.stone_native_live_handles") fn stone_native_live_handles_ptr(class: string) -> any
@@ -42,14 +28,7 @@ extern(ffi, "stone") fn stone_canvas_resize(handle: int, width: int, height: int
 
 extern(lua, "stone.stone_scancode_token_at") fn stone_scancode_token_at_ptr(index: int) -> any
 extern(lua, "stone.stone_scancode_token_for") fn stone_scancode_token_for_ptr(scancode: int) -> any
-pub extern(ffi, "stone") fn stone_scancode_value(token: string) -> int
 extern(lua, "stone.stone_scancode_label") fn stone_scancode_label_ptr(token: string) -> any
-pub extern(ffi, "stone") fn stone_imgui_init(window: StoneWindow) -> bool
-extern(ffi, "stone") fn stone_imgui_new_frame()
-extern(ffi, "stone") fn stone_imgui_render()
-extern(ffi, "stone") fn stone_imgui_prepare_render() -> PtrU8
-extern(ffi, "stone") fn stone_imgui_last_vtx_count() -> int
-pub extern(ffi, "stone") fn stone_imgui_initialized() -> bool
 
 // The typed pointer must refer to a NativeBuffer<float>.
 extern(ffi, "stone") fn stone_draw_mesh(
@@ -189,30 +168,14 @@ extern(ffi, "stone") fn stone_frame_stream_record(width: int, height: int) -> bo
 extern(ffi, "stone") fn stone_frame_stream_finish(out_frames: Ptr<int>, out_w: Ptr<int>, out_h: Ptr<int>) -> bool
 pub extern(ffi, "stone") fn stone_get_live_canvas_bytes() -> int
 extern(ffi, "stone") fn stone_track_text_draw_call()
-extern(ffi, "stone") fn stone_text_init() -> bool
 extern(lua, "stone.stone_load_font") fn stone_load_font_ffi(path: string, pixel_size: int, face_mask: int, extra_chars: string) -> int
 extern(lua, "stone.stone_load_font_metrics") fn stone_load_font_metrics_ffi(path: string, pixel_size: int, face_mask: int, extra_chars: string) -> int
 extern(lua, "stone.stone_unload_font") fn stone_unload_font_ffi(font_id: int) -> bool
 pub extern(lua, "stone.stone_reload_font") fn stone_reload_font_ffi(font_id: int, path: string, pixel_size: int) -> bool
 pub extern(lua, "stone.stone_resize_font") fn stone_resize_font_ffi(font_id: int, pixel_size: int) -> bool
-extern(ffi, "stone") fn stone_get_font_slot_count(font_id: int) -> int
-extern(ffi, "stone") fn stone_get_font_slot_codepoint(font_id: int, slot: int) -> int
-extern(ffi, "stone") fn stone_get_font_atlas_size(font_id: int, width: Ptr<int>, height: Ptr<int>) -> bool
 pub extern(lua, "stone.stone_ensure_font_atlas_instance_number") fn stone_ensure_font_atlas_instance_ffi(font_id: int, pixel_size: int) -> int
-extern(ffi, "stone") fn stone_get_font_instance_image(instance_id: int) -> int
-extern(ffi, "stone") fn stone_get_font_atlas_instance_pixel_size(font_id: int, index: int) -> int
-pub extern(ffi, "stone") fn stone_get_font_atlas_instance_image_at(font_id: int, index: int) -> int
-extern(ffi, "stone") fn stone_get_font_instance_size(instance_id: int, width: Ptr<int>, height: Ptr<int>) -> bool
-pub extern(ffi, "stone") fn stone_get_font_instance_byte_len(instance_id: int) -> int
-extern(ffi, "stone") fn stone_get_font_instance_glyph_info(instance_id: int, face: int, char_code: int, out: Ptr<float>) -> bool
 pub extern(lua, "stone.stone_get_font_instance_pixel_size") fn stone_get_font_instance_pixel_size_ffi(instance_id: int) -> int
 pub extern(lua, "stone.stone_font_atlas_instance_count") fn stone_font_atlas_instance_count_ffi(font_id: int) -> int
-extern(ffi, "stone") fn stone_get_font_instance_pixel_size(instance_id: int) -> int
-extern(ffi, "stone") fn stone_font_atlas_instance_count(font_id: int) -> int
-pub extern(ffi, "stone") fn stone_get_font_unit_metrics(font_id: int, out: Ptr<float>) -> bool
-pub extern(ffi, "stone") fn stone_get_glyph_unit_metrics(font_id: int, face: int, char_code: int, out: Ptr<float>) -> bool
-pub extern(ffi, "stone") fn stone_font_data_len(font_id: int) -> int
-pub extern(ffi, "stone") fn stone_font_release_coverage(font_id: int) -> bool
 extern(lua, "stone.stone_stream_text") fn stone_stream_text(shader: int, font_id: int, text: string,
     x: float, y: float, scale_x: float, scale_y: float, baseline: float, multiline: bool)
 pub extern(lua, "stone.stone_get_text_baseline") fn stone_get_text_baseline_for(font_id: int, text: string, scale: float) -> float
@@ -222,21 +185,58 @@ pub extern(lua, "stone.stone_get_glyph_info") fn stone_get_glyph_info_for(font_i
 // Generated by stone-rs/build.rs.
 pub extern(ffi, "stone") fn stone_bind_sampler(unit: int, mode: int, image: int)
 pub extern(ffi, "stone") fn stone_clear_depth(depth: float)
+pub extern(ffi, "stone") fn stone_create_cursor(path: string, hot_x: int, hot_y: int) -> int
 pub extern(ffi, "stone") fn stone_current_shader_bound() -> bool
 extern(ffi, "stone") fn stone_draw_fullscreen_rect(u0: float, v0: float, u1: float, v1: float)
+extern(ffi, "stone") fn stone_font_atlas_instance_count(font_id: int) -> int
+pub extern(ffi, "stone") fn stone_font_data_len(font_id: int) -> int
+pub extern(ffi, "stone") fn stone_font_release_coverage(font_id: int) -> bool
+pub extern(ffi, "stone") fn stone_free_cursor(cursor_id: int)
+pub extern(ffi, "stone") fn stone_get_font_atlas_instance_image_at(font_id: int, index: int) -> int
+extern(ffi, "stone") fn stone_get_font_atlas_instance_pixel_size(font_id: int, index: int) -> int
+extern(ffi, "stone") fn stone_get_font_atlas_size(font_id: int, width: Ptr<int>, height: Ptr<int>) -> bool
+pub extern(ffi, "stone") fn stone_get_font_instance_byte_len(instance_id: int) -> int
+extern(ffi, "stone") fn stone_get_font_instance_glyph_info(instance_id: int, face: int, char_code: int, out: Ptr<float>) -> bool
+extern(ffi, "stone") fn stone_get_font_instance_image(instance_id: int) -> int
+extern(ffi, "stone") fn stone_get_font_instance_pixel_size(instance_id: int) -> int
+extern(ffi, "stone") fn stone_get_font_instance_size(instance_id: int, width: Ptr<int>, height: Ptr<int>) -> bool
+extern(ffi, "stone") fn stone_get_font_slot_codepoint(font_id: int, slot: int) -> int
+extern(ffi, "stone") fn stone_get_font_slot_count(font_id: int) -> int
+pub extern(ffi, "stone") fn stone_get_font_unit_metrics(font_id: int, out: Ptr<float>) -> bool
+extern(ffi, "stone") fn stone_get_global_mouse_position(x: Ptr<int>, y: Ptr<int>)
+pub extern(ffi, "stone") fn stone_get_glyph_unit_metrics(font_id: int, face: int, char_code: int, out: Ptr<float>) -> bool
+extern(ffi, "stone") fn stone_get_mouse_position(x: Ptr<int>, y: Ptr<int>)
 pub extern(ffi, "stone") fn stone_gl_depth_write_enabled() -> bool
 pub extern(ffi, "stone") fn stone_gl_pass_state_begin() -> int
 pub extern(ffi, "stone") fn stone_gl_pass_state_end(scope: int) -> bool
+pub extern(ffi, "stone") fn stone_imgui_init(window: StoneWindow) -> bool
+pub extern(ffi, "stone") fn stone_imgui_initialized() -> bool
+extern(ffi, "stone") fn stone_imgui_last_vtx_count() -> int
+extern(ffi, "stone") fn stone_imgui_new_frame()
+extern(ffi, "stone") fn stone_imgui_prepare_render() -> PtrU8
+extern(ffi, "stone") fn stone_imgui_render()
+extern(ffi, "stone") fn stone_is_key_down(key: string) -> bool
+extern(ffi, "stone") fn stone_pad_connected() -> bool
+extern(ffi, "stone") fn stone_reset_cursor()
 extern(ffi, "stone") fn stone_restore_after_custom_draw()
 pub extern(ffi, "stone") fn stone_sampler_bound(unit: int) -> bool
+pub extern(ffi, "stone") fn stone_scancode_value(token: string) -> int
 pub extern(ffi, "stone") fn stone_set_blend_mode_i(mode: int)
 pub extern(ffi, "stone") fn stone_set_clear_color(r: float, g: float, b: float, a: float)
 pub extern(ffi, "stone") fn stone_set_color_mask(r: bool, g: bool, b: bool, a: bool)
+pub extern(ffi, "stone") fn stone_set_cursor(cursor_id: int)
 pub extern(ffi, "stone") fn stone_set_depth_mode(compare_mode: string, write: bool)
 pub extern(ffi, "stone") fn stone_set_draw_buffer_mask(mask: int)
 extern(ffi, "stone") fn stone_set_gl_viewport(x: int, y: int, w: int, h: int)
 pub extern(ffi, "stone") fn stone_set_scissor(enabled: bool, x: int, y: int, w: int, h: int)
+pub extern(ffi, "stone") fn stone_set_system_cursor(cursor_type: int) -> int
+pub extern(ffi, "stone") fn stone_show_cursor(show: bool)
 extern(ffi, "stone") fn stone_sprite_init() -> bool
+pub extern(ffi, "stone") fn stone_test_virtual_pad_attach() -> int
+pub extern(ffi, "stone") fn stone_test_virtual_pad_axis(index: int, token: string, value: int) -> bool
+pub extern(ffi, "stone") fn stone_test_virtual_pad_button(index: int, token: string, down: bool) -> bool
+pub extern(ffi, "stone") fn stone_test_virtual_pad_detach(index: int) -> bool
+extern(ffi, "stone") fn stone_text_init() -> bool
 pub extern(ffi, "stone") fn stone_ui_probe_accept(kind: string, key: string, detail: string) -> int
 pub extern(ffi, "stone") fn stone_ui_probe_accepted() -> int
 extern(ffi, "stone") fn stone_ui_probe_begin(windowless: bool)

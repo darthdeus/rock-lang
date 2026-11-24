@@ -14,7 +14,7 @@ fn rendering_bindings_are_generated_once() {
         })
         .collect();
 
-    assert_eq!(names.len(), 34);
+    assert_eq!(names.len(), 71);
     for name in names {
         assert!(!authored.contains(&format!("fn {name}(")), "{name}");
         assert!(!authored_c.contains(&format!(" {name}(")), "{name}");

@@ -308,6 +308,7 @@ pub extern "C" fn stone_track_text_draw_call() {
     crate::track_text_draw_call();
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_text_init() -> bool {
     shutdown();
@@ -992,6 +993,7 @@ pub extern "C" fn stone_get_font_atlas_image(font_id: c_uint) -> u64 {
 }
 
 /// Return the generated atlas extent without exposing the GL image handle.
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_get_font_atlas_size(
     font_id: c_uint,
@@ -1015,11 +1017,13 @@ pub extern "C" fn stone_get_font_atlas_size(
     .unwrap_or(false)
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_get_font_slot_count(font_id: c_uint) -> c_int {
     font(font_id, |entry| entry.source.charset.slot_count() as c_int).unwrap_or(0)
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_get_font_slot_codepoint(font_id: c_uint, slot: c_int) -> c_int {
     let slot = usize::try_from(slot).ok();
@@ -1116,11 +1120,13 @@ pub extern "C" fn stone_ensure_font_atlas_instance_number(
     stone_ensure_font_atlas_instance(font_id, pixel_size) as f64
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_font_atlas_instance_count(font_id: c_uint) -> c_int {
     font(font_id, |entry| entry.instances.len() as c_int).unwrap_or(0)
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_get_font_atlas_instance_pixel_size(
     font_id: c_uint,
@@ -1134,6 +1140,7 @@ pub extern "C" fn stone_get_font_atlas_image_cached(font_id: c_uint) -> u64 {
     font(font_id, FontEntry::atlas_image).flatten().unwrap_or(0)
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_get_font_atlas_instance_image_at(font_id: c_uint, index: c_int) -> u64 {
     if index < 0 {
@@ -1142,6 +1149,7 @@ pub extern "C" fn stone_get_font_atlas_instance_image_at(font_id: c_uint, index:
     stone_get_font_instance_image(atlas_instance_id(font_id, index as usize))
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_get_font_instance_size(
     instance_id: u64,
@@ -1159,12 +1167,14 @@ pub extern "C" fn stone_get_font_instance_size(
     .unwrap_or(false)
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_get_font_instance_pixel_size(instance_id: u64) -> c_int {
     instance(instance_id, |instance| instance.layout.pixel_size).unwrap_or(0)
 }
 
 /// Bytes of the R8 raster an instance's texture holds; no CPU copy is retained.
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_get_font_instance_byte_len(instance_id: u64) -> c_int {
     instance(instance_id, |instance| {
@@ -1174,6 +1184,7 @@ pub extern "C" fn stone_get_font_instance_byte_len(instance_id: u64) -> c_int {
     .unwrap_or(0)
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_get_font_instance_glyph_info(
     instance_id: u64,
@@ -1187,6 +1198,7 @@ pub extern "C" fn stone_get_font_instance_glyph_info(
     .unwrap_or(false)
 }
 
+/// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_get_font_instance_image(instance_id: u64) -> u64 {
     let Some((font_id, index)) = decode_atlas_instance_id(instance_id) else {
@@ -1210,6 +1222,7 @@ pub extern "C" fn stone_get_font_pixel_size(font_id: c_uint) -> c_int {
     font(font_id, |entry| entry.layout.pixel_size).unwrap_or(0)
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_get_font_unit_metrics(font_id: c_uint, out: *mut c_float) -> bool {
     font(font_id, |entry| {
@@ -1226,6 +1239,7 @@ pub extern "C" fn stone_get_font_unit_metrics(font_id: c_uint, out: *mut c_float
     .unwrap_or(false)
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_get_glyph_unit_metrics(
     font_id: c_uint,
@@ -1256,6 +1270,7 @@ pub(crate) fn live_font_ids() -> Vec<u64> {
 
 /// Bytes of TTF/OTF the font retains, for the asset report's CPU column. -1
 /// for an id that names no live font.
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_font_data_len(font_id: c_uint) -> i64 {
     font(font_id, |entry| entry.source.data.len() as i64).unwrap_or(-1)
@@ -1297,6 +1312,7 @@ pub extern "C" fn stone_unload_font(font_id: c_uint) -> bool {
     true
 }
 
+/// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_font_release_coverage(font_id: c_uint) -> bool {
     let Some(instances) = font_mut(font_id, |entry| {
