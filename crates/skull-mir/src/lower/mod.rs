@@ -316,6 +316,10 @@ impl ScalarCtx {
         }
     }
 
+    pub fn embeds_global_read_positions(&self, ws: &Workspace) -> bool {
+        crate::verify::checks_enabled() && !self.global_read_checks(ws).is_empty()
+    }
+
     pub(crate) fn global_read_checks(
         &self,
         ws: &Workspace,

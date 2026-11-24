@@ -252,6 +252,10 @@ impl SkullEmitCache {
         &self.lua_view
     }
 
+    pub fn embeds_source_positions(&self, ws: &Workspace) -> bool {
+        self.cg.line_directives() || self.scx.embeds_global_read_positions(ws)
+    }
+
     pub fn global_layout(&self) -> Option<&str> {
         self.edit.global_layout.as_deref()
     }

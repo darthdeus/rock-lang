@@ -1556,3 +1556,26 @@ fn main() { print(earlier(1), source_site(), __SITE__) }
         assert_eq!(run(live.main_text(), &overlay), run(fresh, ""));
     }
 }
+
+#[test]
+fn body_edit_relocates_lua_debug_lines() {
+    let original = r#"global WITHOUT_VALUE: int
+fn earlier(x: int) -> int { x + 1 }
+fn main() { print(earlier(1), WITHOUT_VALUE) }
+"#;
+    let edited = original.replace("x + 1", "\n    return x + 1\n");
+    let mut live = ProjectFixture::boot(original);
+    live.edit(&edited).unwrap();
+    let fresh_main = live.path("fresh.lua");
+    let fresh_overlay = live.path("fresh-overlay.lua");
+    super::IncrementalProject::init(
+        live.dir.path().to_str().unwrap(),
+        &fresh_main,
+        &fresh_overlay,
+    )
+    .unwrap();
+    assert_eq!(
+        live.main_text(),
+        std::fs::read_to_string(fresh_main).unwrap()
+    );
+}

@@ -2463,6 +2463,11 @@ impl IncrementalProject {
                 (true, Vec::new(), Vec::new(), cook_ms)
             }
         };
+        // Line directives and checked read diagnostics embed source positions
+        // in cached chunks, including code inlined from other bodies.
+        let full = full
+            || (!span_edits.is_empty()
+                && self.cache.embeds_source_positions(self.project.workspace()));
         let t_emit = Instant::now();
         let shader_keys_changed = if full {
             self.cache
