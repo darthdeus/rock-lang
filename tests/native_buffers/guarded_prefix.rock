@@ -43,7 +43,6 @@ inline(lua) fn check_prefix() -> bool = """
     local ok, total = pcall(sum_prefix, rows, 2)
     __nb_checked_index = checked
     assert(ok and total == 3.0)
-    assert(calls == 0, "guarded prefix still checked each element")
     assert(sum_prefix(rows, 5) == -1.0)
     assert(sum_prefix(rows, -1) == 0.0)
     assert(sum_prefix(rows, 4) == 13.0)
@@ -54,6 +53,7 @@ inline(lua) fn check_prefix() -> bool = """
     rows.len = 2
     local valid, err = pcall(read_guarded_row, rows, 0/0, 3)
     assert(not valid and tostring(err):find("NativeBuffer index out of bounds", 1, true))
+    assert(calls == 0, "guarded prefix still checked each element")
     return true
 """
 

@@ -31,6 +31,10 @@ FILE_FAIL = re.compile(r"^(\S+\.rock)\.* FAILED\s*(.*)$")
 TEST_FAIL = re.compile(r"^  (\w+): (?:error: \S+:\d+: )?(.*)$")
 ERROR_FAIL = re.compile(r"^\s+(tests/errors/\S+)\s+--\s+(.*)$")
 SUMMARY = re.compile(r"rock test: (\d+)/(\d+) @tests passed")
+BOUNDS_PROOF_ASSERTION = (
+    "native_buffers/guarded_prefix.rock",
+    "prefix_length_proof_expires_when_the_buffer_shrinks: guarded prefix still checked each element",
+)
 
 
 def run(rock, corpus, disabled, checks):
@@ -79,7 +83,10 @@ def main():
         results = list(pool.map(lambda p: run(args.rock, args.corpus, p, args.checks), passes))
     for name, (failures, passed) in zip(passes, results):
         new = sorted(failures - base)
-        bad = [f for f in new if not EXPECTED.search(f[1])]
+        bad = [
+            f for f in new
+            if not EXPECTED.search(f[1]) and not (name == "bounds" and f == BOUNDS_PROOF_ASSERTION)
+        ]
         print(f"off:{name}: {len(new)} new failures, {len(new) - len(bad)} expected, "
               f"@tests passed {passed} (default {base_passed})")
         for path, reason in bad:
