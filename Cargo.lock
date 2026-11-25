@@ -1632,8 +1632,8 @@ dependencies = [
 name = "rock-ffi-codegen"
 version = "0.1.0"
 dependencies = [
+ "bone-core",
  "bone-semantic",
- "skull-mir",
  "skull-parser",
  "syn 3.0.9",
 ]
