@@ -16,6 +16,7 @@ once_cell = { workspace = true }
 log = { workspace = true }
 rock-log = { workspace = true }
 stone-gl = { path = "../crates/stone-gl" }
+stone-meadow = { path = "../crates/stone-meadow" }
 stone-imgui-abi = { path = "../stone-imgui-abi" }
 
 # Cross-platform filesystem watcher for asset hot reload (same crates the

@@ -2212,6 +2212,10 @@ name = "stone-imgui-abi"
 version = "0.1.0"
 
 [[package]]
+name = "stone-meadow"
+version = "0.1.0"
+
+[[package]]
 name = "stone-rs"
 version = "0.1.0"
 dependencies = [
@@ -2240,6 +2244,7 @@ dependencies = [
  "stone-capture",
  "stone-gl",
  "stone-imgui-abi",
+ "stone-meadow",
  "stone-texture",
  "tempfile",
  "toml",
