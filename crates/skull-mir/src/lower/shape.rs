@@ -1,17 +1,16 @@
 use super::*;
 
+pub use bone_core::c_layout::{
+    CFieldType, ValueCLayout, c_prim_size_align, enum_definition, has_value_plan,
+    is_payload_free_enum, is_unit_enum, primitive_c_type, round_up, static_ty,
+};
+use bone_core::c_layout::{CLayout, CMember};
 use bone_core::hir::{BuiltinTy, EnumDef, FnBackend, TyId, TypeCtor, TypeExpr, VariantPayload};
 use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
 use ustr::Ustr;
 
 use crate::monoty::{MonoCtor, MonoSubst, MonoTy};
-
-/// Stdlib descriptors (`Ptr`, `NativeBuffer`) are excluded: the backend supplies
-/// their one host slot, which a copy shares and never rebuilds.
-pub fn has_value_plan(sd: &bone_core::hir::StructDef) -> bool {
-    sd.is_value && !bone_core::modules::is_descriptor_key(sd.name)
-}
 
 pub(crate) fn is_value_struct(ws: &Workspace, name: Ustr) -> bool {
     ws.nominals
@@ -292,17 +291,6 @@ pub struct LeafSlot {
     pub owners: Vec<Ustr>,
 }
 
-/// Size and alignment of a primitive C type as LuaJIT lays it out.
-/// The only types [`value_c_fields`] admits as leaves.
-pub(crate) fn c_prim_size_align(cty: &str) -> Option<(usize, usize)> {
-    match cty {
-        "double" => Some((8, 8)),
-        "int" | "uint32_t" | "float" => Some((4, 4)),
-        "bool" => Some((1, 1)),
-        _ => None,
-    }
-}
-
 /// Positional leaf order must match [`value_leaf_paths`], or values are
 /// written to the wrong addresses.
 pub(crate) fn value_leaf_layout(
@@ -312,67 +300,38 @@ pub(crate) fn value_leaf_layout(
     let plan = planned_value(ws, name)?;
     let layout = plan.cdata.as_ref()?;
     let mut leaves = Vec::new();
-    layout.write_leaves(ws, "", 0, &[], &mut leaves);
+    write_c_layout_leaves(layout, ws, "", 0, &[], &mut leaves);
     Some((leaves, layout.size(), layout.align))
 }
 
-struct CLayout {
-    fields: Vec<(Ustr, usize, CMember)>,
-    end: usize,
-    align: usize,
-}
-
-enum CMember {
-    Scalar(&'static str),
-    Aggregate(Ustr, CLayout),
-}
-
-impl CLayout {
-    fn new() -> Self {
-        Self {
-            fields: Vec::new(),
-            end: 0,
-            align: 1,
-        }
-    }
-
-    fn size(&self) -> usize {
-        round_up(self.end, self.align)
-    }
-
-    fn push(&mut self, name: Ustr, member: CMember) {
-        let (size, align) = match &member {
-            CMember::Scalar(ty) => c_prim_size_align(ty).expect("planned primitive type"),
-            CMember::Aggregate(_, child) => (child.size(), child.align),
-        };
-        let offset = round_up(self.end, align);
-        self.fields.push((name, offset, member));
-        self.end = offset + size;
-        self.align = self.align.max(align);
-    }
-
-    fn write_leaves(
-        &self,
-        ws: &Workspace,
-        prefix: &str,
-        base: usize,
-        owners: &[Ustr],
-        leaves: &mut Vec<LeafSlot>,
-    ) {
-        for (field, offset, member) in &self.fields {
-            let byte_off = base + offset;
-            match member {
-                CMember::Scalar(cty) => leaves.push(LeafSlot {
-                    path: leaf_path(prefix, field.as_str()),
-                    cty,
+fn write_c_layout_leaves(
+    layout: &CLayout,
+    ws: &Workspace,
+    prefix: &str,
+    base: usize,
+    owners: &[Ustr],
+    leaves: &mut Vec<LeafSlot>,
+) {
+    for (field, offset, member) in &layout.fields {
+        let byte_off = base + offset;
+        match member {
+            CMember::Scalar(cty) => leaves.push(LeafSlot {
+                path: leaf_path(prefix, field.as_str()),
+                cty,
+                byte_off,
+                owners: owners.to_vec(),
+            }),
+            CMember::Aggregate(name, child) => {
+                let mut owners = owners.to_vec();
+                owners.push(crate::mangle::type_symbol(ws, *name));
+                write_c_layout_leaves(
+                    child,
+                    ws,
+                    &format!("{prefix}{field}."),
                     byte_off,
-                    owners: owners.to_vec(),
-                }),
-                CMember::Aggregate(name, child) => {
-                    let mut owners = owners.to_vec();
-                    owners.push(crate::mangle::type_symbol(ws, *name));
-                    child.write_leaves(ws, &format!("{prefix}{field}."), byte_off, &owners, leaves);
-                }
+                    &owners,
+                    leaves,
+                );
             }
         }
     }
@@ -384,10 +343,6 @@ pub(crate) fn leaf_path(prefix: &str, name: &str) -> Ustr {
     } else {
         crate::names::ustr(&format!("{prefix}{name}"))
     }
-}
-
-pub(crate) fn round_up(n: usize, align: usize) -> usize {
-    n.div_ceil(align) * align
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -600,10 +555,7 @@ fn is_generic_nominal(ws: &Workspace, name: Ustr) -> bool {
 }
 
 fn is_registry_handle(name: Ustr) -> bool {
-    matches!(
-        crate::layout_instance::decl_name(name).as_str(),
-        "Arena" | "Entity" | "Scene"
-    )
+    bone_core::c_layout::is_registry_handle_decl(crate::layout_instance::decl_name(name).as_str())
 }
 
 fn planned_value_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Option<PlannedValue> {
@@ -845,22 +797,6 @@ pub(crate) fn planned_value_contains_flat_enum(ws: &Workspace, name: Ustr) -> bo
     planned_value(ws, name).is_some_and(|plan| plan.contains_flat_enum)
 }
 
-/// Accepts an instance name and answers its declaration.
-pub(super) fn enum_definition(ws: &Workspace, name: Ustr) -> Option<&EnumDef> {
-    let id = ws.nominals.enum_id(name)?;
-    Some(&ws.modules[id.module.index()].enums[id.def])
-}
-
-fn is_unit_enum(ed: &EnumDef) -> bool {
-    ed.variants
-        .iter()
-        .all(|v| matches!(v.payload, VariantPayload::Unit))
-}
-
-pub(crate) fn is_payload_free_enum(ws: &Workspace, name: Ustr) -> bool {
-    enum_definition(ws, name).is_some_and(is_unit_enum)
-}
-
 /// The index is the variant's int tag.
 pub(crate) fn payload_free_enum_variants(ws: &Workspace, name: Ustr) -> Option<Vec<Ustr>> {
     let ed = enum_definition(ws, name)?;
@@ -1041,13 +977,6 @@ pub(crate) fn swizzle_group(parts: Vec<ValueRepr>) -> ValueRepr {
             parts,
             present: None,
         }
-    }
-}
-
-pub(crate) fn static_ty(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
-    match ty {
-        TyId::Static(m, idx) => Some(ws.module(m).ty_arena[idx]),
-        TyId::Local(_) => None,
     }
 }
 
@@ -1528,77 +1457,13 @@ pub(crate) fn slot_name(suffix: &str) -> Ustr {
     crate::names::concat(&["_", suffix])
 }
 
-fn primitive_c_type(ty: &TypeExpr) -> Option<&'static str> {
-    match ty {
-        TypeExpr::Builtin(BuiltinTy::Int) => Some("int"),
-        TypeExpr::Builtin(BuiltinTy::Uint) => Some("uint32_t"),
-        TypeExpr::Builtin(BuiltinTy::Float) => Some("double"),
-        TypeExpr::Builtin(BuiltinTy::F32) => Some("float"),
-        TypeExpr::Builtin(BuiltinTy::Bool) => Some("bool"),
-        _ => None,
-    }
-}
-
-fn enum_payload_c_type(ws: &Workspace, ty: TyId) -> Option<&'static str> {
-    let ty = static_ty(ws, ty)?;
-    // F32 describes a field's storage and is not an enum payload type.
-    if matches!(ty, TypeExpr::Builtin(BuiltinTy::F32)) {
-        return None;
-    }
-    primitive_c_type(&ty)
-}
-
 fn build_enum_cdata_shape(ws: &Workspace, ed: &EnumDef) -> Option<EnumCdataShape> {
-    let mut slots: Vec<(Ustr, &'static str)> = Vec::new();
-    let mut variants: Vec<(Ustr, usize)> = Vec::with_capacity(ed.variants.len());
-    let mut add_slot = |nm: Ustr, c: &'static str| -> Option<()> {
-        match slots.iter().find(|(n, _)| *n == nm) {
-            Some((_, existing)) if *existing != c => None,
-            Some(_) => Some(()),
-            None => {
-                slots.push((nm, c));
-                Some(())
-            }
-        }
-    };
-    for v in &ed.variants {
-        let arity = match &v.payload {
-            VariantPayload::Unit => 0,
-            VariantPayload::Tuple(tys) => {
-                for (i, ty) in tys.iter().enumerate() {
-                    add_slot(slot_name(&i.to_string()), enum_payload_c_type(ws, *ty)?)?;
-                }
-                tys.len()
-            }
-            VariantPayload::Record(fields) => {
-                for f in fields {
-                    add_slot(slot_name(f.name.as_str()), enum_payload_c_type(ws, f.ty)?)?;
-                }
-                fields.len()
-            }
-        };
-        variants.push((v.name, arity));
-    }
-    // A payload-free enum is a plain int.
-    (!slots.is_empty()).then_some(EnumCdataShape {
+    let (slots, variants) = bone_core::c_layout::enum_cdata_slots(ws, ed)?;
+    Some(EnumCdataShape {
         name: ed.name,
         slots,
         variants,
     })
-}
-
-pub enum CFieldType {
-    Scalar(&'static str),
-    Aggregate(Ustr),
-}
-
-impl From<&CMember> for CFieldType {
-    fn from(member: &CMember) -> Self {
-        match member {
-            CMember::Scalar(ty) => Self::Scalar(ty),
-            CMember::Aggregate(name, _) => Self::Aggregate(*name),
-        }
-    }
 }
 
 pub fn value_c_fields(ws: &Workspace, name: Ustr) -> Option<Vec<(Ustr, CFieldType)>> {
@@ -1611,12 +1476,6 @@ pub fn value_c_fields(ws: &Workspace, name: Ustr) -> Option<Vec<(Ustr, CFieldTyp
             .map(|(name, _, member)| (*name, member.into()))
             .collect(),
     )
-}
-
-pub struct ValueCLayout {
-    pub size: usize,
-    pub align: usize,
-    pub fields: Vec<(Ustr, usize, CFieldType)>,
 }
 
 pub fn value_c_layout(ws: &Workspace, name: Ustr) -> Option<ValueCLayout> {
@@ -2342,4 +2201,52 @@ pub(crate) fn coroutine_yield_channel_mono(ws: &Workspace, ty: &MonoTy) -> Optio
 /// The tag precedes positional and record leaves.
 pub fn yield_slot(i: usize) -> Ustr {
     crate::names::ustr(format!("__y{i}").as_str())
+}
+
+#[cfg(test)]
+mod c_layout_parity_tests {
+    use super::*;
+
+    #[test]
+    fn bone_core_c_layout_matches_mir_value_c_layout() {
+        let source = r#"
+            pub enum Tag { First, Second }
+            pub enum Payload { Empty, Pair(int, float) }
+            pub @nomangle nobox value Inner { a: bool, b: f32, c: uint }
+            pub @nomangle nobox value Outer { inner: Inner, tag: Tag, payload: Payload, weight: float }
+            pub nobox value Mangled { x: int, y: float }
+        "#;
+        let mut ast = [skull_parser::parse_module_clean(source, "parity.rock".into()).unwrap()];
+        let ws = bone_semantic::semantic_passes::semantic_pass(&mut ast).unwrap();
+        for module in ws.source_modules() {
+            for (_, s) in module.structs.iter() {
+                assert_eq!(
+                    bone_core::c_layout::value_c_layout(&ws, s.name),
+                    value_c_layout(&ws, s.name),
+                    "layout mismatch for struct {}",
+                    s.name
+                );
+                assert_eq!(
+                    bone_core::c_layout::declared_type_symbol(&ws, s.name),
+                    crate::mangle::type_symbol(&ws, s.name),
+                    "symbol mismatch for struct {}",
+                    s.name
+                );
+            }
+            for (_, e) in module.enums.iter() {
+                assert_eq!(
+                    bone_core::c_layout::value_c_layout(&ws, e.name),
+                    value_c_layout(&ws, e.name),
+                    "layout mismatch for enum {}",
+                    e.name
+                );
+                assert_eq!(
+                    bone_core::c_layout::declared_type_symbol(&ws, e.name),
+                    crate::mangle::type_symbol(&ws, e.name),
+                    "symbol mismatch for enum {}",
+                    e.name
+                );
+            }
+        }
+    }
 }

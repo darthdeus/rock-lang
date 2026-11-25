@@ -1,8 +1,7 @@
 //! Build-time generation of Rock bindings and C prototypes from Rust exports.
 
+use bone_core::c_layout::{CFieldType, declared_type_symbol as type_symbol, value_c_layout};
 use bone_semantic::prelude::{Ustr, Workspace};
-use skull_mir::lower::{CFieldType, value_c_layout};
-use skull_mir::mangle::type_symbol;
 use skull_parser::{EnumDef, EnumVariantKind, ItemKind, parse_module_clean};
 use std::collections::BTreeMap;
 use std::fmt::Write;

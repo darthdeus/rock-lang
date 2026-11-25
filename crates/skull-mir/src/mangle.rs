@@ -52,37 +52,7 @@ pub fn is_exempt(f: &Function) -> bool {
 }
 
 /// Classifiers use this spelling; emitted identifiers use [`ident_of_key`].
-pub fn declared_name(key: &str) -> &str {
-    match last_path_separator(key) {
-        Some(cut) => &key[cut + 2..],
-        None => key,
-    }
-}
-
-fn last_path_separator(key: &str) -> Option<usize> {
-    let bytes = key.as_bytes();
-    (1..bytes.len())
-        .rev()
-        .find(|&i| bytes[i] == b':' && bytes[i - 1] == b':')
-        .map(|i| i - 1)
-}
-
-/// A qualified key becomes `<name>_<digest>`: the prefix is never flattened
-/// textually, so module `a::b` and a module named `a_b` cannot converge.
-pub fn ident_of_key(key: &str) -> std::borrow::Cow<'_, str> {
-    let artifact = bone_core::modules::artifact_name(key);
-    if artifact != key {
-        return std::borrow::Cow::Borrowed(artifact);
-    }
-    match last_path_separator(key) {
-        None => std::borrow::Cow::Borrowed(key),
-        Some(cut) => std::borrow::Cow::Owned(format!(
-            "{}{SEP}{}",
-            &key[cut + 2..],
-            prefix_digest(&key[..cut])
-        )),
-    }
-}
+pub use bone_core::c_layout::{declared_name, ident_of_key, prefix_digest};
 
 thread_local! {
     static IDENT_CACHE: std::cell::RefCell<rustc_hash::FxHashMap<ustr::Ustr, ustr::Ustr>> =
@@ -139,15 +109,6 @@ pub fn enum_singleton_global(ws: &Workspace, key: ustr::Ustr, variant: ustr::Ust
 /// Indexed by ordinal.
 pub fn enum_names_global(ws: &Workspace, key: ustr::Ustr) -> ustr::Ustr {
     ustr::Ustr::from(format!("__rock_enum_{}_names", type_symbol(ws, key)).as_str())
-}
-
-/// Hashes the prefix bytes with std's `DefaultHasher`: stable across processes
-/// and compiler builds, unlike a `Ustr` hash, whose seed is per-build.
-pub fn prefix_digest(prefix: &str) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    prefix.hash(&mut h);
-    format!("{:08x}", h.finish() as u32)
 }
 
 fn has_annotation(f: &Function, name: &str) -> bool {

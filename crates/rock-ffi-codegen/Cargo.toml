@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+bone-core = { workspace = true }
 bone-semantic = { workspace = true }
-skull-mir = { workspace = true }
 skull-parser = { workspace = true }
 syn = { version = "3.0.9", features = ["full"] }

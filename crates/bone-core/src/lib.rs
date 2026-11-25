@@ -1,6 +1,7 @@
 #[macro_use]
 pub mod prelude;
 pub mod annotations;
+pub mod c_layout;
 pub mod comptime_files;
 pub mod effects;
 pub mod escape;
