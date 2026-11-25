@@ -1,7 +1,7 @@
 //! Admission leases reserve worker growth not yet present in GPU telemetry.
 //! Existing allocations are already deducted from free VRAM; counting them
 //! again would penalize a later suite for workers the host already admitted.
-use super::{SIM_LANE_VRAM_MIB, SIM_VRAM_RESERVE_MIB};
+use super::SIM_LANE_VRAM_MIB;
 use anyhow::{Context, Result};
 use rock_core::clock::Instant;
 use std::collections::HashMap;
@@ -161,6 +161,7 @@ pub(super) enum Admission {
 pub(super) fn try_acquire(
     root: &Path,
     slots: usize,
+    reserve_mib: u64,
     probe: impl FnOnce() -> Probe,
 ) -> Result<Admission> {
     std::fs::create_dir_all(root)?;
@@ -218,7 +219,7 @@ pub(super) fn try_acquire(
                 })
                 .sum();
             // Preserve the existing one-worker progress floor, now host-wide.
-            (!active.is_empty() && gpu.free < SIM_VRAM_RESERVE_MIB + pending + SIM_LANE_VRAM_MIB)
+            (!active.is_empty() && gpu.free < reserve_mib + pending + SIM_LANE_VRAM_MIB)
                 .then_some("gpu_headroom")
         }
     };
@@ -238,6 +239,7 @@ mod tests {
             Admission::Denied(reason) => Err(reason),
         }
     }
+    const RESERVE: u64 = super::super::DEFAULT_SIM_VRAM_RESERVE_MIB;
     fn gpu(free: u64, processes: &[(u32, u64)]) -> Probe {
         Ok(Some(GpuMemory {
             free,
@@ -281,13 +283,14 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut concurrent = None;
         denied("gpu_headroom", || {
-            try_acquire(root.path(), 2, || {
+            try_acquire(root.path(), 2, RESERVE, || {
                 if concurrent.is_none() {
                     let lock = open(&root.path().join("admission.lock")).unwrap();
                     lock.try_lock()
                         .expect("GPU telemetry must not hold the host admission lock");
                     drop(lock);
-                    let mut slot = granted(try_acquire(root.path(), 2, || gpu(8192, &[]))).unwrap();
+                    let mut slot =
+                        granted(try_acquire(root.path(), 2, RESERVE, || gpu(8192, &[]))).unwrap();
                     publish_pid(root.path(), &mut slot, 42).unwrap();
                     concurrent = Some(slot);
                 }
@@ -296,13 +299,22 @@ mod tests {
             })
         });
         drop(concurrent);
-        acquired(|| try_acquire(root.path(), 2, || gpu(8192, &[])));
+        acquired(|| try_acquire(root.path(), 2, RESERVE, || gpu(8192, &[])));
+    }
+    #[test]
+    fn a_lower_reserve_admits_a_worker_the_default_denies() {
+        let root = tempfile::tempdir().unwrap();
+        let _first = acquired(|| try_acquire(root.path(), 3, RESERVE, || gpu(8192, &[])));
+        denied("gpu_headroom", || {
+            try_acquire(root.path(), 3, RESERVE, || gpu(8192, &[]))
+        });
+        acquired(|| try_acquire(root.path(), 3, 2048, || gpu(8192, &[])));
     }
     #[test]
     fn failures_and_missing_tooling_preserve_admission_contracts() {
         let root = tempfile::tempdir().unwrap();
-        let failed = || try_acquire(root.path(), 2, || Err("probe failed".into()));
-        let missing = || try_acquire(root.path(), 2, || Ok(None));
+        let failed = || try_acquire(root.path(), 2, RESERVE, || Err("probe failed".into()));
+        let missing = || try_acquire(root.path(), 2, RESERVE, || Ok(None));
         let first = acquired(failed);
         denied("gpu_probe_failed", failed);
         let second = acquired(missing);
