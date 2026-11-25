@@ -1925,13 +1925,35 @@ fn resolve_jobs_with(
 
 const SIM_LANE_VRAM_MIB: u64 = 2048;
 
-const SIM_VRAM_RESERVE_MIB: u64 = 6 * 1024;
+const DEFAULT_SIM_VRAM_RESERVE_MIB: u64 = 6 * 1024;
 
-fn vram_budgeted_jobs(cores: usize, free_vram_mib: Option<u64>) -> usize {
+/// GPU memory sims leave free for an interactive session and other work.
+/// A host whose GPU serves nothing else lowers it with
+/// `ROCK_SIM_VRAM_RESERVE_MIB`.
+fn sim_vram_reserve_mib() -> u64 {
+    static RESERVE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *RESERVE.get_or_init(|| {
+        parse_vram_reserve_mib(std::env::var("ROCK_SIM_VRAM_RESERVE_MIB").ok().as_deref())
+    })
+}
+
+fn parse_vram_reserve_mib(value: Option<&str>) -> u64 {
+    let Some(value) = value else {
+        return DEFAULT_SIM_VRAM_RESERVE_MIB;
+    };
+    value.trim().parse().unwrap_or_else(|_| {
+        log::warn!(target: "SIM",
+            "ROCK_SIM_VRAM_RESERVE_MIB=`{value}` is not a MiB count; \
+             using {DEFAULT_SIM_VRAM_RESERVE_MIB}");
+        DEFAULT_SIM_VRAM_RESERVE_MIB
+    })
+}
+
+fn vram_budgeted_jobs(cores: usize, free_vram_mib: Option<u64>, reserve_mib: u64) -> usize {
     let cores = cores.max(1);
     match free_vram_mib {
         Some(free) => {
-            let lanes = free.saturating_sub(SIM_VRAM_RESERVE_MIB) / SIM_LANE_VRAM_MIB;
+            let lanes = free.saturating_sub(reserve_mib) / SIM_LANE_VRAM_MIB;
             usize::try_from(lanes).unwrap_or(cores).clamp(1, cores)
         }
         None => cores,
@@ -1942,8 +1964,9 @@ fn memory_budgets(
     cores: usize,
     total_ram_mib: Option<u64>,
     free_vram_mib: Option<u64>,
+    vram_reserve_mib: u64,
 ) -> JobBudget {
-    let gpu = vram_budgeted_jobs(cores, free_vram_mib);
+    let gpu = vram_budgeted_jobs(cores, free_vram_mib, vram_reserve_mib);
     let ram = total_ram_mib
         .map(|ram| {
             usize::try_from(ram.saturating_mul(10) / (36 * 1024))
@@ -1969,14 +1992,15 @@ fn sim_job_budget() -> JobBudget {
         let total_ram = total_system_memory_mib();
         let probe = free_gpu_memory_mib();
         let free_vram = probe.as_ref().ok().copied().flatten();
-        let mut budget = memory_budgets(cores, total_ram, free_vram);
+        let reserve = sim_vram_reserve_mib();
+        let mut budget = memory_budgets(cores, total_ram, free_vram, reserve);
         if let Err(reason) = probe {
             log::warn!(target: "SIM", "GPU memory probe failed: {reason}; limiting to one lane");
             budget.gpu = 1;
         }
         let default_jobs = budget.lanes();
         log::info!(target: "SIM",
-            "default jobs {default_jobs}: {cores} cores, total RAM {total_ram:?} MiB at 3.6 GiB a lane ({} lanes), free GPU {free_vram:?} MiB less {SIM_VRAM_RESERVE_MIB} MiB reserve at {SIM_LANE_VRAM_MIB} MiB a lane ({} lanes)",
+            "default jobs {default_jobs}: {cores} cores, total RAM {total_ram:?} MiB at 3.6 GiB a lane ({} lanes), free GPU {free_vram:?} MiB less {reserve} MiB reserve at {SIM_LANE_VRAM_MIB} MiB a lane ({} lanes)",
             budget.ram, budget.gpu);
         budget
     })
@@ -2309,7 +2333,12 @@ fn acquire_worker_slot(
     let mut waiting = false;
     loop {
         let checking = rock_core::clock::Instant::now();
-        let result = worker_admission::try_acquire(&root, slots, worker_admission::gpu_memory)?;
+        let result = worker_admission::try_acquire(
+            &root,
+            slots,
+            sim_vram_reserve_mib(),
+            worker_admission::gpu_memory,
+        )?;
         checks += checking.elapsed();
         let reason = match result {
             worker_admission::Admission::Granted(slot) => {

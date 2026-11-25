@@ -602,15 +602,41 @@ fn a_request_above_the_known_lanes_is_narrowed_before_the_budget() {
 
 #[test]
 fn default_jobs_fit_ram_and_gpu_budgets() {
-    let studio = memory_budgets(14, Some(36 * 1024), None);
+    const RESERVE: u64 = DEFAULT_SIM_VRAM_RESERVE_MIB;
+    let studio = memory_budgets(14, Some(36 * 1024), None, RESERVE);
     assert_eq!(studio.lanes(), 10);
     assert_jobs(14, studio, &[(None, false, 10), (Some(14), true, 1)]);
-    assert_eq!(memory_budgets(32, Some(62 * 1024), Some(17851)).lanes(), 5);
-    assert_eq!(memory_budgets(32, Some(62 * 1024), None).lanes(), 17);
-    assert_eq!(memory_budgets(2, Some(36 * 1024), None).lanes(), 2);
-    assert_eq!(memory_budgets(14, Some(0), None).lanes(), 1);
-    assert_eq!(memory_budgets(0, Some(36 * 1024), None).lanes(), 1);
-    assert_eq!(memory_budgets(14, None, None).lanes(), 14);
+    assert_eq!(
+        memory_budgets(32, Some(62 * 1024), Some(17851), RESERVE).lanes(),
+        5
+    );
+    assert_eq!(
+        memory_budgets(32, Some(62 * 1024), None, RESERVE).lanes(),
+        17
+    );
+    assert_eq!(memory_budgets(2, Some(36 * 1024), None, RESERVE).lanes(), 2);
+    assert_eq!(memory_budgets(14, Some(0), None, RESERVE).lanes(), 1);
+    assert_eq!(memory_budgets(0, Some(36 * 1024), None, RESERVE).lanes(), 1);
+    assert_eq!(memory_budgets(14, None, None, RESERVE).lanes(), 14);
+    assert_eq!(
+        memory_budgets(30, Some(64 * 1024), Some(14_700), 2048).lanes(),
+        6
+    );
+}
+
+#[test]
+fn the_vram_reserve_is_overridable_and_falls_back_to_the_default() {
+    assert_eq!(parse_vram_reserve_mib(None), DEFAULT_SIM_VRAM_RESERVE_MIB);
+    assert_eq!(parse_vram_reserve_mib(Some("2048")), 2048);
+    assert_eq!(parse_vram_reserve_mib(Some(" 0 ")), 0);
+    assert_eq!(
+        parse_vram_reserve_mib(Some("2GiB")),
+        DEFAULT_SIM_VRAM_RESERVE_MIB
+    );
+    assert_eq!(
+        parse_vram_reserve_mib(Some("")),
+        DEFAULT_SIM_VRAM_RESERVE_MIB
+    );
 }
 
 #[test]
