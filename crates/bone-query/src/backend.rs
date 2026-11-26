@@ -756,6 +756,7 @@ impl BoneWorkspace {
         let mut lint_change = bone_lints::LintCacheUpdate::body_only([], []);
         changed.insert(path.to_string());
         let mut drop_type_caches = false;
+        let mut recovered = false;
         if !proj.session.is_tracked(path) {
             let node = proj
                 .graph
@@ -800,7 +801,6 @@ impl BoneWorkspace {
                     .cloned()
                     .collect();
                 retry_paths.sort();
-                let mut recovered = false;
                 for rejected_path in retry_paths {
                     let Some(rejected_text) = proj.texts.get(&rejected_path).cloned() else {
                         proj.rejected_updates.remove(&rejected_path);
@@ -816,20 +816,34 @@ impl BoneWorkspace {
                         }
                     }
                 }
-                if recovered {
-                    drop_type_caches = true;
-                    proj.hole_cache.clear();
-                    changed.extend(proj.texts.keys().cloned());
-                    let now = bone_core::prelude::Instant::now();
-                    proj.module_touched
-                        .extend(proj.texts.keys().cloned().map(|file| (file, now)));
-                    lint_change = bone_lints::LintCacheUpdate::full();
-                }
             }
             Err(e) => {
                 proj.rejected_updates.insert(path.to_string(), e.clone());
                 this_file_parse_err = Some(e);
             }
+        }
+        if proj.rejected_updates.len() > 1
+            && proj
+                .session
+                .replace_files(
+                    proj.rejected_updates
+                        .keys()
+                        .map(|path| (path.as_str(), proj.texts[path].as_str())),
+                )
+                .is_ok()
+        {
+            proj.rejected_updates.clear();
+            this_file_parse_err = None;
+            recovered = true;
+        }
+        if recovered {
+            drop_type_caches = true;
+            proj.hole_cache.clear();
+            changed.extend(proj.texts.keys().cloned());
+            let now = bone_core::prelude::Instant::now();
+            proj.module_touched
+                .extend(proj.texts.keys().cloned().map(|file| (file, now)));
+            lint_change = bone_lints::LintCacheUpdate::full();
         }
         if drop_type_caches {
             proj.drop_type_caches();

@@ -473,6 +473,43 @@ const USES_FOO: &str = "fn use_it() -> Foo { Foo { x: 1 } }\n";
 const DECLARES_FOO: &str = "struct Foo { x: int }\n";
 
 #[test]
+fn two_individually_rejected_buffers_can_recover_together() {
+    let (_tmp, dir) = package_dir("swap-definitions");
+    let (main, a, b) = (
+        dir.join("main.rock"),
+        dir.join("a.rock"),
+        dir.join("b.rock"),
+    );
+    let source = "fn main() -> int { first() + second() }\n";
+    let a_before = "macro first() { 1 }\n";
+    let b_before = "fn second() -> int { 2 }\n";
+    let a_after = "macro second() { 3 }\n";
+    let b_after = "fn first() -> int { 4 }\n";
+    for (file, text) in [(&main, source), (&a, a_before), (&b, b_before)] {
+        std::fs::write(file, text).unwrap();
+    }
+
+    let mut server = LspServer::new();
+    for (file, text) in [(&main, source), (&a, a_before), (&b, b_before)] {
+        roundtrip(&mut server, did_open(&uri_of(file), text));
+    }
+    let rejected = roundtrip(&mut server, did_change(&uri_of(&a), a_after));
+    assert!(!diagnostics_for(&rejected, &uri_of(&a)).is_empty());
+    let repaired = roundtrip(&mut server, did_change(&uri_of(&b), b_after));
+    assert!(
+        repaired.iter().any(|message| {
+            matches!(message, Message::Notification(note)
+            if note.method == "textDocument/publishDiagnostics"
+                && note.params["uri"] == uri_of(&a)
+                && note.params["diagnostics"] == json!([]))
+        }),
+        "{repaired:?}"
+    );
+    let target = definition(&mut server, &main, 0, 21);
+    assert!(target.contains(&uri_of(&b)), "{target}");
+}
+
+#[test]
 fn dependency_buffer_edits_refresh_the_loaded_consumer() {
     let (_tmp, dir) = package_dir("workspace");
     let app = dir.join("app");

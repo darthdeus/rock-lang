@@ -150,6 +150,49 @@ impl ProjectFixture {
     }
 }
 
+#[test]
+fn live_reload_applies_a_cross_file_macro_to_function_change_atomically() {
+    let main = "fn main() { print(bias()) }\n";
+    let mut fx = ProjectFixture::boot_files(&[
+        (
+            "stick.toml",
+            "[package]\nname = \"batch\"\ntype = \"bin\"\n",
+        ),
+        ("main.rock", main),
+        ("a.rock", "fn unrelated() -> int { 0 }\n"),
+        ("z.rock", "macro bias() { 1 }\n"),
+    ]);
+    let old_main = fx.main_text();
+    assert!(
+        fx.edit_files(&[("a.rock", "fn bias() -> int { 2 }\n")])
+            .is_err()
+    );
+    assert_eq!(
+        fx.main_text(),
+        old_main,
+        "a rejected edit must leave the publication intact"
+    );
+
+    let reload = fx
+        .edit_files(&[
+            ("a.rock", "fn bias() -> int { 2 }\n"),
+            ("z.rock", "fn unrelated() -> int { 0 }\n"),
+        ])
+        .expect("one watcher batch can remove the macro and add a function with the same name");
+    assert!(
+        matches!(reload, super::SkullReload::Full { .. }),
+        "{reload:?}"
+    );
+    let fresh = fx.path("fresh.lua");
+    super::IncrementalProject::init(
+        fx.dir.path().to_str().unwrap(),
+        &fresh,
+        &fx.path("fresh-overlay.lua"),
+    )
+    .unwrap();
+    assert_eq!(fx.main_text(), std::fs::read_to_string(fresh).unwrap());
+}
+
 fn session(src: &str) -> bone_incremental::session::Session {
     let mut source = rock_core::source_file_from_path_and_contents(
         "main.rock".to_string(),

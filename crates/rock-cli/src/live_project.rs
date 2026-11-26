@@ -294,14 +294,37 @@ impl LiveProject {
         let mut lint_changed_files = Vec::new();
         let mut full = false;
         let mut changed = false;
-        for Edit { index, id, text } in edits {
-            self.sources.files[index].borrow_mut().contents = text.clone();
-            let update = self.session.update_file(&id, &text).map_err(|error| {
-                anyhow::anyhow!(
-                    "{}",
-                    crate::skull_backend::render_project_err(&self.sources, &error)
-                )
-            })?;
+        for edit in &edits {
+            self.sources.files[edit.index]
+                .borrow_mut()
+                .contents
+                .clone_from(&edit.text);
+        }
+        let render_error = |error: CompilerError| {
+            anyhow::anyhow!(
+                "{}",
+                crate::skull_backend::render_project_err(&self.sources, &error)
+            )
+        };
+        for Edit { id, text, .. } in &edits {
+            let update = match self.session.update_file(id, text) {
+                Ok(update) => update,
+                Err(_) if edits.len() > 1 => {
+                    // One intermediate state may be invalid even though the
+                    // watcher batch is valid as a unit.
+                    self.session
+                        .replace_files(
+                            edits
+                                .iter()
+                                .map(|edit| (edit.id.as_str(), edit.text.as_str())),
+                        )
+                        .map_err(render_error)?;
+                    full = true;
+                    changed = true;
+                    break;
+                }
+                Err(error) => return Err(render_error(error)),
+            };
             reinferred.extend(update.reinferred.iter().copied());
             match update.tier {
                 UpdateTier::NoChange => continue,

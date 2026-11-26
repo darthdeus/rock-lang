@@ -715,6 +715,40 @@ impl Session {
         result
     }
 
+    /// Rebuild against edits that must be installed together. Keep the current
+    /// session if the combined sources cannot be lowered.
+    pub fn replace_files<'a>(
+        &mut self,
+        edits: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Result<(), CompilerError> {
+        let mut edits: std::collections::BTreeMap<_, _> = edits.into_iter().collect();
+        let make_file = |path: &str, text: &str| {
+            let (package, global_policy) = self.facts_of(path);
+            SessionFile {
+                path: path.to_string(),
+                text: text.to_string(),
+                package,
+                global_policy,
+            }
+        };
+        let mut files: Vec<_> = self
+            .paths
+            .iter()
+            .map(|path| {
+                let text = edits
+                    .remove(path.as_str())
+                    .unwrap_or(&self.files[path].text);
+                make_file(path, text)
+            })
+            .collect();
+        files.extend(edits.into_iter().map(|(path, text)| make_file(path, text)));
+        let mut next = Self::new(self.warm.clone(), files, &self.aliases)?;
+        next.ws.comptime_inputs = self.ws.comptime_inputs.clone();
+        next.declared_facts = std::mem::take(&mut self.declared_facts);
+        *self = next;
+        Ok(())
+    }
+
     pub fn update_file(&mut self, path: &str, text: &str) -> Result<UpdateResult, CompilerError> {
         self.ws
             .reinferred_body_count
