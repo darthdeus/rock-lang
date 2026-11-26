@@ -167,6 +167,10 @@ fn install_sources(exe: Option<&Path>, directory: &str) -> Option<PathBuf> {
         .map(|root| root.join(directory))
 }
 
+pub fn embedded_files() -> &'static [StdlibFile] {
+    EMBEDDED_FILES
+}
+
 pub fn stdlib_files() -> &'static [StdlibFile] {
     FILES.get_or_init(|| match stdlib_origin() {
         StdlibSource::Dir(dir) => STDLIB_NAMES

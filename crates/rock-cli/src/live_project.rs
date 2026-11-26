@@ -21,6 +21,7 @@ pub enum LiveUpdate {
 }
 
 pub(crate) struct LiveProjectSnapshot {
+    warm: std::sync::Arc<[skull_parser::Ast]>,
     comptime_inputs: bone_semantic::inference::ComptimeInputs,
     sources: SourceFiles,
     previous_contents: Vec<(usize, String)>,
@@ -35,6 +36,7 @@ struct Edit {
 pub struct LiveProject {
     session: bone_incremental::session::Session,
     dir: String,
+    stdlib: rock_stdlib::StdlibSource,
     sources: SourceFiles,
     include_tests: bool,
     lint_cache: bone_lints::IncrementalLintCache,
@@ -52,12 +54,43 @@ pub(crate) fn project_sources(dir: &str, include_tests: bool) -> Result<SourceFi
         .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
+fn load_live_sources(
+    dir: &str,
+    include_tests: bool,
+    stdlib: &rock_stdlib::StdlibSource,
+) -> Result<SourceFiles> {
+    let mut sources = project_sources(dir, include_tests)?;
+    anyhow::ensure!(
+        !sources.files.is_empty(),
+        "bone: project has no .rock files"
+    );
+    for file in rock_stdlib::embedded_files() {
+        let id = rock_stdlib::stdlib_file_id(file.name);
+        let (path, contents) = match stdlib {
+            rock_stdlib::StdlibSource::Dir(dir) => {
+                let path = dir.join(file.name);
+                let contents = fs_err::read_to_string(&path)?;
+                (path.to_string_lossy().into_owned(), contents)
+            }
+            rock_stdlib::StdlibSource::Embedded => {
+                (file.display_path.to_string(), file.contents.to_string())
+            }
+        };
+        sources.add_or_update_file(rock_core::source_file_from_path_and_contents(
+            id, path, contents,
+        ));
+    }
+    Ok(sources)
+}
+
 impl LiveProject {
     pub fn init(dir: &str, include_tests: bool) -> Result<Self> {
-        let sources = project_sources(dir, include_tests)?;
+        let stdlib = rock_stdlib::stdlib_origin();
+        let sources = load_live_sources(dir, include_tests, &stdlib)?;
         let mut project = Self {
             session: new_session(dir, &sources)?,
             dir: dir.to_string(),
+            stdlib,
             sources,
             include_tests,
             lint_cache: Default::default(),
@@ -74,8 +107,29 @@ impl LiveProject {
             .position(|source| source.borrow().file.to_id_path() == id)
     }
 
+    fn edit_id(&self, path: &Path) -> String {
+        if let rock_stdlib::StdlibSource::Dir(dir) = &self.stdlib {
+            for &name in rock_stdlib::STDLIB_NAMES {
+                if dir.join(name).canonicalize().is_ok_and(|p| p == path) {
+                    return rock_stdlib::stdlib_file_id(name);
+                }
+            }
+        }
+        path.to_string_lossy().into_owned()
+    }
+
+    fn source_at_path(&self, canonical: &Path) -> Option<(String, usize)> {
+        let path = canonical.to_string_lossy();
+        if let Some(index) = self.source_index(&path) {
+            return Some((path.into_owned(), index));
+        }
+        let id = self.edit_id(canonical);
+        self.source_index(&id).map(|index| (id, index))
+    }
+
     fn snapshot(&self, edits: &[Edit]) -> LiveProjectSnapshot {
         LiveProjectSnapshot {
+            warm: self.session.warm.clone(),
             comptime_inputs: self.session.ws.comptime_inputs.clone(),
             sources: self.sources.clone(),
             previous_contents: edits
@@ -98,7 +152,7 @@ impl LiveProject {
         // Rollback uses the package facts of the last good build: the current
         // manifest may be the input that made the candidate fail.
         self.session = bone_incremental::session::Session::new(
-            self.session.warm.clone(),
+            snapshot.warm,
             crate::bone_backend::session_files(&self.sources),
             self.sources
                 .ns_aliases
@@ -158,8 +212,7 @@ impl LiveProject {
             .iter()
             .map(|path| {
                 let path = fs_err::canonicalize(path).ok()?;
-                let id = path.to_string_lossy().into_owned();
-                let index = self.source_index(&id)?;
+                let (id, index) = self.source_at_path(&path)?;
                 let text = fs_err::read_to_string(&path).ok()?;
                 Some(Edit { index, id, text })
             })
@@ -169,7 +222,7 @@ impl LiveProject {
                 project.update(edits, started)
             });
         }
-        let sources = project_sources(&self.dir, self.include_tests)?;
+        let sources = load_live_sources(&self.dir, self.include_tests, &self.stdlib)?;
         self.transaction(Vec::new(), "compile error", |project, _| {
             project.rebuild(sources, started)
         })
@@ -208,10 +261,10 @@ impl LiveProject {
         let canonical = std::fs::canonicalize(path).map_err(|e| {
             anyhow::anyhow!("apply_edit: cannot canonicalize `{}`: {e}", path.display())
         })?;
-        let id = canonical.to_string_lossy().into_owned();
-        let index = self.source_index(&id).ok_or_else(|| {
+        let (id, index) = self.source_at_path(&canonical).ok_or_else(|| {
             anyhow::anyhow!(
-                "apply_edit: `{id}` is not a discovered source of `{}`",
+                "apply_edit: `{}` is not a discovered source of `{}`",
+                canonical.display(),
                 self.dir
             )
         })?;
@@ -227,7 +280,7 @@ impl LiveProject {
 
     pub(crate) fn source_text(&self, path: &Path) -> Option<String> {
         let canonical = std::fs::canonicalize(path).ok()?;
-        let index = self.source_index(&canonical.to_string_lossy())?;
+        let (_, index) = self.source_at_path(&canonical)?;
         Some(self.sources.files[index].borrow().contents.clone())
     }
 
@@ -303,11 +356,15 @@ impl LiveProject {
         let mut lint_changed_files = Vec::new();
         let mut full = self.cache_needs_full_build;
         let mut changed = false;
+        let mut stdlib_changed = false;
         for edit in &edits {
-            self.sources.files[edit.index]
-                .borrow_mut()
-                .contents
-                .clone_from(&edit.text);
+            let mut source = self.sources.files[edit.index].borrow_mut();
+            stdlib_changed |=
+                rock_stdlib::is_stdlib_module_file(&edit.id) && source.contents != edit.text;
+            source.contents.clone_from(&edit.text);
+        }
+        if stdlib_changed {
+            return self.rebuild(self.sources.clone(), started);
         }
         let render_error = |error: CompilerError| {
             anyhow::anyhow!(
@@ -316,6 +373,9 @@ impl LiveProject {
             )
         };
         for Edit { id, text, .. } in &edits {
+            if rock_stdlib::is_stdlib_module_file(id) {
+                continue;
+            }
             let update = match self.session.update_file(id, text) {
                 Ok(update) => update,
                 Err(_) if edits.len() > 1 => {
@@ -356,12 +416,7 @@ impl LiveProject {
             let inputs = crate::comptime::resolve_checked_inputs(
                 &self.session.ws,
                 self.session.ws.comptime_inputs.clone(),
-                |file| {
-                    self.session
-                        .files
-                        .get(file)
-                        .map(|source| source.text.clone())
-                },
+                |file| crate::bone_backend::checked_source_text(&self.sources, &self.session, file),
             )?;
             if inputs.source_fingerprints.keys().any(|name| {
                 inputs.vars.get(name).map(|value| &value.value)
@@ -400,10 +455,6 @@ impl LiveProject {
 }
 
 fn new_session(dir: &str, sources: &SourceFiles) -> Result<bone_incremental::session::Session> {
-    anyhow::ensure!(
-        !sources.files.is_empty(),
-        "bone: project has no .rock files"
-    );
     crate::bone_backend::bone_session_for_emission(sources, Path::new(dir)).map_err(|error| {
         anyhow::anyhow!(
             "{}",

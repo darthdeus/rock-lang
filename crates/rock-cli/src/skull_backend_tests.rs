@@ -1769,3 +1769,73 @@ fn main() { print(1) }
         ExecOutcome::Errored(error) => panic!("{error}"),
     }
 }
+
+#[test]
+fn watched_stdlib_source_is_reloaded_and_repaired() {
+    const CHILD: &str = "ROCK_TEST_WATCH_STDLIB";
+    if std::env::var_os(CHILD).is_none() {
+        let copy = tempfile::tempdir().unwrap();
+        for file in rock_stdlib::stdlib_files() {
+            std::fs::write(copy.path().join(file.name), file.contents).unwrap();
+        }
+        std::fs::write(
+            copy.path().join("parse_float.h"),
+            rock_stdlib::embedded_asset("parse_float.h").unwrap(),
+        )
+        .unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "watched_stdlib_source_is_reloaded_and_repaired",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("ROCK_STDLIB_DIR", copy.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let strings =
+        std::path::PathBuf::from(std::env::var_os("ROCK_STDLIB_DIR").unwrap()).join("strings.rock");
+    let original = std::fs::read_to_string(&strings).unwrap();
+    let changed = original.replace("s.find(substr) >= 0", "s.find(substr) < 0");
+    assert_ne!(changed, original);
+    let mut project = ProjectFixture::boot("fn main() { print(\"abc\".contains(\"a\")) }");
+    let baseline = project.main_text();
+    let fingerprint = project.project.artifact_fingerprint().unwrap();
+
+    std::fs::write(&strings, &changed).unwrap();
+    assert!(matches!(
+        project.recompile(std::slice::from_ref(&strings)).unwrap(),
+        super::SkullReload::Full { .. }
+    ));
+    let revised = project.main_text();
+    assert!(
+        revised != baseline,
+        "the revised stdlib must change the emitted program"
+    );
+    let program = revised.replace("__rock_main_wrapper(main)", "main()");
+    match exec_lua(&program) {
+        ExecOutcome::Output(text) => assert_eq!(text.trim(), "false"),
+        ExecOutcome::Errored(error) => panic!("{error}"),
+    }
+
+    std::fs::write(
+        &strings,
+        original.replace("s.find(substr) >= 0", "undefined_probe()"),
+    )
+    .unwrap();
+    assert!(project.recompile(std::slice::from_ref(&strings)).is_err());
+    assert_eq!(project.main_text(), revised);
+
+    std::fs::write(&strings, original).unwrap();
+    project.recompile(&[strings]).unwrap();
+    assert_eq!(project.main_text(), baseline);
+    assert_eq!(project.project.artifact_fingerprint().unwrap(), fingerprint);
+}

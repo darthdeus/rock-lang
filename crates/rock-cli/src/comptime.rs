@@ -421,10 +421,12 @@ pub(crate) fn resolve_checked_inputs(
             if let Some(name) =
                 rock_stdlib::stdlib_file_name(file).or_else(|| file.strip_prefix("stdlib/"))
             {
-                return rock_stdlib::stdlib_files()
-                    .iter()
-                    .find(|f| f.name == name)
-                    .map(|f| f.contents.to_string());
+                return source_text(&rock_stdlib::stdlib_file_id(name)).or_else(|| {
+                    rock_stdlib::stdlib_files()
+                        .iter()
+                        .find(|f| f.name == name)
+                        .map(|f| f.contents.to_string())
+                });
             }
             // `packages/` selects the toolchain package before project paths,
             // so a same-spelled local file cannot shadow it or satisfy a miss.

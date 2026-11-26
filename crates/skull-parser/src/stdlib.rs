@@ -1,4 +1,4 @@
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, OnceLock};
 
 use rock_core::CompilerError;
 use rock_stdlib::StdlibFile;
@@ -6,22 +6,23 @@ use ustr::Ustr;
 
 use crate::Ast;
 
+static STDLIB: OnceLock<Result<Arc<[Ast]>, CompilerError>> = OnceLock::new();
+
 /// The process's stdlib ([`rock_stdlib::stdlib_files`]) parsed in load order
 /// under the stdlib session ids. Parsed once and shared, never edited: a
 /// module set holds it by reference ([`ModuleSet`]), so a cache over its
 /// checked form recognizes it by identity ([`is_process_stdlib`]).
 pub fn cached() -> &'static Result<Arc<[Ast]>, CompilerError> {
-    static STDLIB: LazyLock<Result<Arc<[Ast]>, CompilerError>> =
-        LazyLock::new(|| parse(rock_stdlib::stdlib_files()).map(Arc::from));
-    &STDLIB
+    STDLIB.get_or_init(|| parse(rock_stdlib::stdlib_files()).map(Arc::from))
 }
 
 /// Whether `stdlib` is the process stdlib itself ([`cached`]), not a copy or
 /// another parse.
 pub fn is_process_stdlib(stdlib: &Arc<[Ast]>) -> bool {
-    cached()
-        .as_ref()
-        .is_ok_and(|cached| Arc::ptr_eq(cached, stdlib))
+    STDLIB
+        .get()
+        .and_then(|cached| cached.as_ref().ok())
+        .is_some_and(|cached| Arc::ptr_eq(cached, stdlib))
 }
 
 /// A compile's module set: a shared stdlib prefix, held by reference and

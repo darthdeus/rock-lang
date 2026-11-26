@@ -241,7 +241,11 @@ fn with_source_texts<R>(
         .collect::<Vec<_>>();
     let texts = files
         .iter()
-        .map(|file| (Ustr::from(&file.file.to_id_path()), file.contents.as_str()))
+        .filter_map(|file| {
+            let id = file.file.to_id_path();
+            (!rock_stdlib::is_stdlib_module_file(&id))
+                .then(|| (Ustr::from(&id), file.contents.as_str()))
+        })
         .collect::<FxHashMap<_, _>>();
     use_texts(&texts)
 }

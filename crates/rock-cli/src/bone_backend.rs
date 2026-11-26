@@ -42,13 +42,19 @@ pub(crate) fn render_errs(sources: &SourceFiles, errs: &[CompilerError]) -> Stri
     // span lookup then fails and the snippet plus every label is dropped. Added
     // here, the one sink all render paths share, rather than per caller.
     let mut sf = sources.clone();
-    for f in rock_stdlib::stdlib_files() {
-        let id = rock_stdlib::stdlib_file_id(f.name);
-        sf.add_or_update_file(source_file_from_path_and_contents(
-            id.clone(),
-            id,
-            f.contents.to_string(),
-        ));
+    if !sources
+        .files
+        .iter()
+        .any(|file| rock_stdlib::is_stdlib_module_file(&file.borrow().file.to_id_path()))
+    {
+        for f in rock_stdlib::stdlib_files() {
+            let id = rock_stdlib::stdlib_file_id(f.name);
+            sf.add_or_update_file(source_file_from_path_and_contents(
+                id.clone(),
+                id,
+                f.contents.to_string(),
+            ));
+        }
     }
     let expanded: Vec<CompilerError> = errs
         .iter()
@@ -117,7 +123,11 @@ pub(crate) fn session_files(sources: &SourceFiles) -> Vec<bone_incremental::sess
     sources
         .files
         .iter()
-        .map(|source| bone_incremental::session::SessionFile::from_source(&source.borrow()))
+        .filter_map(|source| {
+            let source = source.borrow();
+            (!rock_stdlib::is_stdlib_module_file(&source.file.to_id_path()))
+                .then(|| bone_incremental::session::SessionFile::from_source(&source))
+        })
         .collect()
 }
 
@@ -125,11 +135,25 @@ pub(crate) fn bone_session_for_emission(
     sources: &SourceFiles,
     anchor: &std::path::Path,
 ) -> std::result::Result<bone_incremental::session::Session, CompilerError> {
-    let mut session = bone_session(sources)?;
+    let stdlib = sources
+        .files
+        .iter()
+        .filter_map(|source| {
+            let source = source.borrow();
+            let id = source.file.to_id_path();
+            rock_stdlib::is_stdlib_module_file(&id)
+                .then(|| skull_parser::parse_module_clean(&source.contents, ustr::Ustr::from(&id)))
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut session = bone_incremental::session::Session::new(
+        stdlib,
+        session_files(sources),
+        sources.ns_aliases.as_ref().unwrap_or(&Default::default()),
+    )?;
     let inputs = crate::comptime::inputs_for_entry_path(anchor)
         .and_then(|inputs| {
             crate::comptime::resolve_checked_inputs(&session.ws, inputs, |file| {
-                session.files.get(file).map(|source| source.text.clone())
+                checked_source_text(sources, &session, file)
             })
         })
         .map_err(|e| {
@@ -137,6 +161,21 @@ pub(crate) fn bone_session_for_emission(
         })?;
     session.ws.comptime_inputs = inputs;
     Ok(session)
+}
+
+pub(crate) fn checked_source_text(
+    sources: &SourceFiles,
+    session: &bone_incremental::session::Session,
+    file: &str,
+) -> Option<String> {
+    if rock_stdlib::is_stdlib_module_file(file) {
+        sources.files.iter().find_map(|source| {
+            let source = source.borrow();
+            (source.file.to_id_path() == file).then(|| source.contents.clone())
+        })
+    } else {
+        session.files.get(file).map(|source| source.text.clone())
+    }
 }
 
 fn bone_pipeline_timed(
