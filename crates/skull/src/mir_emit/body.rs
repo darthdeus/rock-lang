@@ -325,6 +325,20 @@ fn finish_body_chunk(
     })
 }
 
+pub(crate) fn scalar_entry_variant(
+    ws: &Workspace,
+    mf: &MirFunc,
+) -> Result<Option<MirFunc>, CompilerError> {
+    let Some(entry) = &mf.scalar_entry else {
+        return Ok(None);
+    };
+    let mut variant = entry.variant(ws, mf).ok_or_else(|| {
+        CompilerError::new_no_location(format!("cannot seed scalar callback entry for {}", mf.name))
+    })?;
+    skull_transform::cleanup_with_nobox(ws, &mut variant)?;
+    Ok(Some(variant))
+}
+
 pub(crate) struct BodyEmitter<'a> {
     pub(crate) ws: &'a Workspace,
     pub(crate) cg: &'a CodegenCtx,
@@ -386,6 +400,19 @@ impl BodyEmitter<'_> {
         let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(emit);
         self.times.regalloc += regalloc;
         self.times.regalloc_work |= regalloc > Duration::ZERO;
+        if let Some(mut variant) = scalar_entry_variant(self.ws, mf)? {
+            let entry_name = self
+                .cg
+                .mint_synthetic(skull_mir::lower::scalar_entry_symbol(name));
+            emission.lua.push_str(&self.emit(
+                &entry_name,
+                source,
+                &mut variant,
+                inherited_statics,
+                None,
+                None,
+            )?);
+        }
         Ok(emission.lua)
     }
 

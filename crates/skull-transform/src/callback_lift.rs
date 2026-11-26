@@ -10,7 +10,9 @@ use rustc_hash::{FxHashMap as Map, FxHashSet as Set};
 use skull_mir::code_identity::LambdaSiteId;
 use skull_mir::concrete::ConcretePlans;
 use skull_mir::instance::Instance;
-use skull_mir::lower::{BackendFnAbiPlanHandle, FunctionRepPlan, ScalarCtx};
+use skull_mir::lower::{
+    BackendFnAbiPlanHandle, FunctionRepPlan, ScalarCtx, scalar_entry_lookup_arg,
+};
 use skull_mir::lua_interop::{
     LUAJIT_CALL_BASE_SLOTS, LUAJIT_FRAME_SLOT_LIMIT, LUAJIT_MAX_ACTIVE_LOCALS,
 };
@@ -111,6 +113,7 @@ fn result_lanes(mf: &MirFunc, entry: Idx<Block>) -> Option<usize> {
 enum Delivery {
     Invoke,
     Forward(Parameter),
+    ScalarLookup,
 }
 
 struct Wrapper {
@@ -207,6 +210,21 @@ impl Wrapper {
                     {
                         Delivery::Invoke
                     }
+                    Inst::CallValue { callee, args }
+                        if scalar_entry_lookup_arg(mf, &mf.insts[*callee]).is_some_and(|arg| {
+                            args.first() == Some(&arg)
+                                && reads.contains(&arg)
+                                && !args[1..].iter().any(|arg| reads.contains(arg))
+                        }) =>
+                    {
+                        continue;
+                    }
+                    Inst::CallValue { .. }
+                        if scalar_entry_lookup_arg(mf, inst)
+                            .is_some_and(|arg| reads.contains(&arg)) =>
+                    {
+                        Delivery::ScalarLookup
+                    }
                     Inst::Eq(a, b) | Inst::NotEq(a, b)
                         if [a, b]
                             .into_iter()
@@ -256,6 +274,7 @@ impl Family {
                     && wrapper.calls.iter().all(|(_, delivery)| {
                         let args = match delivery {
                             Delivery::Invoke => lambda_width,
+                            Delivery::ScalarLookup => return true,
                             Delivery::Forward(target) => width(self.indices[target]),
                         };
                         call_fits(width(index), args)
@@ -270,7 +289,7 @@ impl Family {
                 .iter()
                 .filter_map(|(_, delivery)| match delivery {
                     Delivery::Forward(target) => Some(self.indices[target]),
-                    Delivery::Invoke => None,
+                    Delivery::Invoke | Delivery::ScalarLookup => None,
                 })
         };
         let mut incoming = vec![0; self.wrappers.len()];
@@ -672,6 +691,7 @@ pub(crate) fn run(
             body.code_identity = None;
             body.code_compatibility = None;
             body.code_abi_fingerprint = None;
+            body.scalar_entry = None;
             body.abi_plan = None;
             body.abi_representation = None;
             let callback = body.params.remove(wrapper.param);
@@ -693,9 +713,17 @@ pub(crate) fn run(
                 .iter()
                 .map(|c| capture_params[captures.binary_search(c).unwrap()])
                 .collect();
+            let mut removed_lookup = false;
             for &((block, id), ref delivery) in &wrapper.calls {
                 let (name, removed, results) = match delivery {
                     Delivery::Invoke => (lifted_name, None, lambda_results),
+                    Delivery::ScalarLookup => {
+                        // The lifted callback has no CodeRef. Dispatch through
+                        // the boxed call, which now invokes its private body.
+                        body.insts[id] = Inst::Const(Lit::Nil);
+                        removed_lookup = true;
+                        continue;
+                    }
                     Delivery::Forward(target) => {
                         let index = family.indices[target];
                         (
@@ -716,6 +744,12 @@ pub(crate) fn run(
                     results,
                     &state_params,
                 );
+            }
+            if removed_lookup {
+                crate::cleanup::fold_known_compares(&mut body);
+                if crate::cleanup::fold_const_branches(&mut body) {
+                    crate::cleanup::dce(&mut body);
+                }
             }
             append_state_returns(&mut body, &state_params);
             mf.comptime_reads

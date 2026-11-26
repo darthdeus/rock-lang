@@ -580,6 +580,7 @@ fn convert_closures_impl(
         header.code_identity = code_identity;
         let lambda_abi = mf.lambda_abis.get(&lambda);
         header.code_abi_fingerprint = lambda_abi.map(|abi| abi.fingerprint.clone());
+        header.scalar_entry = lambda_abi.and_then(|abi| abi.scalar_entry.clone());
         header.code_compatibility = compatibility;
         header.params = params;
         header.abi_representation = lambda_abi.map(|abi| abi.representation.clone());

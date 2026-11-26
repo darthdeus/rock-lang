@@ -905,6 +905,7 @@ pub fn comptime_value_hash(value: &str) -> u64 {
 #[derive(Clone, Debug, PartialEq)]
 pub struct LambdaAbi {
     pub fingerprint: String,
+    pub scalar_entry: Option<crate::lower::ScalarEntryPlan>,
     pub representation: crate::lower::FunctionRepPlan,
     /// Copies of one HIR lambda share this origin. Macro siblings may share a span.
     pub source: Option<Idx<bone_core::hir::Expr>>,
@@ -918,6 +919,7 @@ pub struct MirFunc {
     pub code_identity: Option<crate::code_identity::CodeIdentity>,
     /// Contains no backend symbol or build-local `RepId`.
     pub code_abi_fingerprint: Option<String>,
+    pub scalar_entry: Option<crate::lower::ScalarEntryPlan>,
     pub lambda_abis: bone_core::prelude::FxHashMap<Idx<Inst>, LambdaAbi>,
     /// Stores that begin a lexical binding's lifetime.
     pub binding_initializers: bone_core::prelude::FxHashSet<Idx<Inst>>,
@@ -1033,6 +1035,7 @@ impl MirFunc {
             direct_only: false,
             code_identity: None,
             code_abi_fingerprint: None,
+            scalar_entry: None,
             lambda_abis: Default::default(),
             binding_initializers: Default::default(),
             code_value_identities: Default::default(),

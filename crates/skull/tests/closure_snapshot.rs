@@ -184,6 +184,40 @@ fn main() { let _ = install(0); let _ = read_saved() }
 }
 
 #[test]
+fn recursive_lift_and_scalar_entry_share_a_callback_site() {
+    use crate::common::{function_body, run_main, try_emit_module};
+
+    let source = r#"
+value CallbackArg { left: int, right: int }
+
+@nomangle fn follow(n: int, callback: fn(CallbackArg) -> int, arg: CallbackArg) -> int {
+    if n == 0 { return callback(CallbackArg { left: arg.left, right: arg.right }) }
+    return follow(n - 1, callback, arg)
+}
+
+global apply: fn(int, fn(CallbackArg) -> int, CallbackArg) -> int = follow
+global result: int = apply(3, read, CallbackArg { left: 2, right: 3 })
+global bias: int = seed_bias()
+
+fn seed_bias() -> int { return 5 }
+fn read(arg: CallbackArg) -> int { return arg.left + arg.right + bias }
+
+@nomangle fn invoke(seed: int) -> int {
+    return follow(3, arg => arg.left + seed, CallbackArg { left: 2, right: 3 })
+}
+
+fn main() {
+    print(invoke(10))
+    print(result)
+}
+"#;
+    let lua = try_emit_module(source).expect("emit recursive callback delivery");
+    assert!(function_body(&lua, "follow").contains("__rock_scalar_entry"));
+    assert!(function_body(&lua, "invoke").contains("__rock_lifted_callback_"));
+    assert_eq!(run_main(&lua), "12\n10");
+}
+
+#[test]
 fn recursive_lift_keeps_boxed_delivery_when_the_lua_wire_is_too_wide() {
     use crate::common::{run_main, try_emit_module};
 

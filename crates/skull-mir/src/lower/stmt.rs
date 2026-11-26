@@ -314,6 +314,10 @@ impl<'a> Builder<'a> {
         child.static_cells = self.static_cells.clone();
         child.nested_fn_globals = self.nested_fn_globals.clone();
 
+        child.f.scalar_entry = self
+            .binding_ty(name)
+            .and_then(|ty| self.concrete_ty_id(ty))
+            .and_then(|ty| ScalarEntryPlan::for_type(self.ws, self.scx, &abi.representation, ty));
         child.f.abi_representation = Some(abi.representation.clone());
         child.f.code_identity = nested_identity;
         child.f.code_abi_fingerprint =
@@ -758,6 +762,7 @@ impl<'a> Builder<'a> {
         self.f.lambda_abis.insert(
             lambda,
             LambdaAbi {
+                scalar_entry: None,
                 fingerprint: plan.logical_fingerprint(self.scx.rep_arena()),
                 representation: plan,
                 source: Some(body),

@@ -1311,13 +1311,23 @@ pub(super) fn code_slot_registration_lua_entries<'a>(
                 .expect("writing a String cannot fail");
             next
         });
-        writeln!(
+        write!(
             stages,
-            "__rock_code_slot_stage({}, {}, __rock_code_slot_abis[{index}])",
+            "__rock_code_slot_stage({}, {}, __rock_code_slot_abis[{index}]",
             skull_codegen_lua::lua_string(&slot.key),
             slot.body,
         )
         .expect("writing a String cannot fail");
+        if let Some(key) = slot.scalar_entry {
+            write!(
+                stages,
+                ", {}, {}",
+                skull_mir::lower::scalar_entry_symbol(slot.body.as_str()),
+                skull_codegen_lua::lua_string(key.as_str()),
+            )
+            .expect("writing a String cannot fail");
+        }
+        stages.push_str(")\n");
     }
     Ok(format!(
         "__rock_code_slot_begin()\ndo\nlocal __rock_code_slot_abis = {{\n{abis}}}\n{stages}end\n"

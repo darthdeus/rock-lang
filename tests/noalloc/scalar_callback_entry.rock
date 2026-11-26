@@ -1,0 +1,163 @@
+value CallbackChild { label: string, tag: int }
+value CallbackArg { child: CallbackChild, seed: int }
+
+@noalloc fn read_callback_arg(arg: CallbackArg) -> int {
+    return arg.seed + arg.child.tag
+}
+
+@nomangle fn call_callback_arg(callback: fn(CallbackArg) -> int, seed: int) -> int {
+    return callback(CallbackArg { child: CallbackChild { label: "tag", tag: 7 }, seed })
+}
+
+inline(lua) fn transport_heap_growth(callback: fn(CallbackArg) -> int, tag: int) -> float = """
+    local was_on = jit.status()
+    jit.off(call_callback_arg)
+    for i = 1, 512 do assert(call_callback_arg(callback, i) == i + tag) end
+    collectgarbage("collect")
+    collectgarbage("stop")
+    local before = collectgarbage("count")
+    for i = 1, 4096 do assert(call_callback_arg(callback, i) == i + tag) end
+    local after = collectgarbage("count")
+    collectgarbage("restart")
+    if was_on then jit.on(call_callback_arg) end
+    return after - before
+"""
+
+inline(lua) fn foreign_callback_arg() -> any = """
+    return function(arg) return arg.seed + arg.child.tag end
+"""
+
+inline(lua) fn foreign_callable_arg() -> any = """
+    return setmetatable({}, {
+        __index = function() error("lookup on foreign callable") end,
+        __call = function(_, arg) return arg.seed + arg.child.tag end,
+    })
+"""
+
+@lua_named struct CallbackHolder { value: CallbackArg }
+
+fn call_callback_holder(callback: fn(CallbackArg) -> int, holder: CallbackHolder) -> int {
+    return callback(holder.value)
+}
+
+inline(lua) fn foreign_callback_holder() -> CallbackHolder = """
+    __callback_holder_reads = 0
+    return { value = {
+        seed = 3,
+        child = setmetatable({tag = 7}, {__index = function(_, field)
+            assert(field == "label")
+            __callback_holder_reads = __callback_holder_reads + 1
+            return "foreign"
+        end}),
+    } }
+"""
+
+inline(lua) fn same_callback(a: fn(CallbackArg) -> int, b: fn(CallbackArg) -> int) -> bool = "return rawequal(a, b)"
+
+inline(lua) fn callback_holder_reads() -> int = "return __callback_holder_reads"
+
+fn capture_callback_tag(tag: int) -> fn(CallbackArg) -> int {
+    return arg => arg.seed + tag
+}
+
+co fn capture_suspended_callback_tag(tag: int) -> Coroutine<fn(CallbackArg) -> int> {
+    yield (arg: CallbackArg) => arg.seed + tag
+}
+
+@test(backends = "lua")
+fn compiled_indirect_arguments_do_not_allocate() {
+    let resumed = capture_suspended_callback_tag(7).resume().unwrap()
+    for callback in [read_callback_arg, capture_callback_tag(7), resumed] {
+        assert(transport_heap_growth(callback, 7) < 4.0, "scalar callback transport allocated per invocation")
+    }
+}
+
+@test(backends = "lua")
+fn boxed_and_scalar_callbacks_share_a_container() {
+    let foreign: fn(CallbackArg) -> int = cast(foreign_callback_arg())
+    let callable: fn(CallbackArg) -> int = cast(foreign_callable_arg())
+    let callbacks: [fn(CallbackArg) -> int] = [read_callback_arg, foreign, callable]
+    assert(call_callback_arg(callbacks[0], 3) == 10)
+    assert(call_callback_arg(callbacks[1], 3) == 10)
+    assert(call_callback_arg(callbacks[2], 3) == 10)
+    assert(same_callback(callbacks[0], read_callback_arg) && !same_callback(callbacks[0], callbacks[1]))
+    assert(call_callback_holder(foreign, foreign_callback_holder()) == 10)
+    assert(callback_holder_reads() == 1)
+    assert(call_callback_holder(read_callback_arg, foreign_callback_holder()) == 10)
+    assert(callback_holder_reads() == 1)
+}
+
+fn changing_callback_arg(arg: CallbackArg) -> int {
+    arg.child.tag += 1
+    return arg.seed + arg.child.tag
+}
+
+co fn suspended_callback(callback: fn(CallbackArg) -> int) -> Coroutine<int> {
+    yield 1
+    yield call_callback_arg(callback, 3)
+}
+
+@test
+fn callback_mutation_does_not_modify_the_callers_argument() {
+    let arg = CallbackArg { child: CallbackChild { label: "tag", tag: 7 }, seed: 3 }
+    let holder = CallbackHolder { value: arg }
+    assert(call_callback_holder(changing_callback_arg, holder) == 11)
+    assert(holder.value.child.tag == 7)
+    let task = suspended_callback(changing_callback_arg)
+    assert(task.resume() == 1 && task.resume() == 11)
+}
+
+nobox value CallbackIndex { index: int }
+value CallbackEnvelope<T> { arg: CallbackArg, payload: T, index: CallbackIndex? }
+
+@noalloc fn CallbackEnvelope<T>.score(value) -> int {
+    return value.arg.seed + value.arg.child.tag + (value.index?.index ?? 0)
+}
+
+fn read_callback_envelope<T>(_sample: T) -> fn(CallbackEnvelope<T>) -> int {
+    return value => value.score()
+}
+
+fn dispatch_callback_envelope(
+    callback: fn(CallbackEnvelope<string>) -> int,
+    index: CallbackIndex?,
+) -> int {
+    return callback(CallbackEnvelope {
+        arg: CallbackArg { child: CallbackChild { label: "tag", tag: 7 }, seed: 3 },
+        payload: "payload",
+        index,
+    })
+}
+
+@test
+fn generic_callback_uses_a_method_and_nullable_child() {
+    let callback = read_callback_envelope("payload")
+    assert(dispatch_callback_envelope(callback, null) == 10)
+    assert(dispatch_callback_envelope(callback, CallbackIndex { index: 2 }) == 12)
+}
+
+inline(lua) fn protected_foreign_callback(compiled: fn(CallbackArg) -> int) -> any = """
+    return setmetatable({__slot = rawget(compiled, "__slot")}, {
+        __metatable = getmetatable(compiled),
+        __call = function(_, arg) return arg.seed + 20 end,
+    })
+"""
+
+inline(lua) fn call_with_replaced_metamethod(compiled: fn(CallbackArg) -> int) -> int = """
+    local meta = getmetatable(compiled)
+    local original = meta.__call
+    meta.__call = function(_, arg) return arg.seed + 30 end
+    local ok, result = pcall(call_callback_arg, compiled, 3)
+    meta.__call = original
+    assert(ok, result)
+    return result
+"""
+
+@test(backends = "lua")
+fn indirect_calls_respect_lua_call_metamethods() {
+    let compiled = capture_callback_tag(7)
+    let foreign: fn(CallbackArg) -> int = cast(protected_foreign_callback(compiled))
+    assert(call_callback_arg(foreign, 3) == 23)
+    assert(call_with_replaced_metamethod(compiled) == 33)
+    assert(call_callback_arg(compiled, 3) == 10)
+}

@@ -382,6 +382,7 @@ fn runtime_prelude() -> &'static str {
         let out = PRELUDE_TEMPLATE
             .replace("{RNG_STREAMS}", &rng_streams)
             .replace("{UINT_CHECK}", skull_codegen_lua::UINT_CHECK_PRELUDE)
+            .replace("{SCALAR_ENTRY}", skull_codegen_lua::SCALAR_ENTRY_PRELUDE)
             .replace("{NB_ALLOC}", skull_codegen_lua::NB_ALLOC_PRELUDE)
             .replace("{LEAF_VIEWS}", &skull_mir::lower::leaf_views_lua_table())
             .replace(
@@ -414,6 +415,7 @@ do
 -- the program assigns it from __rock_globals_open before running any code.
 local __rock_state_cell
 {UINT_CHECK}
+{SCALAR_ENTRY}
 if not _G.__rock_vec_headers then _G.__rock_vec_headers = {} end
 -- Shared headers of unreserved flat Vecs. The stride is part of the key, so a
 -- hot reload that changes an element's layout gets a fresh header.

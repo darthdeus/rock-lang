@@ -177,6 +177,7 @@ impl<'a> Builder<'a> {
         self.f.lambda_abis.insert(
             lambda,
             LambdaAbi {
+                scalar_entry: None,
                 fingerprint: plan.logical_fingerprint(arena),
                 representation: plan,
                 source: None,

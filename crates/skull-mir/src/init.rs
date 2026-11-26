@@ -414,6 +414,13 @@ impl<F: Fn(&MirFunc, Idx<Inst>, FuncRef) -> Option<Ustr>> Builder<'_, F> {
                     }
                 }
             }
+            // The lookup has no effects. The boxed branch models the same
+            // callback and argument flow as the scalar branch.
+            inst @ Inst::CallValue { .. }
+                if crate::lower::scalar_entry_lookup_arg(mf, inst).is_some() =>
+            {
+                return None;
+            }
             Inst::CallValue {
                 callee,
                 args: operands,

@@ -529,6 +529,7 @@ fn compact_region(
     template.direct_only = header.direct_only;
     template.code_identity = header.code_identity.clone();
     template.code_abi_fingerprint = header.code_abi_fingerprint.clone();
+    template.scalar_entry = header.scalar_entry.clone();
     template.code_compatibility = header.code_compatibility.clone();
     template.nested_fn_identities = arena.nested_fn_identities.clone();
     template.rep_arena = arena.rep_arena.clone();

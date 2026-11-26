@@ -446,6 +446,7 @@ impl<'a> Builder<'a> {
             s.f.lambda_abis.insert(
                 lambda,
                 LambdaAbi {
+                    scalar_entry: None,
                     fingerprint: target_abi.logical_fingerprint(arena),
                     representation: target_abi,
                     source: Some(expr),

@@ -325,7 +325,7 @@ fn assert_round_settled(ws: Option<&Workspace>, func: &MirFunc) {
 
 /// Fold comparisons with known tags or nilness. A value-producing
 /// conversion alone does not prove its operand non-null.
-fn fold_known_compares(func: &mut MirFunc) -> bool {
+pub(crate) fn fold_known_compares(func: &mut MirFunc) -> bool {
     if skull_mir::pass_disabled("foldcmp") {
         return false;
     }

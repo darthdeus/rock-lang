@@ -90,7 +90,7 @@ pub(crate) fn emit_coroutine_with_artifact(
         allocation_bodies: Vec::new(),
         declaration_span: source_func.name_span,
     };
-    out.emit(&step_name, plan.base(), &lowered.step, Some(&frame));
+    out.emit(&step_name, plan.base(), &lowered.step, Some(&frame))?;
     let mut nested_deps = FxHashSet::default();
     let mut nested_statics = lowered.step.statics.clone();
     let mut nested_times = crate::mir_emit::PhaseTimes::default();
@@ -115,13 +115,13 @@ pub(crate) fn emit_coroutine_with_artifact(
     )?;
     // Hoisted lambdas are frame-free: their frame accesses are already MIR.
     for nf in lambdas.iter() {
-        out.emit(&nf.name, &nf.name, nf, None);
+        out.emit(&nf.name, &nf.name, nf, None)?;
     }
     lowered.step.nested_fns = hoisted;
     for aux in defers.iter().chain(hooks.iter().map(|(_, aux)| aux)) {
-        out.emit(&aux.name, &aux.name, aux, None);
+        out.emit(&aux.name, &aux.name, aux, None)?;
         for nf in &aux.nested_fns {
-            out.emit(&nf.name, &nf.name, nf, None);
+            out.emit(&nf.name, &nf.name, nf, None)?;
         }
     }
     if let Some(site) = frame_site {
@@ -161,7 +161,7 @@ impl CoroutineLua<'_> {
         diagnostic_name: &str,
         func: &MirFunc,
         frame: Option<&FrameCtx>,
-    ) {
+    ) -> Result<(), CompilerError> {
         let emission = emit_coroutine_body(
             self.ws,
             self.ctx,
@@ -176,6 +176,13 @@ impl CoroutineLua<'_> {
             body.declaration_span.get_or_insert(self.declaration_span);
             self.allocation_bodies.push(body);
         }
+        if let Some(variant) = crate::mir_emit::scalar_entry_variant(self.ws, func)? {
+            let name = self
+                .ctx
+                .mint_synthetic(skull_mir::lower::scalar_entry_symbol(emitted_name));
+            self.emit(&name, diagnostic_name, &variant, frame)?;
+        }
+        Ok(())
     }
 }
 

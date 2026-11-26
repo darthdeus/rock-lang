@@ -31,10 +31,16 @@ FILE_FAIL = re.compile(r"^(\S+\.rock)\.* FAILED\s*(.*)$")
 TEST_FAIL = re.compile(r"^  (\w+): (?:error: \S+:\d+: )?(.*)$")
 ERROR_FAIL = re.compile(r"^\s+(tests/errors/\S+)\s+--\s+(.*)$")
 SUMMARY = re.compile(r"rock test: (\d+)/(\d+) @tests passed")
-BOUNDS_PROOF_ASSERTION = (
-    "native_buffers/guarded_prefix.rock",
-    "prefix_length_proof_expires_when_the_buffer_shrinks: guarded prefix still checked each element",
-)
+EXPECTED_ASSERTIONS = {
+    "bounds": (
+        "native_buffers/guarded_prefix.rock",
+        "prefix_length_proof_expires_when_the_buffer_shrinks: guarded prefix still checked each element",
+    ),
+    "sroa": (
+        "noalloc/scalar_callback_entry.rock",
+        "compiled_indirect_arguments_do_not_allocate: scalar callback transport allocated per invocation",
+    ),
+}
 
 
 def run(rock, corpus, disabled, checks):
@@ -85,7 +91,7 @@ def main():
         new = sorted(failures - base)
         bad = [
             f for f in new
-            if not EXPECTED.search(f[1]) and not (name == "bounds" and f == BOUNDS_PROOF_ASSERTION)
+            if not EXPECTED.search(f[1]) and f != EXPECTED_ASSERTIONS.get(name)
         ]
         print(f"off:{name}: {len(new)} new failures, {len(new) - len(bad)} expected, "
               f"@tests passed {passed} (default {base_passed})")

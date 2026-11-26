@@ -5,8 +5,8 @@ use std::rc::Rc;
 use std::sync::OnceLock;
 
 use bone_core::hir::{
-    BinOp, BindingInfo, Body, BodyOwner, BuiltinTy, Callee, Expr, Function, MatchArm, Pattern,
-    Statement, TyId, TypeCtor, TypeExpr, VariantArgs, VariantPayload,
+    BinOp, BindingInfo, Body, BodyOwner, BuiltinTy, Callee, Expr, FnBackend, Function, MatchArm,
+    Pattern, Statement, TyId, TypeCtor, TypeExpr, VariantArgs, VariantPayload,
 };
 use bone_core::hir_walk::HirChild;
 use bone_core::prelude::{BoundNext, ForIterInfo, ModuleId, Span};
@@ -61,6 +61,9 @@ mod parameter_demand;
 pub fn parameter_demand_key(ws: &Workspace, func: FuncRef) -> u64 {
     parameter_demand::key(&parameter_demand::of_function(ws, func))
 }
+
+mod scalar_entry;
+pub use scalar_entry::{ScalarEntryPlan, scalar_entry_lookup_arg, scalar_entry_symbol};
 
 mod shape;
 mod sort_key;
@@ -1056,6 +1059,24 @@ pub fn lower_instance_with_plans(
     f.is_coroutine = func.is_coroutine;
     f.resume_arg = resume_arg;
     let abi = owner_abi_plan_for_body(ws, scx, concrete_plans, inst, plan).map_err(at_decl)?;
+    if scx.target == FnBackend::Lua
+        && !func.is_coroutine
+        && !func.is_variadic
+        && scx.value_references.taken_by_ref.contains(&func.name)
+    {
+        let params = plan
+            .signature
+            .params
+            .iter()
+            .map(|id| scx.interner().get(*id))
+            .collect::<Vec<_>>();
+        let ret = plan
+            .signature
+            .result
+            .map(|id| scx.interner().get(id))
+            .unwrap_or(MonoTy::Unit);
+        f.scalar_entry = ScalarEntryPlan::plan(ws, scx, abi.representation(), &params, &ret);
+    }
     f.abi_plan = Some(abi.clone());
     f.code_identity = Some(crate::code_identity::CodeIdentity::Named(inst.clone()));
     f.code_abi_fingerprint = Some(abi.logical_fingerprint());
@@ -2880,13 +2901,11 @@ impl<'a> Builder<'a> {
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         if lend
             && !slot.splats()
-            && let Expr::Var(b) = self.body.expr_arena[a]
-            && self.boxed_value_local(b, a).is_some()
-            && self.binding_value_is_shareable(b)
+            && let Some(cell) = self.lend_opaque_arg(a)
         {
             // The callee may retain an immutable box: a later mutable store copies it,
             // and a `ref` borrow copies its parameter on entry.
-            return Ok(vec![self.emit_cur(Inst::Load(self.binds[&raw(b)]))]);
+            return Ok(vec![self.emit_cur(Inst::Load(cell))]);
         }
         self.with_value_lending(lend, |s| {
             let r = match s.json_vec_argument(a, slot)? {
@@ -2895,6 +2914,14 @@ impl<'a> Builder<'a> {
             };
             s.snapshot_argument_slot(r, slot)
         })
+    }
+
+    fn lend_opaque_arg(&self, arg: Idx<Expr>) -> Option<Idx<Cell>> {
+        let Expr::Var(binding) = self.body.expr_arena[arg] else {
+            return None;
+        };
+        (self.boxed_value_local(binding, arg).is_some() && self.binding_value_is_shareable(binding))
+            .then(|| self.binds[&raw(binding)])
     }
 
     pub(crate) fn snapshot_argument_slot(

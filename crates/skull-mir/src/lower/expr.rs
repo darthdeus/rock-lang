@@ -271,6 +271,7 @@ impl<'a> Builder<'a> {
             self.f.lambda_abis.insert(
                 id,
                 LambdaAbi {
+                    scalar_entry: None,
                     fingerprint: lam_plan.logical_fingerprint(self.scx.rep_arena()),
                     representation: lam_plan,
                     source: Some(e),
@@ -661,7 +662,16 @@ impl<'a> Builder<'a> {
                 let lam_plan = self
                     .fn_value_rep_plan(lam_ty)?
                     .ok_or_else(|| gap("lambda does not have a function representation"))?;
-                self.lower_lambda_with_plan(e, params, body, lam_plan)
+                let entry = self
+                    .concrete_ty_id(lam_ty)
+                    .and_then(|ty| ScalarEntryPlan::for_type(self.ws, self.scx, &lam_plan, ty));
+                let lambda = self.lower_lambda_with_plan(e, params, body, lam_plan)?;
+                self.f
+                    .lambda_abis
+                    .get_mut(&lambda)
+                    .expect("lowered lambda ABI")
+                    .scalar_entry = entry;
+                Ok(lambda)
             }
 
             Expr::As {

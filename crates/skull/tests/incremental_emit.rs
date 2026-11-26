@@ -675,3 +675,58 @@ fn adding_a_named_escape_rejects_the_overlay() {
         .expect("an overlay cannot expose a slotted record as named");
     assert!(error.message.contains("requires `@lua_named`"));
 }
+
+#[test]
+fn held_scalar_callback_uses_the_published_body_and_checks_its_wire() {
+    let source = r#"
+value EntryPoint { x: int, label: string }
+fn callback(point: EntryPoint) -> int { point.x + 1 }
+@nomangle fn save_callback() -> fn(EntryPoint) -> int { callback }
+@nomangle fn run_callback(f: fn(EntryPoint) -> int) -> int {
+    return f(EntryPoint { x: 7, label: "point" })
+}
+"#;
+    let updated = ws_with_stdlib(&source.replace("point.x + 1", "point.x + 2"));
+    let edit = edit(
+        &ws_with_stdlib(source),
+        &updated,
+        &[body_id(&updated, "callback")],
+    );
+    let run = format!(
+        r#"{}
+local held = save_callback()
+local scalar = assert(_G.__rock_scalar_slots[held])
+local abi = assert(scalar.scalar_abi)
+local before = assert(__rock_scalar_entry(held, abi))
+local field_count = 0
+for _ in pairs(held) do field_count = field_count + 1 end
+assert(field_count == 4)
+assert(run_callback(held) == 8)
+{}
+assert(rawequal(held, save_callback()))
+assert(__rock_scalar_entry(held, abi) ~= before)
+assert(run_callback(held) == 9)
+local boxed = held.current_body
+held.current_body = function(point) return point.x + 3 end
+assert(run_callback(held) == 10)
+held.current_body = boxed
+
+__rock_code_slot_begin()
+local ok = pcall(__rock_code_slot_stage, held.key, function() error("incompatible") end,
+    held.abi .. " incompatible", before, "other scalar signature")
+assert(not ok)
+__rock_code_slot_abort()
+assert(run_callback(held) == 9)
+
+__rock_code_slot_begin()
+__rock_code_slot_stage(held.key, held.current_body, held.abi, before, "other scalar signature")
+__rock_code_slot_publish()
+assert(__rock_scalar_entry(held, abi) == nil)
+assert(run_callback(held) == 9)
+print("ok")
+"#,
+        edit.base.lua,
+        edit.overlay.expect("compatible body edit").lua
+    );
+    assert_eq!(run_luajit(&run), "ok");
+}

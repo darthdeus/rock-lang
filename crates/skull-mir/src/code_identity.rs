@@ -304,6 +304,7 @@ pub struct CodeEntry {
     /// Payload, not identity; overlays replace it only after logical
     /// compatibility succeeds.
     pub body_name: Option<Ustr>,
+    pub scalar_entry: Option<Ustr>,
     pub escaping: bool,
     pub capture_free: bool,
 }
@@ -345,6 +346,7 @@ pub struct StagedCodeSlot<'a> {
     pub key: String,
     pub body: Ustr,
     pub call_abi: &'a str,
+    pub scalar_entry: Option<Ustr>,
 }
 
 /// An escaping entry without an emitted body is an error.
@@ -367,6 +369,7 @@ pub fn staged_code_slots<'a>(
                 key,
                 body,
                 call_abi: entry.compatibility.call_abi.as_str(),
+                scalar_entry: entry.scalar_entry,
             }),
             None => Err(format!("Rock CodeRef `{key}` has no emitted body")),
         })
@@ -554,6 +557,7 @@ impl CodeArtifact {
                 compatibility: compatibility.clone(),
                 body_fingerprint: body_fingerprint(mf, ws, interner),
                 body_name: Some(mf.name),
+                scalar_entry: mf.scalar_entry.as_ref().map(|entry| entry.key),
                 escaping,
                 capture_free: compatibility.capture.fields.is_empty(),
             }),
@@ -588,6 +592,7 @@ impl CodeArtifact {
             },
             body_fingerprint: 0,
             body_name: None,
+            scalar_entry: None,
             escaping: true,
             capture_free: true,
         });
@@ -609,6 +614,7 @@ impl CodeArtifact {
             compatibility,
             body_fingerprint: fingerprint.finish(),
             body_name: Some(Ustr::from(body_name)),
+            scalar_entry: None,
             escaping: true,
             capture_free: true,
         });
@@ -1313,6 +1319,7 @@ mod tests {
             compatibility: compatibility.clone(),
             body_fingerprint,
             body_name: Some(Ustr::from("body")),
+            scalar_entry: None,
             escaping: true,
             capture_free: true,
         };
@@ -1350,6 +1357,7 @@ mod tests {
             compatibility: compatibility.clone(),
             body_fingerprint,
             body_name: Some(Ustr::from("body")),
+            scalar_entry: None,
             escaping,
             capture_free,
         };

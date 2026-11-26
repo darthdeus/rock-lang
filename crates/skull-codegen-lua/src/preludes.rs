@@ -19,14 +19,49 @@ function __rock_fixed_point(value)
 end
 "#;
 
+pub const SCALAR_ENTRY_PRELUDE: &str = r#"
+local __rock_actual_metatable = debug and debug.getmetatable
+function __rock_scalar_entry(v, abi)
+  if type(v) ~= "table" or not __rock_actual_metatable then return nil end
+  local mt = __rock_actual_metatable(v)
+  if mt == nil then return nil end
+  local call = rawget(mt, "__call")
+  if call == nil then return nil end
+  local slot = v
+  if rawequal(mt, _G.__rock_fn_mt) and rawequal(call, _G.__rock_env_call) then
+    slot = rawget(v, "__slot")
+  elseif not rawequal(mt, _G.__rock_code_slot_mt) or not rawequal(call, _G.__rock_slot_call) then
+    return nil
+  end
+  local slots = _G.__rock_scalar_slots
+  local scalar = slots and slots[slot]
+  if scalar and scalar.scalar_abi == abi and scalar.body == rawget(slot, "current_body") then
+    return scalar.scalar_body
+  end
+end
+"#;
+
 /// Runtime support for callable CodeRefs and capturing environment records.
 /// Slots are mutated in place only by the publish step, so existing values see
 /// a compatible body edit while a failed stage leaves the previous body live.
 pub const FN_MT_PRELUDE: &str = r#"
 if not _G.__rock_code_slot_mt then
-  _G.__rock_code_slot_mt = { __call = function(s, ...) return s.current_body(...) end }
+  _G.__rock_slot_call = function(s, ...) return s.current_body(...) end
+  _G.__rock_code_slot_mt = { __call = _G.__rock_slot_call }
 end
 if not _G.__rock_code_slots then _G.__rock_code_slots = {} end
+local function __rock_code_slot_set_scalar(slot, staged)
+  local slots = _G.__rock_scalar_slots
+  if staged.scalar_body then
+    if not slots then
+      slots = setmetatable({}, { __mode = "k" })
+      _G.__rock_scalar_slots = slots
+    end
+    slots[slot] = staged
+  elseif slots then
+    slots[slot] = nil
+  end
+end
 function __rock_code_slot_ref(key)
   local slot = _G.__rock_code_slots[key]
   if (not slot or _G.__rock_definition_plan_materializing) and _G.__rock_code_slot_pending then
@@ -39,6 +74,7 @@ function __rock_code_slot_ref(key)
           __rock_code_slot = true,
           key = key, current_body = staged.body, abi = staged.abi
         }, _G.__rock_code_slot_mt)
+        __rock_code_slot_set_scalar(temporary, staged)
         pending[key] = temporary
       end
       return temporary
@@ -57,6 +93,7 @@ function __rock_code_slot_pending_ref(key)
         __rock_code_slot = true,
         key = key, current_body = staged.body, abi = staged.abi
       }, _G.__rock_code_slot_mt)
+      __rock_code_slot_set_scalar(temporary, staged)
       pending[key] = temporary
     end
     return temporary
@@ -79,11 +116,13 @@ function __rock_code_slot_abort()
   _G.__rock_definition_plan_pending = nil
   _G.__rock_definition_materializers_pending = nil
 end
-function __rock_code_slot_stage(key, body, abi)
+function __rock_code_slot_stage(key, body, abi, scalar_body, scalar_abi)
   local old = _G.__rock_code_slots[key]
   if old and old.abi ~= abi then error("incompatible Rock code slot " .. key, 0) end
   if not _G.__rock_code_slot_pending then error("Rock code slot stage not open", 0) end
-  _G.__rock_code_slot_pending[key] = { body = body, abi = abi }
+  _G.__rock_code_slot_pending[key] = {
+    body = body, abi = abi, scalar_body = scalar_body, scalar_abi = scalar_abi
+  }
 end
 function __rock_lifecycle_plan_stage(plan)
   if not _G.__rock_code_slot_pending then error("Rock code slot stage not open", 0) end
@@ -189,10 +228,12 @@ function __rock_code_slot_publish()
     if slot then
       slot.current_body = staged.body
       slot.abi = staged.abi
+      __rock_code_slot_set_scalar(slot, staged)
       local temporary = _G.__rock_code_slot_pending_slots[key]
       if temporary then
         temporary.current_body = staged.body
         temporary.abi = staged.abi
+        __rock_code_slot_set_scalar(temporary, staged)
         _G.__rock_code_slots[key] = temporary
       end
     else
@@ -201,6 +242,7 @@ function __rock_code_slot_publish()
           __rock_code_slot = true,
           key = key, current_body = staged.body, abi = staged.abi
         }, _G.__rock_code_slot_mt)
+      __rock_code_slot_set_scalar(_G.__rock_code_slots[key], staged)
     end
   end
   if _G.__rock_lifecycle_plan_pending ~= nil then
@@ -217,12 +259,11 @@ function __rock_code_slot_publish()
   if wire_due ~= nil then _G.__ROCK_WIRE_DUE = wire_due end
 end
 if not _G.__rock_fn_mt then
-  _G.__rock_fn_mt = {
-    __call = function(e, ...)
-      if not e.__slot then error("invalid Rock CodeRef environment", 0) end
-      return e.__slot.current_body(e, ...)
-    end
-  }
+  _G.__rock_env_call = function(e, ...)
+    if not e.__slot then error("invalid Rock CodeRef environment", 0) end
+    return e.__slot.current_body(e, ...)
+  end
+  _G.__rock_fn_mt = { __call = _G.__rock_env_call }
 end
 function __rock_code_ref_kind(v)
   if type(v) ~= "table" then return nil end

@@ -1848,6 +1848,11 @@ impl<'a> Builder<'a> {
         callee: Idx<Inst>,
         arg_idxs: &[Idx<Expr>],
     ) -> Result<ValueBundle, CompilerError> {
+        if let Some(fn_ty) = fn_ty
+            && let Some(value) = self.scalar_callback_call(&plan, fn_ty, callee, arg_idxs)?
+        {
+            return self.call_result_bundle(&plan, ValueRepr::Scalar(value));
+        }
         let arena = self.scx.rep_arena();
         let params = match fn_ty.map(|ty| ty.peel_nullable().0) {
             Some(MonoTy::Function { params, .. }) => params.as_slice(),
