@@ -44,25 +44,18 @@ fn perf_phase_log_new() -> PerfPhaseLog {
 global PERF_PHASES: PerfPhaseLog = perf_phase_log_new()
 pub global PERF_TIMELINE_PRESENTED: (fn() -> ())? = null
 
-// Reuse the output cell and scalar view: both a struct-return wrapper and
-// cell[0].field create cdata views in the interpreter. Offsets follow the ABI.
-inline(lua) fn perf_phase_image_stat(field: int) -> float = """
-    local cell = _G.__perf_phase_image_cell
-    local words = _G.__perf_phase_image_words
-    if not cell then
-        cell = ffi.new("ImageLoadStats[1]")
-        _G.__perf_phase_image_cell = cell
-    end
-    if not words then
-        words = ffi.cast("int*", cell)
-        _G.__perf_phase_image_words = words
-        _G.__perf_phase_upload_word = ffi.offsetof("ImageLoadStats", "upload_bytes") / ffi.sizeof("int")
-        _G.__perf_phase_wait_word = ffi.offsetof("ImageLoadStats", "wait_us") / ffi.sizeof("int")
-    end
-    stone.stone_get_image_frame_stats(cell)
-    if field == 0 then return words[_G.__perf_phase_upload_word] end
-    return words[_G.__perf_phase_wait_word]
-"""
+global FRAME_IMAGE_STATS_OUT: NativeBuffer<ImageLoadStats> = native_buffer_alloc(1)
+
+// The native getter cannot reenter Rock. Consume scalar fields before
+// calling other code, since phase and hitch telemetry share this output.
+inline(lua) fn read_frame_image_stats(out: NativeBuffer<ImageLoadStats>) =
+    "stone.stone_get_image_frame_stats(out.ptr)"
+
+fn perf_phase_image_stat(field: int) -> float {
+    read_frame_image_stats(FRAME_IMAGE_STATS_OUT)
+    let stats = FRAME_IMAGE_STATS_OUT[0]
+    return if field == 0 { stats.upload_bytes as float } else { stats.wait_us as float }
+}
 
 // Split exact integer bytes instead of rounding large counters into f32.
 fn perf_phase_upload_set(token: int, bytes: float) {

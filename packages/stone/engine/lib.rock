@@ -630,8 +630,13 @@ pub global LAST_FRAME_GFX: GraphicsStats = GraphicsStats {
     instanced_draws: 0,
 }
 
+inline(lua) fn read_frame_graphics_stats(out: NativeBuffer<GraphicsStats>) =
+    "stone.stone_get_graphics_stats(out.ptr)"
+
 fn record_frame_stats() {
-    LAST_FRAME_GFX = stone_get_graphics_stats()
+    static out: NativeBuffer<GraphicsStats> = native_buffer_alloc(1)
+    read_frame_graphics_stats(out)
+    LAST_FRAME_GFX = out[0]
 }
 
 pub enum FontRasterPolicy { Fixed, OutputDensity }

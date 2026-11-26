@@ -204,12 +204,14 @@ fn hitch_frame_record(frame: int, frame_ms: float, t_ms: float, measured: bool) 
     let flushes = total_flushes - HITCH.last_flushes
     HITCH.last_compiles = total_compiles
     HITCH.last_flushes = total_flushes
-    let image_stats = stone_get_image_frame_stats()
+    read_frame_image_stats(FRAME_IMAGE_STATS_OUT)
+    let image_stats = FRAME_IMAGE_STATS_OUT[0]
     let load_us = image_stats.load_us
     let upload_us = image_stats.upload_us
     let decode_wait_us = image_stats.wait_us
     if measured {
-        perf_record_frame(frame, t_ms, frame_ms, heap_kb, heap_delta_kb, starts, compiles, aborts, flushes, image_stats, cpu_ms)
+        perf_record_frame(frame, t_ms, frame_ms, heap_kb, heap_delta_kb, starts, compiles,
+            aborts, flushes, load_us, upload_us, decode_wait_us, cpu_ms)
         if RESIDENCY_FRAME_COUNTERS.miss_wait_us > 0 {
             perf_record_residency_wait(frame, RESIDENCY_FRAME_COUNTERS.miss_wait_us as int, RESIDENCY_FRAME_WAIT_PATHS)
         }

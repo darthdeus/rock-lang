@@ -331,7 +331,8 @@ fn perf_measurement_json() -> string {
 }
 
 fn perf_record_frame(frame: int, t_ms: float, ms: float, heap: float, delta: float,
-                     starts: int, compiles: int, aborts: int, flushes: int, images: ImageLoadStats,
+                     starts: int, compiles: int, aborts: int, flushes: int,
+                     load_us: int, upload_us: int, wait_us: int,
                      thread_cpu_ms: float = -1.0) {
     let i = PERF_RECORDS.count
     assert(i < PERF_RECORD_CAPACITY, "perf frame record capacity exceeded; shorten the run")
@@ -348,7 +349,7 @@ fn perf_record_frame(frame: int, t_ms: float, ms: float, heap: float, delta: flo
     nb_set(PERF_RECORDS.data, at + 9, compiles as float)
     nb_set(PERF_RECORDS.data, at + 10, aborts as float)
     nb_set(PERF_RECORDS.data, at + 11, flushes as float)
-    nb_set(PERF_RECORDS.data, at + 12, images.upload_us as float)
+    nb_set(PERF_RECORDS.data, at + 12, upload_us as float)
     nb_set(PERF_RECORDS.data, at + 13, RESIDENCY_FRAME_COUNTERS.miss_wait_us)
     nb_set(PERF_RECORDS.data, at + 14, HITCH.cur_slow_ms)
     if GC_STEP_ENABLED {
@@ -356,8 +357,8 @@ fn perf_record_frame(frame: int, t_ms: float, ms: float, heap: float, delta: flo
             nb_set(PERF_RECORDS.data, at + 15 + c, nb_get(GC_STEP_FRAME, c))
         }
     }
-    nb_set(PERF_RECORDS.data, at + 15 + GC_STEP_FIELDS, images.load_us as float)
-    nb_set(PERF_RECORDS.data, at + 16 + GC_STEP_FIELDS, images.wait_us as float)
+    nb_set(PERF_RECORDS.data, at + 15 + GC_STEP_FIELDS, load_us as float)
+    nb_set(PERF_RECORDS.data, at + 16 + GC_STEP_FIELDS, wait_us as float)
     // One native read into preallocated staging, then a fixed copy: no per-frame allocation.
     if JIT_NATIVE_READ_ENABLED {
         jit_native_health_frame_delta(PERF_RECORDS.jit_native_stage.ptr, JIT_NATIVE_COLUMNS)

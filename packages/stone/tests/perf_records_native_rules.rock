@@ -9,13 +9,12 @@ fn perf_record_native_row(frame: int, read_native: bool) -> int {
         PERF_RECORDS.seconds = saved_seconds
     }
     JIT_NATIVE_READ_ENABLED = read_native
-    let no_images = ImageLoadStats {
-        load_calls: 0, load_failures: 0, decoded_bytes: 0, load_us: 0,
-        upload_calls: 0, upload_bytes: 0, wait_us: 0, upload_us: 0,
-        active_frames: 0, max_wait_us: 0,
-    }
-    perf_record_frame(frame, 1000.0, 16.6, 1024.0, 1.0, 1, 1, 1, 0, no_images)
-    return saved_count * PERF_RECORD_COLUMNS + 17 + GC_STEP_FIELDS
+    let at = saved_count * PERF_RECORD_COLUMNS
+    perf_record_frame(frame, 1000.0, 16.6, 1024.0, 1.0, 1, 1, 1, 0, 5, 7, 11)
+    assert_eq(nb_get(PERF_RECORDS.data, at + 12), 7.0)
+    assert_eq(nb_get(PERF_RECORDS.data, at + 15 + GC_STEP_FIELDS), 5.0)
+    assert_eq(nb_get(PERF_RECORDS.data, at + 16 + GC_STEP_FIELDS), 11.0)
+    return at + 17 + GC_STEP_FIELDS
 }
 
 @test

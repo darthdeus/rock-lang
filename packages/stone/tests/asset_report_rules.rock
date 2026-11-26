@@ -121,6 +121,8 @@ fn asset_report_frame_stats_entry(which: int) {
         return
     }
 
+    let saved = LAST_FRAME_GFX
+    let saved_upload_count = saved.retained_upload_calls
     for frame in 0..2 {
         stone_begin_frame()
         assert_eq(stone_get_graphics_stats().retained_upload_calls, 0,
@@ -138,6 +140,8 @@ fn asset_report_frame_stats_entry(which: int) {
         assert_eq(LAST_FRAME_GFX.retained_upload_calls, before.retained_upload_calls + 1,
             "completed frames retain uploads before and after the shared core")
         assert_eq(LAST_FRAME_GFX.retained_upload_bytes, before.retained_upload_bytes + bytes)
+        assert_eq(saved.retained_upload_calls, saved_upload_count,
+            "recording later frames preserves a retained snapshot")
     }
 }
 
