@@ -366,7 +366,6 @@ pub extern "C" fn stone_shader_bind_uniform_block(
         let bytes = vec![0u8; size as usize];
 
         BLOCK_PROGRAMS.with(|m| m.borrow_mut().insert(program, handle));
-        crate::shader::register_shader_name_if_unset(handle, &key);
         BLOCKS.with(|b| {
             let mut map = b.borrow_mut();
             let blocks = map.entry(handle).or_default();
