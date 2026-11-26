@@ -200,11 +200,23 @@ fn apply_depth_mode(mode: DepthMode) {
     }
 }
 
-fn restore_after_custom_draw(stage: int, target: int, blend: BlendMode, shader: string?) {
-    let _ = stone_native_stage_end(stage)
-    CURRENT_CANVAS_HANDLE = target
-    CURRENT_BLEND = blend
-    WATCHER.current_shader_name = shader
+// The stage restores GL and Stone's caches, so only the script caches need to
+// follow. When the stage cannot restore (its scope was lost or never opened),
+// re-sync everything like a plain custom draw did; the caller then forgets the
+// active shader and the draw-buffer mask.
+fn restore_after_custom_draw(stage: int, target: int, depth: DepthMode, blend: BlendMode,
+    shader: string?) -> bool {
+    if stage != 0 && (stone_native_stage_end(stage) & STONE_STAGE_RESTORED) != 0 {
+        CURRENT_CANVAS_HANDLE = target
+        CURRENT_BLEND = blend
+        WATCHER.current_shader_name = shader
+        return true
+    }
+    stone_restore_after_custom_draw()
+    set_canvas_handle(target)
+    apply_depth_mode(depth)
+    set_blend_mode(blend)
+    return false
 }
 
 // Choose the final geometric capacity first, then allocate, copy the old
@@ -1673,7 +1685,11 @@ macro flush_batch_keys(Pool: expr, Keys: expr, World: expr, Ui: expr, AfterScene
             let saved_shader = WATCHER.current_shader_name
             let stage = stone_native_stage_begin()
             if Ui { batch.custom_draw.unwrap()() } else { custom_draw() }
-            restore_after_custom_draw(stage, target, saved_blend, saved_shader)
+            let depth = if Ui { DepthMode::Off } else { batch.depth }
+            if !restore_after_custom_draw(stage, target, depth, saved_blend, saved_shader) {
+                if World && mrt_id_attached { write_id_set = false }
+                active_shader = ""
+            }
             if Ui && UI_SUBMISSION_PROBE_ON {
                 stone_ui_probe_custom_consumed()
                 stone_ui_probe_end_operation()

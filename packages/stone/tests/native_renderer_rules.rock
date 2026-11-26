@@ -177,3 +177,74 @@ fn native_renderer_custom_draw_restore_and_native_target_draw() {
         assert(stone_gl_pass_state_end(scope))
     }, world_fixture_traceback)
 }
+
+// A native renderer that returns early without ending its stage, or loses
+// every open scope, must not leave the batch drawing into its target.
+@test
+fn native_renderer_custom_draw_recovers_from_unended_and_lost_stages() {
+    gpu_test_host()
+    let white = WHITE_PIXEL ?? create_white_pixel_image()
+    let prev_white = WHITE_PIXEL
+    WHITE_PIXEL = white
+    let output = new_canvas(32.0, 32.0, "rgba8")
+    let stray = new_canvas(8.0, 8.0, "rgba8")
+    let entry_canvas = CURRENT_CANVAS_HANDLE
+    let entry_blend = CURRENT_BLEND
+    let entry_shader = WATCHER.current_shader_name
+    let scope = stone_gl_pass_state_begin()
+    assert(scope != 0)
+
+    world_fixture_with_cleanup(() => {
+        for lose_scopes in [false, true] {
+            let dl = draw_list_new(canvas: output, space: DrawSpace::Target, name: "native_recover")
+            queue_custom_draw_into(dl.batches, () => {
+                let _ = stone_native_stage_begin()
+                stone_set_canvas(stray.handle.0)
+                stone_set_shader(0)
+                stone_set_color_mask(false, false, false, false)
+                if lose_scopes { stone_reset_frame_stats() }
+            }, z_layer: 1, order: 1, depth: DepthMode::Off)
+            with_draw_pool(dl.batches, () => {
+                let before = ensure_batch_of(sampled_image(white), z_layer: 1, blend: BlendMode::Replace,
+                    pixel_snap: false, depth: DepthMode::Off, order: 0)
+                ui_push_sprite_topleft(before, sampled_image(white), v(0.0, 0.0), irect(0, 0, 1, 1),
+                    v(32.0, 32.0), Color { r: 0.9, g: 0.1, b: 0.1, a: 1.0 })
+                let after = ensure_batch_of(sampled_image(white), z_layer: 1, blend: BlendMode::Replace,
+                    pixel_snap: false, depth: DepthMode::Off, order: 2)
+                ui_push_sprite_topleft(after, sampled_image(white), v(0.0, 0.0), irect(0, 0, 1, 1),
+                    v(32.0, 32.0), Color { r: 0.1, g: 0.6, b: 0.3, a: 1.0 })
+            })
+            draw_list_flush(dl)
+            draw_list_clear(dl)
+            draw_list_destroy(dl)
+
+            assert(!stone_native_frame_active(), "no stage stays open after the custom draw")
+            let px = canvas_read_pixels(output)
+            assert(abs(canvas_pixel_channel(px, 16, 16, 0) - 0.1) < 0.02, "sprite after the custom draw reached the batch target R")
+            assert(abs(canvas_pixel_channel(px, 16, 16, 1) - 0.6) < 0.02, "sprite after the custom draw reached the batch target G")
+            assert(abs(canvas_pixel_channel(px, 16, 16, 2) - 0.3) < 0.02, "sprite after the custom draw reached the batch target B")
+        }
+
+        // A script error thrown out of a custom draw leaves its scope open only
+        // until the next frame starts.
+        let failing = draw_list_new(canvas: output, space: DrawSpace::Target, name: "native_raise")
+        queue_custom_draw_into(failing.batches, () => {
+            error("intentional custom draw failure")
+        }, z_layer: 1, order: 1, depth: DepthMode::Off)
+        assert(world_fixture_raised(() => { draw_list_flush(failing) }) != null)
+        draw_list_clear(failing)
+        draw_list_destroy(failing)
+        stone_reset_frame_stats()
+        assert(!stone_native_frame_active(), "frame start drops a scope left open by a script error")
+    }, () => {
+        unset_canvas()
+        destroy_canvas(stray)
+        destroy_canvas(output)
+        set_canvas_handle(entry_canvas)
+        if entry_shader != null { set_shader(entry_shader) } else { unset_shader() }
+        WATCHER.current_shader_name = entry_shader
+        CURRENT_BLEND = entry_blend
+        WHITE_PIXEL = prev_white
+        assert(stone_gl_pass_state_end(scope))
+    }, world_fixture_traceback)
+}

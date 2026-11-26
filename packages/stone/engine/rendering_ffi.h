@@ -190,6 +190,7 @@ float stone_read_canvas_pixel_channel(uint64_t handle, int x, int y, int channel
 float stone_read_depth_pixel(uint64_t handle, int x, int y);
 void stone_read_window_rect(int x, int y, int w, int h, uint8_t* out);
 void stone_reset_cursor(void);
+void stone_restore_after_custom_draw(void);
 uint8_t stone_sampler_bound(int unit);
 uint8_t stone_save_screenshot(const char* path, int w, int h, int max_size);
 uint8_t stone_save_screenshot_sized(const char* path, int w, int h, int max_size, int* out_width, int* out_height);

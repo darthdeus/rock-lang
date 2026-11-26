@@ -3251,6 +3251,7 @@ pub extern "C" fn stone_reset_frame_stats() {
     FRAME_STATS.with(|fs| *fs.borrow_mut() = GraphicsStats::default());
     image_texture::reset_image_frame_stats();
     crate::uniform_block::report_unfilled_blocks();
+    native_renderer::begin_frame();
     with_gl(|gl| {
         stream_buffer::begin_frame(gl);
         uniform_block::rebind_current_program(gl);

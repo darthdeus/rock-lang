@@ -480,3 +480,17 @@ pub extern "C" fn stone_set_draw_buffer_mask(mask: c_int) {
         gl.draw_buffers(&buffers[..len as usize]);
     });
 }
+
+/// The re-sync for a custom draw whose native stage could not restore state.
+/// rock-ffi stone-rendering private
+#[no_mangle]
+pub extern "C" fn stone_restore_after_custom_draw() {
+    with_gl(|gl| unsafe {
+        gl.disable(glow::CULL_FACE);
+        gl.disable(glow::STENCIL_TEST);
+        gl.disable(glow::POLYGON_OFFSET_FILL);
+        gl.disable(glow::SAMPLE_ALPHA_TO_COVERAGE);
+        gl.disable(glow::RASTERIZER_DISCARD);
+        gl.color_mask(true, true, true, true);
+    });
+}

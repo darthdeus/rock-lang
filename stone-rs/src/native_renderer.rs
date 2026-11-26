@@ -4,7 +4,7 @@
 //! function table via `stone_native_renderer_api(STONE_NATIVE_RENDERER_ABI_VERSION)`
 //! without linking a second `stone-rs` instance.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::{c_char, c_float, c_int, c_void, CStr};
 use std::num::NonZeroU32;
 
@@ -22,6 +22,7 @@ pub const STONE_STAGE_RESTORED: u32 = 1 << 0;
 pub const STONE_STAGE_TARGET_CHANGED: u32 = 1 << 1;
 pub const STONE_STAGE_SHADER_CHANGED: u32 = 1 << 2;
 pub const STONE_STAGE_DRAW_BUFFERS_CHANGED: u32 = 1 << 3;
+pub const STONE_STAGE_UNWOUND: u32 = 1 << 4;
 
 const SAVED_UBO_SLOTS: usize = 8;
 const SAVED_TEXTURE_UNITS: usize = 8;
@@ -63,11 +64,34 @@ struct NativeStageState {
 }
 
 thread_local! {
-    static NATIVE_STAGE_STACK: RefCell<Vec<NativeStageState>> = const { RefCell::new(Vec::new()) };
+    static NATIVE_STAGE_STACK: RefCell<Vec<(u32, NativeStageState)>> = const { RefCell::new(Vec::new()) };
+    static LAST_STAGE_TOKEN: Cell<u32> = const { Cell::new(0) };
 }
 
 pub(crate) fn reset_on_teardown() {
     NATIVE_STAGE_STACK.with(|stack| stack.borrow_mut().clear());
+}
+
+/// A scope still open at frame start was left by an early return or a script
+/// error; its snapshot describes a frame that is gone.
+pub(crate) fn begin_frame() {
+    let leaked = NATIVE_STAGE_STACK.with(|stack| std::mem::take(&mut *stack.borrow_mut()).len());
+    if leaked > 0 {
+        crate::log_once!(
+            "STONE",
+            "{leaked} native stage scope(s) were still open at frame start; dropped without restoring"
+        );
+    }
+}
+
+// Tokens are per-thread serial numbers, so a stale end cannot close a later
+// scope that reuses its depth.
+fn next_stage_token() -> u32 {
+    LAST_STAGE_TOKEN.with(|last| {
+        let token = last.get().wrapping_add(1).max(1);
+        last.set(token);
+        token
+    })
 }
 
 unsafe fn read_framebuffer(gl: &DebugGl, param: u32) -> Option<glow::Framebuffer> {
@@ -330,39 +354,53 @@ unsafe fn restore_stage_state(gl: &DebugGl, saved: &NativeStageState) -> u32 {
 
 /// Begin a native rendering stage: opens the render-thread frame scope and
 /// snapshots the GL and engine-cached state so `stone_native_stage_end` can
-/// restore only what changed. Returns a non-zero LIFO scope token, or 0 if no
-/// GL context is live on this thread.
+/// restore only what changed. Returns a non-zero scope token, or 0 if no GL
+/// context is live on this thread.
 /// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_native_stage_begin() -> u32 {
     let Some(state) = with_gl(|gl| unsafe { capture_stage_state(gl) }) else {
         return 0;
     };
-    NATIVE_STAGE_STACK.with(|stack| {
-        let mut stack = stack.borrow_mut();
-        stack.push(state);
-        stack.len() as u32
-    })
+    let token = next_stage_token();
+    NATIVE_STAGE_STACK.with(|stack| stack.borrow_mut().push((token, state)));
+    token
 }
 
-/// End a native rendering stage, closing the frame scope and restoring saved
-/// GL and engine-cached state. Returns a bitmask (`STONE_STAGE_*`), or 0 on
-/// mismatched scope or missing GL context.
+/// End the native rendering stage `scope`, restoring the GL and engine-cached
+/// state saved when it began. Scopes opened inside it and still open are
+/// closed too (`STONE_STAGE_UNWOUND`). Returns a bitmask (`STONE_STAGE_*`), or
+/// 0 when `scope` is not open (never begun, already closed, or dropped at
+/// frame start) or no GL context is live; nothing is restored then.
 /// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_native_stage_end(scope: u32) -> u32 {
-    NATIVE_STAGE_STACK.with(|stack| {
-        let mut stack = stack.borrow_mut();
-        if scope == 0 || stack.len() != scope as usize {
-            return 0;
-        }
-        let saved = stack[stack.len() - 1];
-        let Some(flags) = with_gl(|gl| unsafe { restore_stage_state(gl, &saved) }) else {
-            return 0;
-        };
-        stack.pop();
-        flags
-    })
+    let found = NATIVE_STAGE_STACK.with(|stack| {
+        let stack = stack.borrow();
+        let index = stack
+            .iter()
+            .rposition(|&(token, _)| token == scope && token != 0)?;
+        Some((index, stack.len() - 1 - index, stack[index].1))
+    });
+    let Some((index, unwound, saved)) = found else {
+        crate::log_once!(
+            "STONE",
+            "stone_native_stage_end: scope {scope} is not open; nothing restored"
+        );
+        return 0;
+    };
+    let Some(mut flags) = with_gl(|gl| unsafe { restore_stage_state(gl, &saved) }) else {
+        return 0;
+    };
+    NATIVE_STAGE_STACK.with(|stack| stack.borrow_mut().truncate(index));
+    if unwound > 0 {
+        crate::log_once!(
+            "STONE",
+            "stone_native_stage_end: closed {unwound} inner scope(s) that were never ended"
+        );
+        flags |= STONE_STAGE_UNWOUND;
+    }
+    flags
 }
 
 /// True only on the render thread while a native stage / custom draw scope is active.

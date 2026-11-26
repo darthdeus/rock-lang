@@ -14,7 +14,7 @@ fn rendering_bindings_are_generated_once() {
         })
         .collect();
 
-    assert_eq!(names.len(), 188);
+    assert_eq!(names.len(), 189);
     assert!(!authored.contains("extern(ffi, \"stone\")"));
     for name in names {
         assert!(!authored.contains(&format!("fn {name}(")), "{name}");
