@@ -996,22 +996,21 @@ pub extern "C" fn stone_target_create(
     if primary == 0 {
         return 0;
     }
-    for (slot, &fmt) in formats.iter().enumerate().skip(1) {
-        let child = stone_create_canvas(width, height, fmt, false);
-        if child == 0 {
-            stone_destroy_canvas(primary);
-            return 0;
-        }
-        if !stone_canvas_attach_color_target(primary, child, slot as i32) {
-            stone_destroy_canvas(child);
-            stone_destroy_canvas(primary);
-            return 0;
-        }
-        with_canvas_mut(primary, |c| {
-            c.owned_attachments[slot] = child;
-            c.attached_slots[slot] = child;
-        });
-        with_canvas_mut(child, |c| c.owner = primary);
+    if !create_target_attachments(
+        primary,
+        formats,
+        |format| stone_create_canvas(width, height, format, false),
+        |child, slot| {
+            if !stone_canvas_attach_color_target(primary, child, slot as i32) {
+                return false;
+            }
+            with_canvas_mut(primary, |c| c.owned_attachments[slot] = child);
+            with_canvas_mut(child, |c| c.owner = primary);
+            true
+        },
+        |handle| stone_destroy_canvas(handle),
+    ) {
+        return 0;
     }
     if formats.len() > 1 {
         if let Some(canvas) = lookup_canvas(primary) {
@@ -1027,6 +1026,60 @@ pub extern "C" fn stone_target_create(
         }
     }
     primary
+}
+
+fn create_target_attachments(
+    primary: u64,
+    formats: &[c_int],
+    mut create: impl FnMut(c_int) -> u64,
+    attach: impl Fn(u64, usize) -> bool,
+    destroy: impl Fn(u64),
+) -> bool {
+    for (slot, &format) in formats.iter().enumerate().skip(1) {
+        let child = create(format);
+        if child == 0 {
+            destroy(primary);
+            return false;
+        }
+        if !attach(child, slot) {
+            destroy(child);
+            destroy(primary);
+            return false;
+        }
+    }
+    true
+}
+
+#[test]
+fn target_create_releases_children_and_primary_on_attach_failure() {
+    let mut children = [2, 3].into_iter();
+    let operations = RefCell::new(Vec::new());
+    let result = create_target_attachments(
+        1,
+        &[0, 0, 0, 0],
+        |_format| {
+            let child = children.next().unwrap();
+            operations.borrow_mut().push(("create", child));
+            child
+        },
+        |child, slot| {
+            operations.borrow_mut().push(("attach", child));
+            slot == 1
+        },
+        |handle| operations.borrow_mut().push(("destroy", handle)),
+    );
+    assert!(!result);
+    assert_eq!(
+        operations.into_inner(),
+        [
+            ("create", 2),
+            ("attach", 2),
+            ("create", 3),
+            ("attach", 3),
+            ("destroy", 3),
+            ("destroy", 1),
+        ]
+    );
 }
 
 /// Resize a native-owned render target and all of its owned attachments.
