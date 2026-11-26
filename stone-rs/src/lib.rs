@@ -302,7 +302,6 @@ mod cursor;
 mod ffi_array;
 mod file_jobs;
 mod filesystem;
-mod flow_jobs;
 mod frame_stream;
 mod image_data;
 pub mod image_decode;
@@ -313,7 +312,6 @@ mod input;
 mod jobs;
 mod light_table;
 mod meadow;
-mod nav;
 mod native_ffi {
     include!(concat!(env!("OUT_DIR"), "/stone-native/ffi.rs"));
 }
@@ -1155,9 +1153,7 @@ pub extern "C" fn stone_quit_requested() -> bool {
 /// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_teardown() -> bool {
-    crate::flow_jobs::shutdown();
     crate::relight_jobs::shutdown();
-    crate::nav::shutdown();
     input::test_virtual_pad_cleanup();
     // ImGui's OpenGL3 backend shutdown needs the live GL context. Idempotent:
     // early-returns if ImGui was never initialized.

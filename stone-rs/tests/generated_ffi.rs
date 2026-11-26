@@ -6,8 +6,6 @@ use ffi_codegen::STONE_NATIVE;
 use rock_ffi_codegen::Bindings;
 
 const SOURCES: &[(&str, &str)] = &[
-    ("nav::ffi", include_str!("../src/nav/ffi.rs")),
-    ("flow_jobs", include_str!("../src/flow_jobs.rs")),
     ("relight_jobs", include_str!("../src/relight_jobs.rs")),
     ("light_table", include_str!("../src/light_table.rs")),
     ("image_data", include_str!("../src/image_data.rs")),
@@ -18,9 +16,9 @@ const SOURCES: &[(&str, &str)] = &[
 #[test]
 fn generator_owns_all_stone_native_bindings() {
     let result = STONE_NATIVE.bindings(SOURCES.iter().copied()).unwrap();
-    assert_eq!(result.cdef.matches(" stone_").count(), 40);
-    assert_eq!(result.rock.matches("extern(ffi,").count(), 40);
-    assert_eq!(result.rock.matches("fn stone_").count(), 40);
+    assert_eq!(result.cdef.matches(" stone_").count(), 16);
+    assert_eq!(result.rock.matches("extern(ffi,").count(), 16);
+    assert_eq!(result.rock.matches("fn stone_").count(), 16);
     assert!(include_str!("../../packages/stone-native/stone_native.h").ends_with(&result.cdef));
     assert_eq!(
         include_str!("../../packages/stone-native/bindings.rock"),
@@ -52,18 +50,6 @@ fn change_binding(module: &str, before: &str, after: &str) -> Result<Bindings, S
 fn mismatched_wire_types_leave_stale_c_declarations() {
     let header = include_str!("../../packages/stone-native/stone_native.h");
     for (module, before, after, c) in [
-        (
-            "flow_jobs",
-            "fn stone_flow_poll(handle: u64) -> i32",
-            "fn stone_flow_poll(handle: i64) -> i64",
-            "int64_t stone_flow_poll(int64_t handle);",
-        ),
-        (
-            "flow_jobs",
-            "fn stone_flow_copy(handle: u64, output: *mut f32",
-            "fn stone_flow_copy(handle: u64, output: *mut i32",
-            "stone_flow_copy(uint64_t handle, int* output,",
-        ),
         (
             "meadow",
             "fn stone_meadow_distance(input: *const u8",
@@ -98,12 +84,12 @@ fn mismatched_wire_types_leave_stale_c_declarations() {
 #[test]
 fn a_changed_pointee_leaves_stale_rock_declarations() {
     let generated = change_binding(
-        "nav::ffi",
-        "fn stone_nav_layout_valid(\n    data: *const NativeNavIntWire",
-        "fn stone_nav_layout_valid(\n    data: *const i32",
+        "light_table",
+        "positions: *const f32",
+        "positions: *const i32",
     )
     .unwrap();
-    let want = "fn stone_nav_layout_valid(data: Ptr<int>,";
+    let want = "positions: Ptr<int>, counts: Ptr<int>";
     assert!(generated.rock.contains(want));
     assert!(!include_str!("../../packages/stone-native/bindings.rock").contains(want));
 }
@@ -113,15 +99,15 @@ fn out_return_requires_a_mutable_pointer_to_a_shared_value() {
     let source = r#"
         /// rock-ffi stone-native return-out
         #[no_mangle]
-        pub extern "C" fn example(out: *mut NativeNavIntWire, count: i32) {}
+        pub extern "C" fn example(out: *mut NativeMeadowGrowth, count: i32) {}
     "#;
     let output = STONE_NATIVE.bindings([("", source)]).unwrap();
     assert!(output
         .cdef
-        .contains("void example(NativeNavIntWire* out, int count);"));
+        .contains("void example(NativeMeadowGrowth* out, int count);"));
     assert!(output
         .rock
-        .contains("fn example(count: int) -> NativeNavInt"));
+        .contains("fn example(count: int) -> NativeMeadowGrowth"));
     let source = source.replace("*mut", "*const");
     let error = STONE_NATIVE
         .bindings([("", source.as_str())])
@@ -135,15 +121,11 @@ fn out_return_requires_a_mutable_pointer_to_a_shared_value() {
 
 #[test]
 fn rejects_a_wider_pointee_with_no_matching_rock_buffer() {
-    let error = change_binding(
-        "flow_jobs",
-        "fn stone_flow_copy(handle: u64, output: *mut f32",
-        "fn stone_flow_copy(handle: u64, output: *mut f64",
-    )
-    .err()
-    .unwrap();
+    let error = change_binding("relight_jobs", "region: *mut f32", "region: *mut f64")
+        .err()
+        .unwrap();
     assert!(
-        error.contains("stone_flow_copy: output: no Rock pointer mapping for `f64`"),
+        error.contains("stone_relight_diff_publish: region: no Rock pointer mapping for `f64`"),
         "{error}"
     );
 }

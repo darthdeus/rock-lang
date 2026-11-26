@@ -7,21 +7,13 @@ pub const STONE_NATIVE: Module = Module {
     package: "stone-native",
     library: "stone",
     opaque_pointers: &[],
-    layouts: &[
-        Layout {
-            rock: "NativeNavInt",
-            rust: "NativeNavIntWire",
-        },
-        Layout {
-            rock: "NativeMeadowGrowth",
-            rust: "NativeMeadowGrowth",
-        },
-    ],
+    layouts: &[Layout {
+        rock: "NativeMeadowGrowth",
+        rust: "NativeMeadowGrowth",
+    }],
 };
 
 pub const STONE_NATIVE_SOURCES: &[(&str, &str)] = &[
-    ("nav/ffi.rs", "nav::ffi"),
-    ("flow_jobs.rs", "flow_jobs"),
     ("relight_jobs.rs", "relight_jobs"),
     ("light_table.rs", "light_table"),
     ("image_data.rs", "image_data"),
