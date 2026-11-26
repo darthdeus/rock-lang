@@ -26,6 +26,9 @@ pub(crate) struct Canvas {
     // All secondary color attachment handles currently attached to this FBO
     // (owned or attached via stone_canvas_attach_color_target).
     attached_slots: [u64; DRAW_BUFFERS],
+    // The target whose owned attachment this is (0 = none). Only the owner
+    // resizes, re-attaches or destroys it.
+    owner: u64,
 }
 
 impl Canvas {
@@ -724,6 +727,7 @@ pub extern "C" fn stone_create_canvas(
             generation: crate::handles::next_generation(),
             owned_attachments: [0; DRAW_BUFFERS],
             attached_slots: [0; DRAW_BUFFERS],
+            owner: 0,
         };
         gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(texture), 0);
         gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::TEXTURE_2D, depth_texture, 0);
@@ -858,6 +862,9 @@ pub extern "C" fn stone_canvas_resize(handle: u64, width: c_int, height: c_int) 
         );
         return false;
     };
+    if refuse_owned_attachment("stone_canvas_resize", handle) {
+        return false;
+    }
     if (canvas.width, canvas.height) == (width, height) {
         return true;
     }
@@ -926,13 +933,28 @@ pub extern "C" fn stone_canvas_resize(handle: u64, width: c_int, height: c_int) 
     true
 }
 
+/// True (and logged) when `handle` is an attachment owned by another target.
+fn refuse_owned_attachment(operation: &str, handle: u64) -> bool {
+    let owner = with_canvas(handle, |c| c.owner).unwrap_or(0);
+    if owner != 0 {
+        ::log::error!(
+            target: "CANVAS",
+            "{operation}: canvas {handle} is an attachment owned by target {owner}; refused (use the owner)"
+        );
+    }
+    owner != 0
+}
+
 /// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_destroy_canvas(handle: u64) {
-    if handle == 0 {
+    if handle == 0 || refuse_owned_attachment("stone_destroy_canvas", handle) {
         return;
     }
+    destroy_canvas(handle);
+}
 
+fn destroy_canvas(handle: u64) {
     let removed = CANVASES.with(|canvases| canvases.borrow_mut().remove(&handle));
     if let Some(canvas) = removed {
         if CURRENT_CANVAS_HANDLE.with(Cell::get) == handle {
@@ -943,7 +965,7 @@ pub extern "C" fn stone_destroy_canvas(handle: u64) {
         with_gl(|gl| unsafe { canvas.delete(gl) });
         for child_handle in canvas.owned_attachments.into_iter().skip(1) {
             if child_handle != 0 {
-                stone_destroy_canvas(child_handle);
+                destroy_canvas(child_handle);
             }
         }
     }
@@ -993,6 +1015,7 @@ pub extern "C" fn stone_target_create(
             c.owned_attachments[slot] = child;
             c.attached_slots[slot] = child;
         });
+        with_canvas_mut(child, |c| c.owner = primary);
     }
     if formats.len() > 1 {
         if let Some(canvas) = lookup_canvas(primary) {
@@ -1081,7 +1104,7 @@ pub(crate) fn canvas_info(handle: u64) -> Option<(u64, i32, i32, c_int, i32, boo
 pub(crate) fn destroy_all() {
     let handles: Vec<u64> = CANVASES.with(|c| c.borrow().keys().copied().collect());
     for handle in handles {
-        stone_destroy_canvas(handle);
+        destroy_canvas(handle);
     }
 }
 
@@ -1175,6 +1198,18 @@ pub extern "C" fn stone_canvas_attach_color_target(
     }
     if color_handle == 0 || id_handle == 0 {
         return false;
+    }
+    if refuse_owned_attachment("stone_canvas_attach_color_target", id_handle) {
+        return false;
+    }
+    if let Some(owned) = with_canvas(color_handle, |c| c.owned_attachments[slot as usize]) {
+        if owned != 0 {
+            ::log::error!(
+                target: "CANVAS",
+                "stone_canvas_attach_color_target: slot {slot} of target {color_handle} holds its owned attachment {owned}; refused"
+            );
+            return false;
+        }
     }
 
     let (Some(color), Some(id)) = (lookup_canvas(color_handle), lookup_canvas(id_handle)) else {
