@@ -120,8 +120,8 @@ pub(super) fn extern_ret(
 pub(super) struct UnitOut {
     pub(super) lua: String,
     pub(super) hard_error: Option<CompilerError>,
-    pub(super) refs: Option<(Ustr, Vec<Ustr>, Vec<Ustr>)>,
-    pub(super) pending_init: Option<(Ustr, Ustr, String)>,
+    pub(super) init_bodies: Option<InitBodies>,
+    pub(super) pending_init: Option<Initializer<String>>,
     // Reachability roots: these bodies are always emitted.
     pub(super) calls: Vec<FuncRef>,
     pub(super) specs: Vec<Instance>,
@@ -138,19 +138,13 @@ pub(super) struct UnitOut {
 pub(super) fn emit_lowered(
     ws: &Workspace,
     interner: &skull_mir::monoty::MonoInterner,
-    cg: &CodegenCtx,
     out: &mut UnitOut,
     mf: &MirFunc,
     lua: String,
     body_name: &str,
-    collect_refs: Option<Ustr>,
     t_emit: Duration,
 ) {
     let tv = Instant::now();
-    if let Some(key) = collect_refs {
-        let (gs, cs) = direct_refs(ws, cg, mf);
-        out.refs = Some((key, gs, cs));
-    }
     out.calls = skull_mir::reach::call_targets(mf);
     out.global_names = skull_mir::reach::global_ref_names(mf);
     crate::push_value_ctor_calls(&lua, &mut out.global_names);

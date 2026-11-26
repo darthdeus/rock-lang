@@ -14,8 +14,7 @@ pub(super) struct Chunk {
     // old and new candidate's eligibility.
     pub(super) embedded_deps: FxHashSet<FuncRef>,
     pub(super) abi_deps: FxHashMap<FuncRef, u64>,
-    pub(super) direct_globals: Vec<Ustr>,
-    pub(super) direct_calls: Vec<Ustr>,
+    pub(super) init_bodies: Option<std::sync::Arc<InitBodies>>,
     pub(super) times: PhaseTimes,
     pub(super) attribution: Option<Box<UnitAttribution>>,
     pub(super) statics: Vec<skull_mir::mir::StaticCell>,

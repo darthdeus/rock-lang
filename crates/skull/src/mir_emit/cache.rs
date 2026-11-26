@@ -507,7 +507,16 @@ impl SkullEmitCache {
             ..
         } = self;
         let name = (!body.args.is_empty()).then(|| body.symbol(ws, scx.interner()));
-        emit_body_chunk(ws, cg, scx, concrete, body, name.as_deref(), inline_cache)
+        emit_body_chunk(
+            ws,
+            cg,
+            scx,
+            concrete,
+            body,
+            name.as_deref(),
+            inline_cache,
+            true,
+        )
     }
 
     fn insert_chunk(&mut self, body: Instance, chunk: Result<Chunk, CompilerError>) -> usize {

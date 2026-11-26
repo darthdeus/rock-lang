@@ -1,0 +1,31 @@
+@lua_named struct Reads {
+    stored: fn() -> int,
+    invoked: fn() -> int,
+}
+
+@nomangle fn run_selected_callback(reads: Reads) -> int {
+    return reads.invoked()
+}
+
+fn forward_callback<T>(value: T) -> T {
+    return value
+}
+
+macro read_now(receiver: expr) -> int { receiver.run_selected_callback() }
+
+global reads: Reads = callbacks(2)
+global answer: int = read_now(reads)
+global seed: int = callback_seed()
+
+fn callbacks(offset: int) -> Reads {
+    let invoked = () => seed + offset
+    return Reads { stored: () => answer, invoked: forward_callback(invoked) }
+}
+
+fn callback_seed() -> int { return 5 }
+
+@test
+fn only_the_invoked_field_can_read_during_initialization() {
+    assert_eq(answer, 7)
+    assert_eq(reads.stored(), 7)
+}

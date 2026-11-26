@@ -129,6 +129,7 @@ impl<'a> SpecQueue<'a> {
             &inst,
             Some(&name),
             inline_cache,
+            true,
         );
         if let Ok(chunk) = &mut result {
             chunk.finish(self.attribution);

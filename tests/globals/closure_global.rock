@@ -1,0 +1,17 @@
+struct Deferred {
+    read: fn() -> int,
+    seed: int,
+}
+
+global deferred: Deferred = make_deferred()
+global value: int = deferred.seed + 1
+
+fn make_deferred() -> Deferred {
+    return Deferred { read: () => value, seed: 6 }
+}
+
+@test
+fn closure_does_not_read_global_until_called() {
+    let read = deferred.read
+    assert_eq(read(), 7)
+}

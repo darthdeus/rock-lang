@@ -1,0 +1,11 @@
+global callbacks: [fn() -> int] = [() => seed, () => selected]
+global selected: int = callbacks[0]()
+global seed: int = init_seed()
+
+fn init_seed() -> int { return 13 }
+
+@test
+fn indexing_a_constant_lane_does_not_invoke_its_neighbors() {
+    assert_eq(selected, 13)
+    assert_eq(callbacks[1](), 13)
+}

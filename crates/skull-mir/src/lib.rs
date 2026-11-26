@@ -11,7 +11,9 @@ pub mod definition;
 pub mod display;
 pub mod global_storage;
 pub mod gpu_layout;
+pub mod init;
 pub mod instance;
+
 pub mod intrinsics;
 pub mod layout_instance;
 pub mod lifecycle;

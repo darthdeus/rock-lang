@@ -54,3 +54,34 @@ console.log(__rock_globals["global:<test>::FLAT::leaf0"] + ":" + (__G.FLAT_x + _
         "3:7"
     );
 }
+
+#[test]
+fn both_backends_diagnose_executed_initializer_cycles() {
+    let ws = ws_with(
+        r#"
+global first: int = make()
+global second: int = first + 1
+
+@nomangle fn invoke(read: fn() -> int) -> int { return read() }
+fn make() -> int { return invoke(() => second) }
+
+fn main() { print(first) }
+"#,
+    );
+    let mid = crate::common::test_mid(&ws);
+    let lua = skull::mir_emit::emit_workspace_mir(&ws, mid)
+        .err()
+        .expect("Lua cycle");
+    let js = skull_codegen_js::emit::emit_program(&ws, mid)
+        .err()
+        .expect("JS cycle");
+    for diagnostic in [lua, js] {
+        assert!(
+            diagnostic
+                .message
+                .contains("global initializers are mutually recursive: first, second"),
+            "{}",
+            diagnostic.message
+        );
+    }
+}

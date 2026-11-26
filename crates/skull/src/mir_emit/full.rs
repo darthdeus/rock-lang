@@ -423,6 +423,48 @@ enum FanOutJob {
     Spec(Instance),
 }
 
+/// Every Rock function reachable from a global initializer appears in its
+/// concrete plan's call or function-value rows, transitively. Include selected
+/// target declarations because their emitted names are backend-specific.
+fn init_reachable_decls(
+    concrete: &crate::concrete_body::ConcreteBodies,
+    view: &crate::artifact::ArtifactView,
+) -> FxHashSet<FuncRef> {
+    use skull_mir::concrete::ConcreteOwner;
+
+    let mut pending: Vec<_> = concrete
+        .always_plans
+        .values()
+        .filter(|plan| matches!(plan.owner, ConcreteOwner::Global { .. }))
+        .flat_map(|plan| {
+            plan.callees
+                .rows()
+                .iter()
+                .map(|(_, callee)| &callee.instance)
+        })
+        .collect();
+    let mut seen = FxHashSet::default();
+    let mut declarations = FxHashSet::default();
+    while let Some(instance) = pending.pop() {
+        if !seen.insert(instance) {
+            continue;
+        }
+        declarations.insert(instance.func);
+        if let Some(body) = view.realization.get(instance) {
+            declarations.insert(body.decl);
+        }
+        if let Some(plan) = concrete.plan_for(instance) {
+            pending.extend(
+                plan.callees
+                    .rows()
+                    .iter()
+                    .map(|(_, callee)| &callee.instance),
+            );
+        }
+    }
+    declarations
+}
+
 fn emit_full_chunks<'a>(
     ws: &'a Workspace,
     cg: &CodegenCtx,
@@ -430,6 +472,7 @@ fn emit_full_chunks<'a>(
     mut queue: SpecQueue<'a>,
     concrete: &crate::concrete_body::ConcreteBodies,
     lua_view: &crate::artifact::ArtifactView,
+    lifetime: CacheLifetime,
     attribution: bool,
     setup_phases: &mut SetupPhases,
 ) -> Result<
@@ -440,6 +483,9 @@ fn emit_full_chunks<'a>(
     ),
     CompilerError,
 > {
+    // Retained bodies can become reachable from a later const edit.
+    let init_decls =
+        (lifetime == CacheLifetime::OneShot).then(|| init_reachable_decls(concrete, lua_view));
     let mut jobs: Vec<FanOutJob> = ws
         .source_modules()
         .flat_map(|m| {
@@ -474,8 +520,19 @@ fn emit_full_chunks<'a>(
                 match job {
                     FanOutJob::Body(at, self_ref) => {
                         let instance = shared(self_ref);
-                        let mut chunk =
-                            emit_body_chunk(ws, cg, scx, concrete, &instance, None, inline_cache);
+                        let collect_init = init_decls
+                            .as_ref()
+                            .is_none_or(|decls| decls.contains(&self_ref));
+                        let mut chunk = emit_body_chunk(
+                            ws,
+                            cg,
+                            scx,
+                            concrete,
+                            &instance,
+                            None,
+                            inline_cache,
+                            collect_init,
+                        );
                         if let Ok(chunk) = &mut chunk {
                             chunk.finish(attribution);
                         }
@@ -595,6 +652,7 @@ fn check_noalloc_instance(
         instance,
         name.as_deref(),
         &mut worker_inline_cache(None),
+        false,
     )
     .map(|_| ())
 }
@@ -699,7 +757,7 @@ pub fn inspect_allocations(
                 return (Vec::new(), None);
             }
             let spec = (!instance.args.is_empty()).then_some(symbol.as_str());
-            match emit_body_chunk(ws, &cg, &scx, &concrete, &instance, spec, cache) {
+            match emit_body_chunk(ws, &cg, &scx, &concrete, &instance, spec, cache, false) {
                 Ok(chunk) => (chunk.allocation_bodies, None),
                 Err(error) if noalloc::marked(f) && error.message.starts_with("`@noalloc`") => {
                     (Vec::new(), Some(error))
@@ -833,6 +891,7 @@ pub(super) fn emit_full_build(
                         spec_queue,
                         &concrete,
                         &lua_view,
+                        build.lifetime(),
                         attribution,
                         &mut setup_phases,
                     )

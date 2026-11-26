@@ -1,0 +1,12 @@
+global first: int = make()
+global second: int = seed()
+
+@nomangle fn invoke(read: fn() -> int) -> int { return read() }
+
+fn make() -> int { return invoke(() => second) }
+fn seed() -> int { return 7 }
+
+@test
+fn called_initializer_closure_reads_its_dependency() {
+    assert_eq(first, 7)
+}

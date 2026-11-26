@@ -5,118 +5,6 @@ use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap, FxHashSet as HashSet};
 use ustr::Ustr;
 
-pub struct GlobalReach {
-    id_of: FxHashMap<Ustr, u32>,
-    /// Indexed by the bit each name owns in a closure set.
-    globals: Vec<Ustr>,
-    component_of: Vec<u32>,
-    /// One bitset per component: the globals its bodies read, transitively.
-    closure: Vec<Vec<u64>>,
-}
-
-impl GlobalReach {
-    pub fn deps_of(&self, body: Ustr) -> Vec<Ustr> {
-        let Some(&id) = self.id_of.get(&body) else {
-            return Vec::new();
-        };
-        let bits = &self.closure[self.component_of[id as usize] as usize];
-        let mut out = Vec::new();
-        for (word_index, &word) in bits.iter().enumerate() {
-            let mut word = word;
-            while word != 0 {
-                let bit = word.trailing_zeros() as usize;
-                out.push(self.globals[word_index * 64 + bit]);
-                word &= word - 1;
-            }
-        }
-        out
-    }
-}
-
-/// One closure per component: Tarjan returns callees first, so each component
-/// unions its callees' completed closures once.
-pub fn transitive_global_reads<G: AsRef<[Ustr]>, C: AsRef<[Ustr]>>(
-    direct_globals: &FxHashMap<Ustr, G>,
-    direct_calls: &FxHashMap<Ustr, C>,
-) -> GlobalReach {
-    let mut id_of: FxHashMap<Ustr, u32> = FxHashMap::default();
-    let mut intern = |name: Ustr| -> u32 {
-        let next = id_of.len() as u32;
-        *id_of.entry(name).or_insert(next)
-    };
-    let mut global_bit: FxHashMap<Ustr, u32> = FxHashMap::default();
-    let mut globals = Vec::new();
-    let mut own_globals: Vec<(u32, u32)> = Vec::new();
-    for (body, read) in direct_globals {
-        let body = intern(*body);
-        for global in read.as_ref() {
-            let next = globals.len() as u32;
-            let bit = *global_bit.entry(*global).or_insert_with(|| {
-                globals.push(*global);
-                next
-            });
-            own_globals.push((body, bit));
-        }
-    }
-    let mut edges: Vec<(u32, u32)> = Vec::new();
-    for (body, callees) in direct_calls {
-        let body = intern(*body);
-        for callee in callees.as_ref() {
-            edges.push((body, intern(*callee)));
-        }
-    }
-    // A global's name may never appear as a body; give every name a node so
-    // `component_of` is total over `id_of`.
-    for global in &globals {
-        intern(*global);
-    }
-    let node_count = id_of.len();
-    let mut callees = vec![Vec::new(); node_count];
-    for (from, to) in edges {
-        callees[from as usize].push(to);
-    }
-
-    let components = strongly_connected_components(&callees);
-    let mut component_of = vec![u32::MAX; node_count];
-    for (index, members) in components.iter().enumerate() {
-        for &member in members {
-            component_of[member as usize] = index as u32;
-        }
-    }
-    let words = globals.len().div_ceil(64);
-    let mut closure = vec![vec![0u64; words]; components.len()];
-    for (body, bit) in own_globals {
-        let set = &mut closure[component_of[body as usize] as usize];
-        set[bit as usize / 64] |= 1 << (bit % 64);
-    }
-    // Components come out callee-first, so a callee's set is final here.
-    for (index, members) in components.iter().enumerate() {
-        for &member in members {
-            for &callee in &callees[member as usize] {
-                let callee_component = component_of[callee as usize] as usize;
-                if callee_component == index {
-                    continue;
-                }
-                let (earlier, later) = closure.split_at_mut(index);
-                let (from, into) = if callee_component < index {
-                    (&earlier[callee_component], &mut later[0])
-                } else {
-                    unreachable!("Tarjan emits a callee's component before its caller's");
-                };
-                for (word, source) in into.iter_mut().zip(from) {
-                    *word |= source;
-                }
-            }
-        }
-    }
-    GlobalReach {
-        id_of,
-        globals,
-        component_of,
-        closure,
-    }
-}
-
 /// In finish order: every component appears after each component it has an
 /// edge into.
 pub fn strongly_connected_components(callees: &[Vec<u32>]) -> Vec<Vec<u32>> {
@@ -232,7 +120,7 @@ pub struct PendingInit<T> {
 /// Each init runs after every initialized global it reads; rounds keep source
 /// order. `leaf_owner` maps `nobox` leaf names to their global, or the dependent
 /// init would read undefined leaves. A round without progress means mutual
-/// recursion: the stuck names come back in source order.
+/// recursion: names that participate in a cycle come back in source order.
 pub fn order_global_inits<T>(
     inits: Vec<PendingInit<T>>,
     leaf_owner: &FxHashMap<Ustr, Ustr>,
@@ -245,7 +133,7 @@ pub fn order_global_inits<T>(
                 .deps
                 .iter()
                 .map(|dep| leaf_owner.get(dep).copied().unwrap_or(*dep))
-                .filter(|dep| *dep != init.name && known.contains(dep))
+                .filter(|dep| known.contains(dep))
                 .collect();
             (init.name, deps, init.item)
         })
@@ -264,7 +152,32 @@ pub fn order_global_inits<T>(
             }
         }
         if next.len() == before {
-            return Err(next.into_iter().map(|(name, _, _)| name).collect());
+            let indices: FxHashMap<_, _> = next
+                .iter()
+                .enumerate()
+                .map(|(i, (name, _, _))| (*name, i as u32))
+                .collect();
+            let edges: Vec<Vec<_>> = next
+                .iter()
+                .map(|(_, deps, _)| {
+                    deps.iter()
+                        .filter_map(|dep| indices.get(dep).copied())
+                        .collect()
+                })
+                .collect();
+            let mut cyclic = vec![false; next.len()];
+            for component in strongly_connected_components(&edges) {
+                if component.len() > 1 || edges[component[0] as usize].contains(&component[0]) {
+                    for node in component {
+                        cyclic[node as usize] = true;
+                    }
+                }
+            }
+            return Err(next
+                .into_iter()
+                .zip(cyclic)
+                .filter_map(|((name, _, _), cyclic)| cyclic.then_some(name))
+                .collect());
         }
         remaining = next;
     }
@@ -409,49 +322,6 @@ pub fn spec_bound_call<'a>(
 }
 
 #[cfg(test)]
-mod global_reach_tests {
-    use super::transitive_global_reads;
-    use rustc_hash::FxHashMap;
-    use ustr::Ustr;
-
-    fn table(rows: &[(&str, &[&str])]) -> FxHashMap<Ustr, Vec<Ustr>> {
-        rows.iter()
-            .map(|(name, items)| {
-                (
-                    Ustr::from(name),
-                    items.iter().map(|item| Ustr::from(item)).collect(),
-                )
-            })
-            .collect()
-    }
-
-    fn sorted(mut names: Vec<Ustr>) -> Vec<&'static str> {
-        names.sort();
-        names.into_iter().map(|name| name.as_str()).collect()
-    }
-
-    #[test]
-    fn reads_follow_calls_through_chains_and_cycles() {
-        let reach = transitive_global_reads(
-            &table(&[("a", &["G0"]), ("c", &["G1"]), ("d", &["G2"])]),
-            &table(&[
-                ("entry", &["a"]),
-                ("a", &["b"]),
-                ("b", &["c"]),
-                ("c", &["b"]),
-            ]),
-        );
-        assert_eq!(sorted(reach.deps_of(Ustr::from("entry"))), ["G0", "G1"]);
-        assert_eq!(sorted(reach.deps_of(Ustr::from("a"))), ["G0", "G1"]);
-        assert_eq!(sorted(reach.deps_of(Ustr::from("b"))), ["G1"]);
-        assert_eq!(sorted(reach.deps_of(Ustr::from("c"))), ["G1"]);
-        assert_eq!(sorted(reach.deps_of(Ustr::from("d"))), ["G2"]);
-        assert!(reach.deps_of(Ustr::from("G0")).is_empty());
-        assert!(reach.deps_of(Ustr::from("unknown")).is_empty());
-    }
-}
-
-#[cfg(test)]
 mod init_order_tests {
     use super::{PendingInit, order_global_inits};
     use rustc_hash::FxHashMap;
@@ -475,7 +345,7 @@ mod init_order_tests {
         .collect();
         let order = order_global_inits(
             vec![
-                init("DERIVED", &["__nbg_BASE_1", "UNINITIALIZED", "DERIVED"]),
+                init("DERIVED", &["__nbg_BASE_1", "UNINITIALIZED"]),
                 init("BASE", &[]),
                 init("OTHER", &[]),
             ],
@@ -488,10 +358,15 @@ mod init_order_tests {
     #[test]
     fn mutually_recursive_inits_report_the_stuck_names() {
         let stuck = order_global_inits(
-            vec![init("A", &["B"]), init("C", &[]), init("B", &["A"])],
+            vec![
+                init("A", &["B"]),
+                init("C", &["A"]),
+                init("B", &["A"]),
+                init("D", &["D"]),
+            ],
             &FxHashMap::default(),
         )
         .unwrap_err();
-        assert_eq!(stuck, [Ustr::from("A"), Ustr::from("B")]);
+        assert_eq!(stuck, [Ustr::from("A"), Ustr::from("B"), Ustr::from("D")]);
     }
 }

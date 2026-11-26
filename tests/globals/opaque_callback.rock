@@ -1,0 +1,17 @@
+inline(lua) fn invoke_opaque(read: fn() -> int) -> int = """
+    return read()
+"""
+
+inline(js) fn invoke_opaque(read: fn() -> int) -> int = """
+    return __rock_call(read)
+"""
+
+global result: int = invoke_opaque(() => seed)
+global seed: int = provide_seed()
+
+fn provide_seed() -> int { return 11 }
+
+@test
+fn an_opaque_call_may_invoke_an_argument() {
+    assert_eq(result, 11)
+}

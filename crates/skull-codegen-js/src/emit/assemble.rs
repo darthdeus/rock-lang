@@ -145,7 +145,7 @@ pub(super) fn assemble_program_core(
         artifact.set_body_names(&g.mf, &g.init_name);
         code_artifact.merge(artifact);
     }
-    let init_lines = order_global_inits(&st.ginits, &st.lowered, &st.names, &st.gctx.state)?;
+    let init_lines = order_global_inits(ws, &st)?;
     // Report rejected bodies before staging could raise an incomplete-census error.
     combine_rejections(rejections)?;
     let lifecycle_plan = if let Some((decorators, lifecycle_skeleton)) = effects {

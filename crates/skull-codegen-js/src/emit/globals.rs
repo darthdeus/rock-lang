@@ -390,7 +390,7 @@ pub(super) fn schedule_global_reads(
 ) -> Result<(), CompilerError> {
     let mut fn_value_names = HashSet::new();
     register_fn_values_from_view(ws, mf, st, &mut fn_value_names)?;
-    for name in global_refs(mf) {
+    for name in skull_mir::reach::global_ref_names(mf) {
         if fn_value_names.contains(&name) {
             continue;
         }
@@ -433,69 +433,46 @@ pub(super) fn schedule_global_reads(
     Ok(())
 }
 
-/// Static callee emit-names of `mf`; indirect and bound calls add no ordering edge.
-fn direct_callees(mf: &MirFunc, names: &CalleeNames) -> Vec<ustr::Ustr> {
-    let mut out = Vec::new();
-    visit_placed(mf, &mut |body, iid| {
-        if let Inst::Call { func, .. } | Inst::CallMulti { func, .. } = body.insts[iid]
-            && let Some(name) = names.get(&Instance::base(func))
-        {
-            out.push(Ustr::from(name.as_str()));
-        }
-    });
-    out
-}
-
-/// Order global-init assignments so each global inits after every global it transitively reads
-/// through its call graph; a cycle rejects.
 pub(super) fn order_global_inits(
-    ginits: &[GlobalInit],
-    lowered: &[DeliveredBody<'_>],
-    names: &CalleeNames<'_>,
-    state_slots: &HashMap<ustr::Ustr, String>,
+    ws: &Workspace,
+    st: &WorklistState,
 ) -> Result<Vec<String>, CompilerError> {
-    let mut direct_globals: rustc_hash::FxHashMap<Ustr, Vec<Ustr>> = Default::default();
-    let mut direct_calls: rustc_hash::FxHashMap<Ustr, Vec<Ustr>> = Default::default();
-    let mut record = |key: Ustr, mf: &MirFunc| {
-        direct_globals.insert(key, global_refs(mf));
-        direct_calls.insert(key, direct_callees(mf, names));
-    };
-    for g in ginits {
-        record(Ustr::from(g.init_name.as_str()), &g.mf);
+    use skull_mir::init::{InitBodies, Initializer};
+
+    if st.ginits.is_empty() {
+        return Ok(Vec::new());
     }
-    // Key by the mangled emit name, which is what `direct_callees` resolves to.
-    for body in lowered.iter().filter(|body| body.specialization.is_none()) {
-        if let Some(emit_name) = names.get(body.instance()) {
-            record(Ustr::from(emit_name.as_str()), &body.mf);
+    let mut facts = InitBodies::default();
+    let resolve = |mf: &MirFunc, iid, func| {
+        let name = if let Inst::Global(surface) = mf.insts[iid] {
+            st.gctx.fns.get(&surface)
+        } else {
+            st.names
+                .instance_for_call(ws, mf, iid, func)
+                .and_then(|instance| st.names.get(&instance))
         }
+        .map(|name| Ustr::from(name.as_str()));
+        skull_mir::init::callee(ws, func, name)
+    };
+    for g in &st.ginits {
+        facts.record(ws, &g.mf, Ustr::from(g.init_name.as_str()), &resolve);
     }
-    let reach = skull_mir::reach::transitive_global_reads(&direct_globals, &direct_calls);
-    // A `nobox` global is READ by its leaf names, which are synthesized and never
-    // appear in `global_by_name`; the leaves are the storage, so an edge to one
-    // is an edge to the global that owns them.
-    let leaf_owner: rustc_hash::FxHashMap<Ustr, Ustr> = ginits
+    for body in &st.lowered {
+        facts.record(ws, &body.mf, Ustr::from(body.name.as_str()), &resolve);
+    }
+    let pending = st
+        .ginits
         .iter()
-        .filter_map(|g| g.leaves.as_ref().map(|ls| (g.name, ls)))
-        .flat_map(|(base, ls)| ls.iter().map(move |&leaf| (leaf, base)))
-        .collect();
-    let pending = ginits
-        .iter()
-        .map(|g| skull_mir::reach::PendingInit {
+        .map(|g| Initializer {
             name: g.name,
-            deps: reach.deps_of(Ustr::from(g.init_name.as_str())),
+            body: Ustr::from(g.init_name.as_str()),
+            leaves: g.leaves.clone().unwrap_or_default(),
             item: g,
         })
         .collect();
-    let ordered = skull_mir::reach::order_global_inits(pending, &leaf_owner).map_err(|stuck| {
-        let names: Vec<&str> = stuck.iter().map(|name| name.as_str()).collect();
-        err(format!(
-            "JS subset: module globals are mutually recursive: {}",
-            names.join(", ")
-        ))
-    })?;
-    ordered
+    skull_mir::init::order(pending, [&facts], [])?
         .into_iter()
-        .map(|g| global_init_line(g, state_slots))
+        .map(|g| global_init_line(g, &st.gctx.state))
         .collect()
 }
 
@@ -538,21 +515,6 @@ fn global_init_line(
     }
     js.push('\n');
     Ok(js)
-}
-
-fn global_refs(mf: &MirFunc) -> Vec<ustr::Ustr> {
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    visit_placed(mf, &mut |body, iid| {
-        let name = match body.insts[iid] {
-            Inst::Global(name) | Inst::StoreGlobal { name, .. } => name,
-            _ => return,
-        };
-        if seen.insert(name) {
-            out.push(name);
-        }
-    });
-    out
 }
 
 fn visit_placed<'a>(body: &'a MirFunc, visit: &mut impl FnMut(&'a MirFunc, Idx<Inst>)) {

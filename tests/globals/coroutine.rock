@@ -1,0 +1,42 @@
+global worker: Coroutine<int> = read_seed()
+global from_worker: int = worker.resume() ?? -1
+global seed: int = start_seed()
+
+co fn read_seed() -> Coroutine<int> {
+    yield seed
+}
+
+fn start_seed() -> int { return 17 }
+
+@test
+fn a_resume_reads_dependencies_of_the_coroutine() {
+    assert_eq(from_worker, 17)
+}
+
+global waiting: Coroutine<int> = read_status()
+global waiting_status: string = waiting.status()
+
+co fn read_status() -> Coroutine<int> {
+    yield if waiting_status == "suspended" { 9 } else { -1 }
+}
+
+@test
+fn checking_status_does_not_start_the_coroutine() {
+    assert_eq(waiting_status, "suspended")
+    assert_eq(waiting.resume(), 9)
+}
+
+global paused: Coroutine<int> = two_steps()
+global first_step: int = paused.resume() ?? -1
+global second_step: int = first_step + 1
+
+co fn two_steps() -> Coroutine<int> {
+    yield 3
+    yield second_step
+}
+
+@test
+fn reads_after_the_first_yield_can_stay_deferred() {
+    assert_eq(first_step, 3)
+    assert_eq(paused.resume(), 4)
+}

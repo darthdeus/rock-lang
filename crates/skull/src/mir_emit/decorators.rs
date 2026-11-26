@@ -48,12 +48,10 @@ pub(super) fn emit_decorator_unit(
             emit_lowered(
                 ws,
                 scx.interner(),
-                cg,
                 &mut out,
                 &mf,
                 lua,
                 &deco_name,
-                Some(Ustr::from(&deco_name)),
                 Duration::ZERO,
             );
             out.attribution.times = out.times;

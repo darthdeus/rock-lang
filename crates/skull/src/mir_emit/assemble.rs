@@ -61,7 +61,7 @@ struct Assembly {
     attribution: AttributionAccumulator,
     needed_specs: Vec<Instance>,
     rejections: Rejections,
-    unit_facts: Vec<(Ustr, Vec<Ustr>, Vec<Ustr>)>,
+    unit_facts: Vec<InitBodies>,
     all_statics: Vec<skull_mir::mir::StaticCell>,
     code_artifact: skull_mir::code_identity::CodeArtifact,
     allocation_bodies: Vec<crate::allocation_report::AllocationBody>,
@@ -108,7 +108,6 @@ impl Assembly {
         cache: &'c SkullEmitCache,
         needed_foreign: &FxHashSet<Instance>,
         definitions: &mut DefinitionOrder<'c>,
-        facts: &mut Vec<(Ustr, &'c Chunk)>,
     ) {
         let fns: Vec<(FuncRef, &bone_semantic::hir::Function)> = source_functions(ws).collect();
         let allocation =
@@ -143,7 +142,7 @@ impl Assembly {
                 }
                 Placement::Text(Err(error)) => self.rejections.push(error),
                 Placement::Chunk(emit_def, chunk) => {
-                    self.pull_cached_chunk(f, chunk, emit_def, definitions, facts)
+                    self.pull_cached_chunk(f, chunk, emit_def, definitions)
                 }
             }
         }
@@ -152,20 +151,18 @@ impl Assembly {
     fn pull_cached_chunk<'c>(
         &mut self,
         f: &bone_semantic::hir::Function,
-        chunk: Option<Result<(Ustr, &'c Chunk), &CompilerError>>,
+        chunk: Option<Result<&'c Chunk, &CompilerError>>,
         emit_def: bool,
         definitions: &mut DefinitionOrder<'c>,
-        facts: &mut Vec<(Ustr, &'c Chunk)>,
     ) {
         match chunk {
-            Some(Ok((key, chunk))) => {
-                facts.push((key, chunk));
+            Some(Ok(chunk)) => {
                 self.times.add(&chunk.times);
                 if let Some(unit) = &chunk.attribution {
                     self.attribution.add_unit(unit);
                 }
                 if emit_def {
-                    self.emits_main |= key.as_str() == "main";
+                    self.emits_main |= chunk.name.as_str() == "main";
                     definitions.push_chunk(chunk);
                 }
             }
@@ -183,7 +180,6 @@ impl Assembly {
         &mut self,
         ws: &Workspace,
         cache: &SkullEmitCache,
-        pending_inits: Vec<(Ustr, Ustr, String)>,
         ordering: InitOrdering,
         decorators: &DecoratorTable,
         has_code_slot_publication: bool,
@@ -192,24 +188,9 @@ impl Assembly {
     ) -> Result<(), CompilerError> {
         let scx = &cache.scx;
         let ts = Instant::now();
-        let InitOrdering {
-            reach,
-            leaf_owner,
-            static_resets,
-        } = ordering;
-        let leaf_owner = leaf_owner?;
-        let inits: Vec<PendingInit<String>> = pending_inits
-            .into_iter()
-            .map(|(name, init_name, line)| PendingInit {
-                name,
-                deps: reach.deps_of(init_name),
-                item: line,
-            })
-            .collect();
-        let static_resets = static_resets?;
         let out = &mut self.out;
-        out.push_str(&static_resets);
-        let init_lines = sort_global_init_lines(inits, &leaf_owner)?;
+        out.push_str(&ordering.static_resets?);
+        let init_lines = ordering.lines?;
         out.push_str(&state_initializer_lua(&init_lines));
 
         // After the global inits, so a decorator body can push to a global.
@@ -500,60 +481,8 @@ fn inline_lua_definition(
 }
 
 struct InitOrdering {
-    reach: skull_mir::reach::GlobalReach,
-    leaf_owner: Result<FxHashMap<Ustr, Ustr>, CompilerError>,
+    lines: Result<Vec<String>, CompilerError>,
     static_resets: Result<String, CompilerError>,
-}
-
-/// Initializer ordering uses the dependency set, not traversal order.
-fn transitive_global_reads(
-    inits: &[(Ustr, Ustr, String)],
-    units: &[(Ustr, Vec<Ustr>, Vec<Ustr>)],
-    declarations: &[(Ustr, &Chunk)],
-) -> skull_mir::reach::GlobalReach {
-    let mut facts: FxHashMap<Ustr, (&[Ustr], &[Ustr])> = FxHashMap::default();
-    for (key, read, called) in units {
-        facts.insert(*key, (read, called));
-    }
-    for (key, chunk) in declarations {
-        facts.insert(*key, (&chunk.direct_globals, &chunk.direct_calls));
-    }
-    let mut globals: FxHashMap<Ustr, &[Ustr]> = FxHashMap::default();
-    let mut calls: FxHashMap<Ustr, &[Ustr]> = FxHashMap::default();
-    let mut pending: Vec<Ustr> = inits.iter().map(|(_, init, _)| *init).collect();
-    while let Some(body) = pending.pop() {
-        if calls.contains_key(&body) {
-            continue;
-        }
-        let Some(&(read, called)) = facts.get(&body) else {
-            continue;
-        };
-        globals.insert(body, read);
-        calls.insert(body, called);
-        pending.extend(called.iter().copied());
-    }
-    skull_mir::reach::transitive_global_reads(&globals, &calls)
-}
-
-/// A `nobox` global is read through its leaves, so a leaf dependency must
-/// resolve back to its owning global or the dependent initializer sorts first.
-fn global_leaf_owners(
-    ws: &Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
-) -> Result<FxHashMap<Ustr, Ustr>, CompilerError> {
-    let mut leaf_owner: FxHashMap<Ustr, Ustr> = FxHashMap::default();
-    for module in ws.modules.iter() {
-        for (_, g) in module.globals.iter() {
-            let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
-                .map_err(|e| CompilerError::new_no_location(e.message))?;
-            if let Some(leaves) = plan.leaf_names(skull_mir::mangle::symbol_of_key(g.name)) {
-                for leaf in leaves {
-                    leaf_owner.insert(leaf, g.name);
-                }
-            }
-        }
-    }
-    Ok(leaf_owner)
 }
 
 /// On reload a static is reset only when its init or type key changed; an
@@ -618,7 +547,7 @@ type LuaDefinition = (String, Option<crate::allocation_report::AllocationBody>);
 enum Placement<'c> {
     None,
     Text(Result<LuaDefinition, CompilerError>),
-    Chunk(bool, Option<Result<(Ustr, &'c Chunk), &'c CompilerError>>),
+    Chunk(bool, Option<Result<&'c Chunk, &'c CompilerError>>),
 }
 
 /// A JS-backend declaration is inert here: a Lua sibling carries the binding,
@@ -662,7 +591,7 @@ fn place_function<'c>(
         return Placement::None;
     }
     let chunk = match cache.chunks.get(&shared(self_ref)) {
-        Some(Ok(chunk)) => Some(Ok((chunk.name, chunk))),
+        Some(Ok(chunk)) => Some(Ok(chunk)),
         Some(Err(err)) => Some(Err(err)),
         None => None,
     };
@@ -794,7 +723,7 @@ end
 
 #[derive(Default)]
 struct UnitFacts {
-    facts: Vec<(Ustr, Vec<Ustr>, Vec<Ustr>)>,
+    facts: Vec<InitBodies>,
     calls: Vec<FuncRef>,
     names: Vec<Ustr>,
     code_artifact: skull_mir::code_identity::CodeArtifact,
@@ -812,13 +741,13 @@ impl UnitFacts {
         results: Vec<UnitOut>,
         attribution: bool,
         out: &mut String,
-        pending_inits: &mut Vec<(Ustr, Ustr, String)>,
+        pending_inits: &mut Vec<Initializer<String>>,
     ) {
         self.rejections
             .extend(results.iter().filter_map(|u| u.hard_error.clone()));
         for u in results {
             out.push_str(&u.lua);
-            if let Some(facts) = u.refs {
+            if let Some(facts) = u.init_bodies {
                 self.facts.push(facts);
             }
             if let Some(pi) = u.pending_init {
@@ -840,7 +769,7 @@ impl UnitFacts {
 struct FoldedUnits {
     decorator_lua: String,
     globals_lua: String,
-    pending_inits: Vec<(Ustr, Ustr, String)>,
+    pending_inits: Vec<Initializer<String>>,
     facts: UnitFacts,
 }
 
@@ -899,7 +828,6 @@ pub(super) struct EarlyAssembly {
     // Results, reported where assembly reports them, so body rejections come first.
     global_layout: Result<String, String>,
     globals_directory: Result<GlobalsDirectoryLua, CompilerError>,
-    leaf_owner: Result<FxHashMap<Ustr, Ustr>, CompilerError>,
 }
 
 impl EarlyAssembly {
@@ -923,14 +851,7 @@ pub(super) fn prepare_early_assembly(
             let scaffold_time = ts.elapsed();
             let global_layout = skull_mir::global_storage::global_layout_id(ws, scx);
             let globals_directory = globals_directory_lua(ws, scx, cg, global_accessors);
-            let leaf_owner = global_leaf_owners(ws, scx);
-            (
-                scaffold,
-                scaffold_time,
-                global_layout,
-                globals_directory,
-                leaf_owner,
-            )
+            (scaffold, scaffold_time, global_layout, globals_directory)
         },
         || {
             let decorators = DecoratorTable::collect(ws);
@@ -948,7 +869,7 @@ pub(super) fn prepare_early_assembly(
             (decorators, units)
         },
     );
-    let (scaffold, scaffold_time, global_layout, globals_directory, leaf_owner) = scaffold;
+    let (scaffold, scaffold_time, global_layout, globals_directory) = scaffold;
     let (decorators, units) = units;
     EarlyAssembly {
         scaffold,
@@ -957,7 +878,6 @@ pub(super) fn prepare_early_assembly(
         units,
         global_layout,
         globals_directory,
-        leaf_owner,
     }
 }
 
@@ -988,7 +908,6 @@ pub(super) fn assemble(
         units,
         global_layout,
         globals_directory,
-        leaf_owner,
     } = early.unwrap_or_else(|| {
         prepare_early_assembly(
             ws,
@@ -1040,8 +959,7 @@ pub(super) fn assemble(
     let (definitions_lua, binds_lua, init_ordering, mut runtime_refs, enum_names_lua) = {
         let unit_demands = std::mem::take(&mut asm.needed_specs);
         let mut order = DefinitionOrder::default();
-        let mut facts: Vec<(Ustr, &Chunk)> = Vec::new();
-        asm.push_function_definitions(ws, cache, &needed_foreign, &mut order, &mut facts);
+        asm.push_function_definitions(ws, cache, &needed_foreign, &mut order);
         let declared = order.emitted.len();
         let mut demands: Vec<&Instance> = unit_demands
             .iter()
@@ -1112,13 +1030,22 @@ pub(super) fn assemble(
                                                 .flat_map(|c| c.allocation_bodies.iter().cloned()),
                                         );
                                     }
+                                    let checks = skull_mir::verify::checks_enabled();
+                                    let summaries = order
+                                        .emitted
+                                        .iter()
+                                        .filter_map(|chunk| chunk.init_bodies.as_deref());
+                                    let unexamined = order
+                                        .emitted
+                                        .iter()
+                                        .filter(|chunk| checks && chunk.init_bodies.is_none())
+                                        .map(|chunk| chunk.name);
                                     InitOrdering {
-                                        reach: transitive_global_reads(
-                                            &pending_inits,
-                                            unit_facts,
-                                            &facts,
+                                        lines: skull_mir::init::order(
+                                            pending_inits,
+                                            unit_facts.iter().chain(summaries),
+                                            unexamined,
                                         ),
-                                        leaf_owner,
                                         static_resets: static_reset_lines(ws, scx, all_statics),
                                     }
                                 },
@@ -1260,7 +1187,6 @@ pub(super) fn assemble(
     asm.push_initializers(
         ws,
         cache,
-        pending_inits,
         init_ordering,
         &decorators,
         has_code_slot_publication,

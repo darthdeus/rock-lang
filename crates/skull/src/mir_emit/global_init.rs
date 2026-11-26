@@ -1,53 +1,21 @@
 use super::*;
 
-/// The globals a function reads directly and the functions it calls, from
-/// blocks reachable from `mf.entry` only: a lambda body runs when the
-/// closure is called, not at load time.
-pub(super) fn direct_refs(ws: &Workspace, cg: &CodegenCtx, mf: &MirFunc) -> (Vec<Ustr>, Vec<Ustr>) {
-    let mut globals = Vec::new();
-    let mut calls = Vec::new();
-    let mut seen = vec![false; mf.blocks.len()];
-    let mut stack = vec![mf.entry];
-    while let Some(b) = stack.pop() {
-        if std::mem::replace(&mut seen[skull_mir::cfg::dense::bx(b)], true) {
-            continue;
-        }
-        let block = &mf.blocks[b];
-        for &iid in &block.insts {
-            match &mf.insts[iid] {
-                Inst::Global(n) => globals.push(*n),
-                Inst::Call { func, .. } | Inst::CallMulti { func, .. } => {
-                    calls.push(cg.mangled_name(ws, *func));
-                }
-                _ => {}
-            }
-        }
-        match &block.term {
-            Term::Goto(t) => stack.push(*t),
-            Term::Branch {
-                then_bb, else_bb, ..
-            } => {
-                stack.push(*then_bb);
-                stack.push(*else_bb);
-            }
-            Term::Yield { resume, .. } => stack.push(*resume),
-            Term::Return(_) | Term::Unreachable => {}
-        }
-    }
-    (globals, calls)
-}
-
-pub(super) fn sort_global_init_lines(
-    inits: Vec<PendingInit<String>>,
-    leaf_owner: &FxHashMap<Ustr, Ustr>,
-) -> Result<Vec<String>, CompilerError> {
-    skull_mir::reach::order_global_inits(inits, leaf_owner).map_err(|stuck| {
-        let names: Vec<&str> = stuck.iter().map(|name| name.as_str()).collect();
-        CompilerError::new_no_location(format!(
-            "skull: global initializers are mutually recursive: {}",
-            names.join(", ")
-        ))
-    })
+pub(super) fn record_init_body(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    cg: &CodegenCtx,
+    mf: &MirFunc,
+    key: Ustr,
+) -> InitBodies {
+    let mut facts = InitBodies::default();
+    facts.record(ws, mf, key, &|body, iid, func| {
+        let name = match body.spec_bindings.get(&iid) {
+            Some(instance) => cg.instance_symbol(ws, scx.interner(), instance),
+            None => cg.mangled_name(ws, func),
+        };
+        skull_mir::init::callee(ws, func, Some(name))
+    });
+    facts
 }
 
 const LUA_INIT_PART_BYTES: usize = 32 * 1024;
@@ -96,49 +64,56 @@ pub(super) fn state_initializer_lua(init_lines: &[String]) -> String {
     out
 }
 
-/// A `nobox` global's storage is its leaves, bound from the initializer's
-/// multiple return; the minted leaf names go through the collision sink.
+fn global_init_storage(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    g: &bone_semantic::hir::GlobalDef,
+) -> Result<(Ustr, Option<Vec<Ustr>>), CompilerError> {
+    let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
+        .map_err(|e| CompilerError::new_no_location(e.message))?;
+    let symbol = skull_mir::mangle::symbol_of_key(g.name);
+    Ok((symbol, plan.leaf_names(symbol)))
+}
+
 pub(super) fn global_init_target(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
     cg: &CodegenCtx,
     g: &bone_semantic::hir::GlobalDef,
 ) -> Result<String, CompilerError> {
-    let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
-        .map_err(|e| CompilerError::new_no_location(e.message))?;
-    let symbol = skull_mir::mangle::symbol_of_key(g.name);
-    let Some(leaves) = plan.leaf_names(symbol) else {
-        return Ok(symbol.to_string());
+    let (symbol, leaves) = global_init_storage(ws, scx, g)?;
+    Ok(init_target_text(cg, symbol, leaves.as_deref()))
+}
+
+/// A `nobox` global binds the initializer's multiple return to its leaves.
+fn init_target_text(cg: &CodegenCtx, symbol: Ustr, leaves: Option<&[Ustr]>) -> String {
+    let Some(leaves) = leaves else {
+        return symbol.to_string();
     };
-    Ok(leaves
+    leaves
         .iter()
         .map(|l| cg.mint_synthetic(l.to_string()))
         .collect::<Vec<_>>()
-        .join(", "))
+        .join(", ")
 }
 
 /// Runs only when this load created the global storage: a program loaded over
 /// live storage keeps every value the running program wrote.
 fn global_init_line(
-    ws: &Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
     cg: &CodegenCtx,
-    g: &bone_semantic::hir::GlobalDef,
+    name: Ustr,
+    leaves: Option<&[Ustr]>,
     init: &str,
 ) -> Result<String, CompilerError> {
-    let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty).map_err(|_| {
-        CompilerError::new_no_location(format!("no storage plan for global `{}`", g.name))
-    })?;
     let slot = |leaf: Ustr| {
         cg.state_slot(leaf).ok_or_else(|| {
             CompilerError::new_no_location(format!(
-                "global `{}` has no compiler-owned storage slot for `{leaf}`",
-                g.name
+                "global `{name}` has no compiler-owned storage slot for `{leaf}`"
             ))
         })
     };
     let cell = cg.state_table();
-    match plan.leaf_names(skull_mir::mangle::symbol_of_key(g.name)) {
+    match leaves {
         Some(leaves) => {
             let mut line = String::from("if __rock_globals_fresh then\n");
             line.push_str(&format!("  local __rock_init_values = {{ {init} }}\n"));
@@ -154,7 +129,7 @@ fn global_init_line(
         }
         None => Ok(format!(
             "if __rock_globals_fresh then {cell}[{}] = {init} end\n",
-            slot(g.name)?
+            slot(name)?
         )),
     }
 }
@@ -408,35 +383,32 @@ pub(super) fn emit_global_unit(
             if returned.is_some() || unread {
                 lua.clear();
             }
-            // Read after closure conversion: a lambda's global reads run when it is
-            // called, so they are not init-ordering constraints.
             emit_lowered(
                 ws,
                 scx.interner(),
-                cg,
                 &mut out,
                 &mf,
                 lua,
                 &init_name,
-                Some(key),
                 Duration::ZERO,
             );
             out.attribution.times = out.times;
             if unread {
                 return out;
             }
-            let target = match global_init_target(ws, scx, cg, g) {
-                Ok(target) => target,
+            let (symbol, leaves) = match global_init_storage(ws, scx, g) {
+                Ok(storage) => storage,
                 Err(e) => {
                     out.hard_error = Some(e);
                     return out;
                 }
             };
+            let target = init_target_text(cg, symbol, leaves.as_deref());
             // A `const` init runs unguarded so an edited literal shows on reload.
             let line = if g.is_const {
                 format!("{target} = {init}\n")
             } else {
-                match global_init_line(ws, scx, cg, g, &init) {
+                match global_init_line(cg, g.name, leaves.as_deref(), &init) {
                     Ok(line) => line,
                     Err(error) => {
                         out.hard_error = Some(error);
@@ -444,7 +416,13 @@ pub(super) fn emit_global_unit(
                     }
                 }
             };
-            out.pending_init = Some((g.name, key, line));
+            out.init_bodies = Some(record_init_body(ws, scx, cg, &mf, key));
+            out.pending_init = Some(Initializer {
+                name: g.name,
+                body: key,
+                leaves: leaves.unwrap_or_default(),
+                item: line,
+            });
         }
         Ok(None) => {}
         Err(e) => out.hard_error = Some(e),

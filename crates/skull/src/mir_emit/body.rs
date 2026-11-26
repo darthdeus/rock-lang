@@ -33,6 +33,7 @@ fn emit_coroutine_chunk(
     name: &str,
     mf: &mut MirFunc,
     mut times: PhaseTimes,
+    collect_init: bool,
 ) -> Result<Chunk, CompilerError> {
     let cleanup_before = mir_live_instructions(mf);
     let tc = Instant::now();
@@ -67,6 +68,8 @@ fn emit_coroutine_chunk(
             ),
         )
     })?;
+    let init_bodies =
+        collect_init.then(|| record_init_body(ws, scx, cg, mf, Ustr::from(name)).into());
     let (lua, code_artifact, allocation_bodies, mut deps, statics) =
         crate::coroutine_emit::emit_coroutine_with_artifact(ws, cg, scx, f, &plan, mf)?;
     times.emit = te.elapsed();
@@ -88,8 +91,7 @@ fn emit_coroutine_chunk(
         allocation_bodies,
         embedded_deps: deps.clone(),
         deps,
-        direct_globals: Vec::new(),
-        direct_calls: Vec::new(),
+        init_bodies,
         times,
         attribution: None,
         statics,
@@ -109,6 +111,7 @@ pub(super) fn emit_body_chunk(
     instance: &Instance,
     specialized_name: Option<&str>,
     inline_cache: &mut skull_transform::InlineCache,
+    collect_init: bool,
 ) -> Result<Chunk, CompilerError> {
     let fref = instance.func;
     let f = &ws.module(fref.module).functions[fref.func];
@@ -163,7 +166,8 @@ pub(super) fn emit_body_chunk(
         }
     };
     if f.is_coroutine {
-        let mut chunk = emit_coroutine_chunk(ws, cg, scx, plan, f, name, &mut mf, times)?;
+        let mut chunk =
+            emit_coroutine_chunk(ws, cg, scx, plan, f, name, &mut mf, times, collect_init)?;
         attribution.mir_instructions = mf.insts.len();
         attribution.times = chunk.times;
         chunk.attribution = Some(Box::new(attribution));
@@ -211,6 +215,7 @@ pub(super) fn emit_body_chunk(
         deps,
         times,
         attribution,
+        collect_init,
     )
 }
 
@@ -226,6 +231,7 @@ fn finish_body_chunk(
     mut deps: FxHashSet<FuncRef>,
     mut times: PhaseTimes,
     mut attribution: UnitAttribution,
+    collect_init: bool,
 ) -> Result<Chunk, CompilerError> {
     let tv = Instant::now();
     skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
@@ -251,12 +257,6 @@ fn finish_body_chunk(
     let mut code_artifact =
         skull_mir::code_identity::CodeArtifact::from_mir_tree(&mf, ws, scx.interner());
     code_artifact.set_body_names(&mf, name);
-    // Global-init ordering is stated over declarations, not specializations.
-    let (direct_globals, direct_calls) = if ordinary {
-        direct_refs(ws, cg, &mf)
-    } else {
-        (Vec::new(), Vec::new())
-    };
     times.validation += tv.elapsed();
     times.validation_work = true;
     let bind = skull_codegen_lua::callee_binding_plan(ws, cg, scx.interner(), name, self_ref, &mf);
@@ -289,6 +289,8 @@ fn finish_body_chunk(
         }),
         &mut lua,
     )?;
+    let init_bodies =
+        collect_init.then(|| record_init_body(ws, scx, cg, &mf, Ustr::from(name)).into());
     attribution.mir_instructions = mf.insts.len();
     attribution.times = times;
     deps.extend(abi_deps.keys().copied());
@@ -302,8 +304,7 @@ fn finish_body_chunk(
         allocation_bodies,
         embedded_deps: embedded_deps.unwrap_or_else(|| deps.clone()),
         deps,
-        direct_globals,
-        direct_calls,
+        init_bodies,
         times,
         statics,
         calls: skull_mir::reach::call_targets(&mf),
@@ -416,6 +417,8 @@ impl BodyEmitter<'_> {
                 let mut next_inherited = inherited_statics.to_vec();
                 next_inherited.extend(nf.statics.iter().cloned());
                 self.emit_nested(&mut children, &next_inherited, chunk.as_deref_mut(), lua)?;
+                // The initializer summary walks the finalized tree.
+                nf.nested_fns = children;
             } else {
                 // The unit still needs its whole MIR tree to record code identities.
                 self.emit_nested(&mut nf.nested_fns, inherited_statics, None, lua)?;

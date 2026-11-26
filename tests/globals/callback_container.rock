@@ -1,0 +1,23 @@
+global items: [fn() -> int] = collect_callbacks()
+global seed: int = items.len + 12
+
+fn collect_callbacks() -> [fn() -> int] {
+    let values: [fn() -> int] = []
+    values.push(() => seed)
+    return values
+}
+
+global callbacks: Map<string, fn() -> int> = make_map()
+global map_seed: int = callbacks.len() + 6
+
+fn make_map() -> Map<string, fn() -> int> {
+    let map: Map<string, fn() -> int> = map_new()
+    map["read"] = () => map_seed
+    return map
+}
+
+@test
+fn storing_callbacks_in_containers_does_not_run_them() {
+    assert_eq(items[0](), 13)
+    assert_eq(callbacks["read"](), 7)
+}

@@ -1,4 +1,5 @@
 use super::*;
+use skull_mir::reach::PendingInit;
 
 /// Canonical instantiation spellings are injective.
 fn overlay_order_key(
@@ -276,7 +277,7 @@ fn assemble_overlay(
                         .iter()
                         .filter(|name| crate::is_enum_names_global(name)),
                 );
-                unit.pending_init.map(|(_, _, line)| line).ok_or_else(|| {
+                unit.pending_init.map(|init| init.item).ok_or_else(|| {
                     CompilerError::new_no_location(format!(
                         "changed global `{}` produced no initializer plan",
                         a.name
@@ -285,7 +286,12 @@ fn assemble_overlay(
             };
             inits.push(PendingInit {
                 name: a.name,
-                deps: a.reach.iter().copied().collect(),
+                deps: a
+                    .reach
+                    .iter()
+                    .copied()
+                    .filter(|&dep| dep != a.name)
+                    .collect(),
                 item: line,
             });
         }
@@ -293,7 +299,11 @@ fn assemble_overlay(
         overwritten_globals.extend(unit_refs.iter().map(ToString::to_string));
         out.push_str(&crate::enum_names_defs(ws, &unit_refs));
 
-        out.push_str(&sort_global_init_lines(inits, &FxHashMap::default())?.concat());
+        // An overlay has no initializer value flow for the globals that remain
+        // live. Keep the conservative source reach used to select affected consts.
+        let lines = skull_mir::reach::order_global_inits(inits, &FxHashMap::default())
+            .map_err(skull_mir::init::cycle_error)?;
+        out.push_str(&lines.concat());
     }
     let d_const_inits = t_const_inits.elapsed();
 

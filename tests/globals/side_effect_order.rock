@@ -1,0 +1,22 @@
+global visits: [int] = []
+global first: int = read_seed()
+global second: int? = make_seed()
+
+@nomangle fn invoke_optional(read: fn() -> int?) -> int? { return read() }
+
+fn read_seed() -> int {
+    visits.push(2)
+    return invoke_optional(() => second) ?? -1
+}
+
+fn make_seed() -> int? {
+    visits.push(1)
+    return 7
+}
+
+@test
+fn dependency_order_applies_to_the_initializer_side_effects() {
+    assert_eq(visits[0], 1)
+    assert_eq(visits[1], 2)
+    assert_eq(first, 7)
+}
