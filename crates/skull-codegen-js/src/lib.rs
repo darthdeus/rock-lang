@@ -1342,6 +1342,10 @@ function __c_g(x, P, alt) {
   if (x === -Infinity) return "-inf";
   var neg = x < 0 || (x === 0 && 1 / x === -Infinity);
   var ax = Math.abs(x);
+  if (!alt && Number.isInteger(P) && P >= 1 && P <= 100 &&
+      Number.isSafeInteger(ax) && ax < 10 ** P) {
+    return (neg ? "-" : "") + ax;
+  }
   var strip = function (t) { return alt ? t : t.replace(/0+$/, ""); };
   var point = function (t) { return (t || alt) ? "." + t : ""; };
   var r = ax === 0 ? { digits: "0".repeat(P), E: 0 } : __bigdigits(ax, P);
@@ -1511,6 +1515,12 @@ function __c_f(x, prec) {
   if (x === -Infinity) return "-inf";
   var neg = x < 0 || (x === 0 && 1 / x === -Infinity);
   var ax = Math.abs(x);
+  // Scaling by a binary power is exact here. A half-integer identifies a
+  // decimal tie, where toFixed may disagree with printf's half-even rule.
+  if (ax < 1e21 && Number.isInteger(prec) && prec >= 0 && prec <= 100 &&
+      (ax * 2 ** prec) % 1 !== 0.5) {
+    return (neg ? "-" : "") + ax.toFixed(prec);
+  }
   var dv = new DataView(new ArrayBuffer(8));
   dv.setFloat64(0, ax);
   var hi = dv.getUint32(0), lo = dv.getUint32(4);
