@@ -151,6 +151,54 @@ impl ProjectFixture {
 }
 
 #[test]
+fn changed_capture_layout_routes_to_a_restart() {
+    let source = r#"
+co fn produce() -> Coroutine<int> {
+    let callbacks: [fn() -> int] = []
+    for i in 0..2 {
+        let n = i
+        callbacks.push(() => n)
+        yield i
+        yield n
+    }
+    for i in 0..callbacks.len() { yield callbacks[i]() }
+}
+fn main() {
+    let stream = produce()
+    for _ in 0..6 { print(stream.resume()) }
+}
+"#;
+    let changed = source.replace("() => n", "() => { n += 1; n }");
+    let mut fx = ProjectFixture::boot(source);
+    let original = fx.main_text();
+    for next in [&changed, source] {
+        let reload = fx.edit(next).expect("valid capture-layout change");
+        assert!(
+            matches!(reload, super::SkullReload::FullRequired { .. }),
+            "{reload:?}"
+        );
+        assert!(
+            !fx.incremental.exists(),
+            "incompatible overlay must not publish"
+        );
+        fx.force_full().unwrap();
+        let fresh = fx.path("fresh.lua");
+        super::IncrementalProject::init(
+            fx.dir.path().to_str().unwrap(),
+            &fresh,
+            &fx.path("fresh-overlay.lua"),
+        )
+        .unwrap();
+        assert_eq!(fx.main_text(), std::fs::read_to_string(fresh).unwrap());
+    }
+    assert_eq!(
+        fx.main_text(),
+        original,
+        "reverting the edit must restore the artifact"
+    );
+}
+
+#[test]
 fn live_reload_applies_a_cross_file_macro_to_function_change_atomically() {
     let main = "fn main() { print(bias()) }\n";
     let mut fx = ProjectFixture::boot_files(&[

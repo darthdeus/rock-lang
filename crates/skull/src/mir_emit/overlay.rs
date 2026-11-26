@@ -402,10 +402,39 @@ pub fn emit_overlay_with_span_edits(
     reinferred: &[(ModuleId, BodyOwner)],
     edits: &[crate::instance_graph::TextEditDelta],
 ) -> Result<MirEmit, CompilerError> {
+    emit_reload_overlay(ws, cache, reinferred, edits).map_err(OverlayError::into_diagnostic)
+}
+
+pub enum OverlayError {
+    Compile(CompilerError),
+    RestartRequired(&'static str),
+}
+
+impl OverlayError {
+    pub fn into_diagnostic(self) -> CompilerError {
+        match self {
+            Self::Compile(error) => error,
+            Self::RestartRequired(reason) => CompilerError::new_no_location(reason),
+        }
+    }
+}
+
+impl From<CompilerError> for OverlayError {
+    fn from(error: CompilerError) -> Self {
+        Self::Compile(error)
+    }
+}
+
+pub fn emit_reload_overlay(
+    ws: &Workspace,
+    cache: &mut SkullEmitCache,
+    reinferred: &[(ModuleId, BodyOwner)],
+    edits: &[crate::instance_graph::TextEditDelta],
+) -> Result<MirEmit, OverlayError> {
     if let Some(err) =
         SkullEmitCache::combine_errors(skull_mir::lua_interop::edited_errors(ws, reinferred))
     {
-        return Err(err);
+        return Err(err.into());
     }
     cache.concrete.detach_plan_store();
     let t0 = Instant::now();
@@ -421,7 +450,7 @@ pub fn emit_overlay_with_span_edits(
     let (affected, update, added_errors) = cache.update_chunk_cache(ws, reinferred, edits)?;
     let d_chunk = t_chunk.elapsed();
     if let Some(err) = SkullEmitCache::combine_errors(added_errors) {
-        return Err(err);
+        return Err(err.into());
     }
     let shader_changed = shader_changed || cache.shader_delta_affects_view(&update);
     if shader_changed {
@@ -453,8 +482,8 @@ pub fn emit_overlay_with_span_edits(
         .code_artifact
         .compatible_overlay(&next_code_artifact)
     {
-        return Err(CompilerError::new_no_location(
-            "Rock CodeRef compatibility requires a safe restart".to_string(),
+        return Err(OverlayError::RestartRequired(
+            "Rock CodeRef compatibility requires a safe restart",
         ));
     }
     let t_layout = Instant::now();
@@ -468,8 +497,8 @@ pub fn emit_overlay_with_span_edits(
         let layout = skull_mir::global_storage::global_layout_id(ws, &cache.scx)
             .map_err(CompilerError::new_no_location)?;
         if cache.edit.global_layout.as_deref() != Some(layout.as_str()) {
-            return Err(CompilerError::new_no_location(
-                "Rock global layout changed; restart required".to_string(),
+            return Err(OverlayError::RestartRequired(
+                "Rock global layout changed; restart required",
             ));
         }
     }
@@ -512,7 +541,7 @@ pub fn emit_overlay_with_span_edits(
     let t_asm = t3.elapsed();
     // A newly colliding synthetic name is not safe to deliver as an overlay.
     if let Some(err) = cache.cg.take_rejection() {
-        return Err(err);
+        return Err(err.into());
     }
     emit.phases.extend([
         ("CodegenCtx::new", t_cg),

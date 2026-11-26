@@ -2374,7 +2374,7 @@ impl IncrementalProject {
         main_path: &std::path::Path,
         incremental_path: &std::path::Path,
     ) -> Result<SkullReload> {
-        self.publish_edit(main_path, incremental_path, "disk edit", |project| {
+        self.publish_edit(main_path, incremental_path, "disk edit", true, |project| {
             project.recompile_for_publication(changed)
         })
     }
@@ -2386,9 +2386,13 @@ impl IncrementalProject {
         main_path: &std::path::Path,
         incremental_path: &std::path::Path,
     ) -> Result<SkullReload> {
-        self.publish_edit(main_path, incremental_path, "in-memory edit", |project| {
-            project.apply_edit_for_publication(path, new_text)
-        })
+        self.publish_edit(
+            main_path,
+            incremental_path,
+            "in-memory edit",
+            false,
+            |project| project.apply_edit_for_publication(path, new_text),
+        )
     }
 
     fn publish_edit(
@@ -2396,6 +2400,7 @@ impl IncrementalProject {
         main_path: &std::path::Path,
         incremental_path: &std::path::Path,
         edit: &str,
+        can_restart: bool,
         change: impl FnOnce(
             &mut crate::live_project::LiveProject,
         ) -> Result<(
@@ -2404,7 +2409,7 @@ impl IncrementalProject {
         )>,
     ) -> Result<SkullReload> {
         let (update, snapshot) = change(&mut self.project)?;
-        let result = self.route_and_emit(update, main_path, incremental_path);
+        let result = self.route_and_emit(update, main_path, incremental_path, can_restart);
         self.project
             .finish_publication(snapshot, result, edit, |ws| {
                 self.cache.rollback_body_edit(ws)
@@ -2451,6 +2456,7 @@ impl IncrementalProject {
         update: crate::live_project::LiveUpdate,
         main_path: &std::path::Path,
         incremental_path: &std::path::Path,
+        can_restart: bool,
     ) -> Result<SkullReload> {
         let (full, reinferred, span_edits, cook_ms) = match update {
             crate::live_project::LiveUpdate::NoChange => return Ok(SkullReload::NoChange),
@@ -2553,15 +2559,22 @@ impl IncrementalProject {
                 .begin_body_edit_transaction(&reinferred, &span_edits);
             let overlay = {
                 let ws = self.project.workspace();
-                skull::mir_emit::emit_overlay_with_span_edits(
-                    ws,
-                    &mut self.cache,
-                    &reinferred,
-                    &span_edits,
-                )
-                .map_err(|e| {
-                    anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e))
-                })?
+                skull::mir_emit::emit_reload_overlay(ws, &mut self.cache, &reinferred, &span_edits)
+            };
+            let overlay = match overlay {
+                Ok(overlay) => overlay,
+                Err(skull::mir_emit::OverlayError::RestartRequired(reason)) if can_restart => {
+                    self.cache.commit_body_edit_transaction();
+                    return Ok(SkullReload::FullRequired {
+                        reasons: vec![reason.to_string()],
+                    });
+                }
+                Err(error) => {
+                    return Err(anyhow::anyhow!(
+                        "{}",
+                        render_project_err(self.project.sources(), &error.into_diagnostic())
+                    ));
+                }
             };
             if self
                 .cache
