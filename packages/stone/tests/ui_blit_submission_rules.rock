@@ -190,15 +190,24 @@ fn ui_blit_fixture_restores_after_assertion_failure() {
     ui_blit_test_refusal_and_retry()
 }
 
+inline(lua) fn ui_blit_pause_jit() -> bool = """
+    if jit.status() then jit.off(); return true end
+    return false
+"""
+inline(lua) fn ui_blit_resume_jit() = "jit.on()"
+
 fn ui_blit_warmed_allocations(target: GpuTarget) -> (float, int) {
-    __gc_collect_stop()
     stone_lua_counter_install()
-    stone_lua_counter_begin()
-    let kb0 = lua_alloc_gross_request_kb()
-    let calls0 = lua_alloc_allocation_call_count()
+    let split = lua_alloc_split_available()
+    // System LuaJIT may lack the allocation-origin hook.
+    let resume_jit = !split && ui_blit_pause_jit()
+    defer { if resume_jit { ui_blit_resume_jit() } }
     for _ in 0..128 { composite_scaled_ui(target) }
-    let kb = lua_alloc_gross_request_kb() - kb0
-    let calls = lua_alloc_allocation_call_count() - calls0
+    __gc_collect_stop()
+    stone_lua_counter_begin()
+    for _ in 0..128 { composite_scaled_ui(target) }
+    let kb = if split { lua_alloc_origin_bytes(0) / 1024.0 } else { lua_alloc_gross_request_kb() }
+    let calls = if split { lua_alloc_origin_calls(0) } else { lua_alloc_allocation_call_count() }
     stone_lua_counter_end()
     __gc_restart()
     return (kb, calls)
@@ -211,9 +220,8 @@ fn ui_blit_reuses_unobserved_command() {
         ENGINE.show_pipeline_inspector = false
         defer { ENGINE.show_pipeline_inspector = inspector }
         let target = GpuTarget::Canvas(out)
-        let _ = ui_blit_warmed_allocations(target)
         let (kb, calls) = ui_blit_warmed_allocations(target)
         assert(kb < 16.0 && calls < 256,
-            "scaled UI reuses its warmed command: {kb} KiB, {calls} allocations")
+            "scaled UI reuses its warmed command: {kb} KiB, {calls} allocator requests")
     })
 }
