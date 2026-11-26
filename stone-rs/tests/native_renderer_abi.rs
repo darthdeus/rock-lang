@@ -36,6 +36,7 @@ const STONE_RESOURCE_MESH: c_int = 4;
 const STONE_STAGE_RESTORED: u32 = 1 << 0;
 const STONE_STAGE_TARGET_CHANGED: u32 = 1 << 1;
 const STONE_STAGE_SHADER_CHANGED: u32 = 1 << 2;
+const STONE_STAGE_DRAW_BUFFERS_CHANGED: u32 = 1 << 3;
 const STONE_STAGE_UNWOUND: u32 = 1 << 4;
 
 const STONE_CANVAS_RGBA8: c_int = 0;
@@ -98,6 +99,9 @@ extern "C" {
     fn stone_create_canvas(width: c_int, height: c_int, format: c_int, with_depth: bool) -> u64;
     fn stone_set_canvas(handle: u64);
     fn stone_destroy_canvas(handle: u64);
+    fn stone_get_live_canvas_count() -> c_int;
+    fn stone_current_shader_bound() -> bool;
+    fn stone_set_draw_buffer_mask(mask: c_int);
     fn stone_clear_canvas(r: c_float, g: c_float, b: c_float, a: c_float);
     fn stone_set_blend_mode_i(mode: c_int);
     fn stone_set_depth_mode(compare: *const c_char, write: bool);
@@ -670,6 +674,75 @@ unsafe fn texture_lookup_follows_every_live_load_of_a_path() {
     assert_eq!(stone_native_find_texture(second_path.as_ptr()), 0);
 }
 
+/// State a native stage must give back that the probe changes.
+#[derive(Debug, PartialEq)]
+struct PipelineObservation {
+    blend: [i32; 5],
+    ubo_bindings: [(i32, i32, i32); 4],
+    textures: [i32; 2],
+    samplers: [i32; 2],
+    vao: i32,
+    clear_color: [u32; 4],
+    clear_depth: u32,
+}
+
+unsafe fn observe_pipeline(gl: &glow::Context) -> PipelineObservation {
+    let int = |param| gl.get_parameter_i32(param);
+    let mut clear_color = [0.0f32; 4];
+    gl.get_parameter_f32_slice(glow::COLOR_CLEAR_VALUE, &mut clear_color);
+    let mut clear_depth = [0.0f32; 1];
+    gl.get_parameter_f32_slice(glow::DEPTH_CLEAR_VALUE, &mut clear_depth);
+    let mut ubo_bindings = [(0, 0, 0); 4];
+    for (index, slot) in ubo_bindings.iter_mut().enumerate() {
+        let index = index as u32;
+        *slot = (
+            gl.get_parameter_indexed_i32(glow::UNIFORM_BUFFER_BINDING, index),
+            gl.get_parameter_indexed_i32(glow::UNIFORM_BUFFER_START, index),
+            gl.get_parameter_indexed_i32(glow::UNIFORM_BUFFER_SIZE, index),
+        );
+    }
+    let mut textures = [0; 2];
+    let mut samplers = [0; 2];
+    for unit in 0..2 {
+        gl.active_texture(glow::TEXTURE0 + unit as u32);
+        textures[unit] = int(glow::TEXTURE_BINDING_2D);
+        samplers[unit] = int(glow::SAMPLER_BINDING);
+    }
+    gl.active_texture(glow::TEXTURE0);
+    PipelineObservation {
+        blend: [
+            gl.is_enabled(glow::BLEND) as i32,
+            int(glow::BLEND_SRC_RGB),
+            int(glow::BLEND_DST_RGB),
+            int(glow::BLEND_SRC_ALPHA),
+            int(glow::BLEND_DST_ALPHA),
+        ],
+        ubo_bindings,
+        textures,
+        samplers,
+        vao: int(glow::VERTEX_ARRAY_BINDING),
+        clear_color: clear_color.map(f32::to_bits),
+        clear_depth: clear_depth[0].to_bits(),
+    }
+}
+
+unsafe fn target_create_rejects_bad_requests_without_leaking() {
+    let live_before = stone_get_live_canvas_count();
+    let rgba = [STONE_CANVAS_RGBA8; 9];
+    assert_eq!(stone_target_create(8, 8, rgba.as_ptr(), 0, false), 0);
+    assert_eq!(stone_target_create(8, 8, rgba.as_ptr(), 9, false), 0);
+    assert_eq!(stone_target_create(8, 8, std::ptr::null(), 1, false), 0);
+    assert_eq!(stone_target_create(0, 8, rgba.as_ptr(), 1, false), 0);
+    assert_eq!(stone_target_create(8, -1, rgba.as_ptr(), 1, false), 0);
+    for bad in [-1, 4] {
+        let formats = [STONE_CANVAS_RGBA8, bad];
+        assert_eq!(stone_target_create(8, 8, formats.as_ptr(), 2, false), 0);
+    }
+    // Larger than any GL implementation allows: canvas creation fails.
+    assert_eq!(stone_target_create(1 << 20, 8, rgba.as_ptr(), 3, true), 0);
+    assert_eq!(stone_get_live_canvas_count(), live_before);
+}
+
 fn second_native_library_renders_multi_attachment_target_restores_state_and_invalidates_handles() {
     let tmp = tempfile::tempdir().unwrap();
     let plugin_path = compile_second_library(tmp.path());
@@ -696,6 +769,7 @@ fn second_native_library_renders_multi_attachment_target_restores_state_and_inva
         owned_attachments_change_only_through_their_owner();
         stage_restores_every_texture_unit_a_shader_samples(gl);
         texture_lookup_follows_every_live_load_of_a_path();
+        target_create_rejects_bad_requests_without_leaking();
 
         assert!(stone_native_renderer_api(999).is_null());
         let api_ptr = stone_native_renderer_api(STONE_NATIVE_RENDERER_ABI_VERSION);
@@ -783,6 +857,12 @@ fn second_native_library_renders_multi_attachment_target_restores_state_and_inva
         gl.get_parameter_i32_slice(glow::VIEWPORT, &mut entry_viewport);
         let mut entry_scissor = [0i32; 4];
         gl.get_parameter_i32_slice(glow::SCISSOR_BOX, &mut entry_scissor);
+        gl.clear_depth_f32(0.5);
+        let entry_texture_unit1 = gl.create_texture().unwrap();
+        gl.active_texture(glow::TEXTURE1);
+        gl.bind_texture(glow::TEXTURE_2D, Some(entry_texture_unit1));
+        gl.active_texture(glow::TEXTURE0);
+        let entry = observe_pipeline(gl);
 
         let scope = stone_native_stage_begin();
         assert_ne!(scope, 0);
@@ -834,6 +914,33 @@ fn second_native_library_renders_multi_attachment_target_restores_state_and_inva
         );
         assert_eq!(gl.get_parameter_i32(glow::DEPTH_FUNC) as u32, glow::GREATER);
         assert!(!gl.get_parameter_bool(glow::DEPTH_WRITEMASK));
+        assert_eq!(observe_pipeline(gl), entry);
+        assert!(stone_current_shader_bound());
+        let check = stone_native_stage_begin();
+        assert_eq!(stone_native_frame_target(), host_canvas);
+        let (mut cache_w, mut cache_h) = (0, 0);
+        assert!(stone_native_frame_size(&mut cache_w, &mut cache_h));
+        assert_eq!((cache_w, cache_h), (40, 24));
+        assert_eq!(
+            stone_native_stage_end(check),
+            STONE_STAGE_RESTORED,
+            "the stage left GL and Stone's caches in agreement"
+        );
+
+        // Draw buffers are per framebuffer: changing the host's is reported.
+        let scope = stone_native_stage_begin();
+        stone_set_draw_buffer_mask(0b11);
+        let flags = stone_native_stage_end(scope);
+        assert_ne!(flags & STONE_STAGE_DRAW_BUFFERS_CHANGED, 0);
+        assert_eq!(
+            gl.get_parameter_i32(glow::DRAW_BUFFER0) as u32,
+            glow::COLOR_ATTACHMENT0
+        );
+        assert_eq!(gl.get_parameter_i32(glow::DRAW_BUFFER1) as u32, glow::NONE);
+        gl.active_texture(glow::TEXTURE1);
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        gl.active_texture(glow::TEXTURE0);
+        gl.delete_texture(entry_texture_unit1);
 
         // Verify multi-attachment output in the native-owned target.
         let att_id = stone_target_attachment(native_target, 1);

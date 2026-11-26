@@ -248,3 +248,44 @@ fn native_renderer_custom_draw_recovers_from_unended_and_lost_stages() {
         assert(stone_gl_pass_state_end(scope))
     }, world_fixture_traceback)
 }
+
+// Native reflection reports the layout the compiler planned for every
+// uniform block of a published shader.
+@test
+fn native_renderer_reflection_matches_the_compiler_layout() {
+    gpu_test_host()
+    let shader_handle = get_shader_handle(sprite_batch_shader)
+    assert(shader_handle != 0, "sprite_batch_shader must be registered")
+    let planned = SHADER_UNIFORM_BLOCKS.get(sprite_batch_shader).unwrap().blocks
+    assert(planned.len() > 0)
+    assert_eq(stone_shader_uniform_block_count(shader_handle), planned.len())
+    let binding = native_buffer_int(1)
+    let size = native_buffer_int(1)
+    let count = native_buffer_int(1)
+    let offset = native_buffer_int(1)
+    let kind = native_buffer_int(1)
+    let capacity = native_buffer_int(1)
+    let stride = native_buffer_int(1)
+    let name = native_buffer_u8(64)
+    for block in planned {
+        let index = stone_shader_uniform_block_find_by_binding(shader_handle, block.binding)
+        assert(index >= 0, "block {block.block} is reflected")
+        assert_eq(stone_shader_uniform_block_find_by_name(shader_handle, block.block), index)
+        assert(stone_shader_uniform_block_info(shader_handle, index, binding.ptr, size.ptr, count.ptr, name.ptr, 64))
+        assert_eq(binding[0], block.binding)
+        assert_eq(size[0], block.size)
+        assert_eq(count[0], block.members.len())
+        assert_eq(stone_shader_uniform_block_fingerprint(shader_handle, index), block.fingerprint)
+        for i in 0..block.members.len() {
+            let member = block.members[i]
+            assert_eq(stone_shader_uniform_block_member_offset(shader_handle, index, member), block.offsets[i],
+                "{block.block}.{member} offset")
+            assert(stone_shader_uniform_block_member_info(shader_handle, index, i, offset.ptr, kind.ptr,
+                capacity.ptr, stride.ptr))
+            assert_eq(offset[0], block.offsets[i], "{block.block}.{member} offset by index")
+            assert_eq(kind[0], block.kinds[i], "{block.block}.{member} kind")
+            assert_eq(capacity[0], block.capacities[i], "{block.block}.{member} capacity")
+            assert_eq(stride[0], block.strides[i], "{block.block}.{member} stride")
+        }
+    }
+}
