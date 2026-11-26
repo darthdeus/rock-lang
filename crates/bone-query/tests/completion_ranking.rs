@@ -450,3 +450,26 @@ fn test_prefixed_functions_rank_last_in_production_code() {
         assert_ranked(path, &items, order);
     }
 }
+
+#[test]
+fn body_edits_refresh_completion_frequency() {
+    use crate::fixture::{pos, workspace};
+    use bone_query::BoneWorkspace;
+
+    let initial =
+        "fn frequent() -> int { 1 }\nfn references() -> int { 0 }\nfn probe() -> int { frequ }\n";
+    let edited = initial.replace("{ 0 }", "{ frequent() + frequent() + frequent() }");
+    let rank = |ws: &mut BoneWorkspace, text| {
+        ws.completion(crate::fixture::PATH, pos(text, "frequ }", 5))
+            .into_iter()
+            .find(|item| item.label == "frequent")
+            .unwrap()
+            .sort_text
+    };
+    let mut retained = workspace(initial);
+    let initial_rank = rank(&mut retained, initial);
+    retained.update(crate::fixture::PATH, edited.clone());
+    let fresh_rank = rank(&mut workspace(&edited), &edited);
+    assert_ne!(initial_rank, fresh_rank);
+    assert_eq!(rank(&mut retained, &edited), fresh_rank);
+}

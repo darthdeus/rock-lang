@@ -776,8 +776,10 @@ impl BoneWorkspace {
         match proj.session.update_file(path, text) {
             Ok(upd) => {
                 proj.rejected_updates.remove(path);
-                if !matches!(upd.tier, UpdateTier::BodyOnly | UpdateTier::NoChange) {
-                    drop_type_caches = true;
+                match upd.tier {
+                    UpdateTier::NoChange => {}
+                    UpdateTier::BodyOnly => proj.freq = None,
+                    _ => drop_type_caches = true,
                 }
                 let ws = proj.session.workspace();
                 let touched: Vec<String> = upd
