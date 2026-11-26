@@ -51,7 +51,21 @@ impl<'a> Builder<'a> {
         let record = arms
             .into_iter()
             .any(|arm| self.pattern_destructures_record(self.body.match_arm_arena[arm].pattern));
-        let scrut_s = self.lower_scrut(scrut, record)?;
+        let scrut_s = match self.lower_scrut(scrut, record)? {
+            Scrut::Flat {
+                parent,
+                prefix,
+                shape,
+            } if arms
+                .into_iter()
+                .any(|arm| self.body.match_arm_arena[arm].guard.is_some()) =>
+            {
+                // A guard can overwrite the field before the next arm runs.
+                let cells = self.load_flat_cells(parent, prefix, &shape);
+                Scrut::Cells { cells, shape }
+            }
+            other => other,
+        };
         let join = self.f.new_block();
 
         // Over a nullable scrutinee, a structural arm must miss on nil before reading

@@ -1,0 +1,42 @@
+enum Event { None, Start(int, bool), Stop(bool, int) }
+struct State { event: Event }
+value Snapshot { event: Event }
+struct NestedState { snapshot: Snapshot }
+
+fn replace(state: State) -> bool {
+    state.event = Event::Stop(false, 31)
+    return false
+}
+
+fn select(state: State) -> int {
+    return match state.event {
+        Event::Start(_, _) if replace(state) => -1,
+        Event::Start(n, true) => n,
+        Event::Stop(false, n) => 100 + n,
+        _ => -2,
+    }
+}
+
+fn replace_nested(state: NestedState) -> bool {
+    state.snapshot.event = Event::Stop(false, 31)
+    return false
+}
+
+@test fn guard_fallthrough_keeps_the_enum_read_at_match_entry() {
+    let state = State { event: Event::Start(7, true) }
+    assert_eq(select(state), 7)
+    assert(state.event == Event::Stop(false, 31))
+    assert_eq(select(state), 131)
+}
+
+@test fn guard_fallthrough_keeps_a_nested_enum_read() {
+    let state = NestedState { snapshot: Snapshot { event: Event::Start(13, true) } }
+    let selected = match state.snapshot.event {
+        Event::Start(_, _) if replace_nested(state) => -1,
+        Event::Start(n, true) => n,
+        Event::Stop(false, n) => 100 + n,
+        _ => -2,
+    }
+    assert_eq(selected, 13)
+    assert(state.snapshot.event == Event::Stop(false, 31))
+}
