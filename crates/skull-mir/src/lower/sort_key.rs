@@ -1,5 +1,5 @@
-//! `Vec<T>.sort<K>` with a struct or tuple `K` compares leaf by leaf. The stdlib
-//! routes it through `__sort_key_wide` (folded by an `if`) and `__sort_key_lt`.
+//! The typed `Vec<T>.sort<K>` path compares structured keys leaf by leaf
+//! and loads elements whose layout requires their concrete type.
 use super::call::DirectCall;
 use super::*;
 use crate::lower::shape::mono_value_shape;
@@ -217,8 +217,8 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// A splatting `T` reaches the key as slots, which a backend sort handing it
-    /// one stored element cannot supply.
+    /// A splatting tuple needs its typed slots. A generic column element in Lua
+    /// needs its concrete instantiation to reconstruct the key's value argument.
     fn sort_takes_leaf_path(&self, key_fn_ty: &MonoTy) -> Result<bool, CompilerError> {
         let MonoTy::Function { params, ret } = key_fn_ty else {
             return Err(self.gap_here("sort key function has no concrete function type"));
@@ -231,7 +231,25 @@ impl<'a> Builder<'a> {
                 .is_some_and(|shape| shape.splats(self.scx.rep_arena())),
             _ => false,
         };
-        Ok(structured_key || splatting_element)
+        let generic_column_element = if self.scx.target() == bone_core::hir::FnBackend::Lua
+            && let Some(
+                element @ MonoTy::App {
+                    ctor: MonoCtor::Nominal(_),
+                    params,
+                },
+            ) = params.first()
+            && !params.is_empty()
+        {
+            let vec_ty = MonoTy::App {
+                ctor: MonoCtor::Array,
+                params: vec![element.clone()],
+            };
+            self.vec_flat_elem_for_type(&vec_ty)?
+                .is_some_and(|(elem, storage)| storage == FlatStorage::Columns && !elem.is_nobox())
+        } else {
+            false
+        };
+        Ok(structured_key || splatting_element || generic_column_element)
     }
 
     pub(crate) fn sort_key_is_structured(&self, key_fn: Idx<Expr>) -> Result<bool, CompilerError> {

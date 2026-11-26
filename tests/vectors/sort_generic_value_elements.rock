@@ -1,0 +1,23 @@
+value GenericSortKey { priority: int, sequence: int }
+value GenericSortRow<T> { key: T, id: int }
+
+fn generic_sort_row(priority: int, id: int) -> GenericSortRow<GenericSortKey> {
+    return GenericSortRow { key: GenericSortKey { priority, sequence: id }, id }
+}
+
+@test
+fn sort_reads_generic_value_elements_without_mutating_them() {
+    let rows = [generic_sort_row(2, 20), generic_sort_row(1, 10), generic_sort_row(3, 30)]
+    rows.sort(row => {
+        let priority = row.key.priority
+        row.key.priority = 99
+        return priority
+    })
+
+    for i in 0..rows.len {
+        let expected = i + 1
+        assert_eq(rows[i].key.priority, expected)
+        assert_eq(rows[i].key.sequence, expected * 10)
+        assert_eq(rows[i].id, expected * 10)
+    }
+}
