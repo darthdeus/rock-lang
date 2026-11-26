@@ -152,6 +152,7 @@ dependencies = [
  "bone-lints",
  "bone-query",
  "bone-semantic",
+ "log",
  "rock-core",
  "rock-host",
  "rock-stdlib",

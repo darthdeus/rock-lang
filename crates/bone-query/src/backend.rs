@@ -32,6 +32,7 @@ use bone_semantic::prelude::{
     BodyInference, FxHashMap, FxHashSet, InferenceResult, ModuleId, Span, TyId, Workspace,
     is_field_ref_former,
 };
+use rock_core::errors::CompilerErrorCode;
 use skull_parser::CompilerError;
 use ustr::Ustr;
 
@@ -238,6 +239,13 @@ fn load_error_diagnostic(message: String) -> Diagnostic {
         Range::new(Position::new(0, 0), Position::new(0, 1)),
         message,
         rock_core::errors::CompilerErrorLevel::Error,
+    )
+}
+
+fn retry_rejected_edit(error: &CompilerError) -> bool {
+    !matches!(
+        error.code,
+        CompilerErrorCode::SyntaxError | CompilerErrorCode::TokenizerError
     )
 }
 
@@ -472,7 +480,7 @@ impl BoneWorkspace {
             let aliases = rock_host::program_inputs::ns_aliases(graph.as_ref());
             let warm = self.stdlib().clone().map_err(|error| error.message)?;
             // The first file may not parse; update_file below adds it.
-            let session = Session::new_for_editor(warm, Vec::new(), &aliases)
+            let (session, _) = Session::new_for_editor(warm, Vec::new(), &aliases)
                 .map_err(|error| format!("the stdlib does not check: {}", error.message))?;
             let project = BoneProject::new(
                 root,
@@ -515,7 +523,17 @@ impl BoneWorkspace {
     }
 
     pub fn load_project(&mut self, path: &str) {
-        self.batch_load_for_file(path);
+        self.batch_load_for_file(path, None);
+    }
+
+    /// A directory report attempts each manifest root once, including failures
+    /// and roots whose source selection excludes some of the reported paths.
+    pub fn load_project_for_report(&mut self, path: &str) {
+        if !Self::stick_root(path).is_some_and(|root| {
+            self.loaded_roots.contains(&root) || self.source_load_errors.contains_key(&root)
+        }) {
+            self.load_project(path);
+        }
     }
 
     pub fn loaded_module_count(&self) -> usize {
@@ -550,7 +568,7 @@ impl BoneWorkspace {
         out
     }
 
-    fn batch_load_for_file(&mut self, file_path: &str) {
+    fn batch_load_for_file(&mut self, file_path: &str, buffer: Option<&str>) {
         let root = Self::root_for(file_path);
         use rock_host::compilation_units::{load_file, load_project};
 
@@ -576,8 +594,6 @@ impl BoneWorkspace {
                 return;
             }
         };
-        self.source_load_errors.remove(&root);
-        self.loaded_roots.insert(root.clone());
         let files: Vec<_> = project
             .sources
             .files
@@ -585,8 +601,11 @@ impl BoneWorkspace {
             .map(|source| {
                 let mut file = SessionFile::from_source(&source.borrow());
                 file.path = canonicalize_lenient(&file.path);
-                if let Some(text) = self.editor_buffers.get(&file.path) {
-                    file.text.clone_from(text);
+                if let Some(text) = buffer
+                    .filter(|_| file.path == file_path)
+                    .or_else(|| self.editor_buffers.get(&file.path).map(String::as_str))
+                {
+                    file.text = text.to_owned();
                 }
                 file
             })
@@ -597,7 +616,9 @@ impl BoneWorkspace {
             .collect();
         let aliases = project.sources.ns_aliases.unwrap_or_default();
         match Session::new_for_editor(warm, files, &aliases) {
-            Ok(session) => {
+            Ok((session, rejected)) => {
+                self.source_load_errors.remove(&root);
+                self.loaded_roots.insert(root.clone());
                 let mut project = BoneProject::new(
                     &root,
                     session,
@@ -609,34 +630,28 @@ impl BoneWorkspace {
                 );
                 let now = bone_core::prelude::Instant::now();
                 project.module_touched = project.texts.keys().map(|k| (k.clone(), now)).collect();
+                for (path, error) in &rejected {
+                    project.fallbacks.report(
+                        "load_project",
+                        path,
+                        "index source",
+                        &error.message,
+                        "keep checking the rest of the project",
+                    );
+                }
+                project.rejected_updates.extend(rejected);
                 prime_lint_cache(&mut project);
                 self.projects.insert(root, project);
             }
-            Err(e) => {
-                log::warn!(
-                    "batch load failed for `{}` ({e:?}); falling back to per-file indexing",
-                    root.display()
+            Err(error) => {
+                let message = format!(
+                    "Cannot index project `{}`: {}",
+                    root.display(),
+                    error.message
                 );
-                for (p, src) in file_texts {
-                    for (file, diagnostics) in self.update_buffer(&p, &src) {
-                        let errors: Vec<_> = diagnostics
-                            .iter()
-                            .filter(|d| d.severity == Some(DiagnosticSeverity::ERROR))
-                            .map(|d| d.message.as_str())
-                            .collect();
-                        if !errors.is_empty() {
-                            if let Some(proj) = self.project(&file) {
-                                proj.fallbacks.report(
-                                    "load_project",
-                                    &file,
-                                    "per-file update",
-                                    &errors.join("; "),
-                                    "retain last good session; continue indexing other files",
-                                );
-                            }
-                        }
-                    }
-                }
+                log::error!("bone LSP: {message}");
+                self.loaded_roots.remove(&root);
+                self.source_load_errors.insert(root, message);
             }
         }
     }
@@ -668,10 +683,15 @@ impl BoneWorkspace {
         // lands under two keys.
         let path_c = self.canon_cached(path);
         let path = path_c.as_str();
-        if let Some(proj_root) = Self::stick_root(path) {
-            if !self.loaded_roots.contains(&proj_root) {
-                self.batch_load_for_file(path);
-            }
+        if let Some(proj_root) = Self::stick_root(path)
+            && !self.loaded_roots.contains(&proj_root)
+        {
+            // Keep the on-disk snapshot as the last good state on first open.
+            let buffer = self
+                .source_load_errors
+                .contains_key(&proj_root)
+                .then_some(text);
+            self.batch_load_for_file(path, buffer);
         }
 
         if let Some(diagnostic) = self.source_load_diagnostic(path) {
@@ -746,7 +766,8 @@ impl BoneWorkspace {
         }) {
             return vec![(editor_path(path).into_owned(), Vec::new())];
         }
-        if proj.texts.get(path).map(String::as_str) != Some(text) {
+        let unchanged = proj.texts.get(path).map(String::as_str) == Some(text);
+        if !unchanged {
             proj.fallbacks.clear();
         }
         proj.texts.insert(path.to_string(), text.to_string());
@@ -773,7 +794,11 @@ impl BoneWorkspace {
                 log::error!("bone LSP: {}", e.message);
             }
         }
-        match proj.session.update_file(path, text) {
+        let update = match proj.rejected_updates.get(path) {
+            Some(error) if unchanged => Err(error.clone()),
+            _ => proj.session.update_file(path, text),
+        };
+        let retry_rejected = match update {
             Ok(upd) => {
                 proj.rejected_updates.remove(path);
                 match upd.tier {
@@ -793,14 +818,16 @@ impl BoneWorkspace {
                     changed.insert(file);
                 }
                 lint_change = lint_cache_update(ws, path, &upd);
+                let retry_rejected =
+                    !matches!(upd.tier, UpdateTier::NoChange | UpdateTier::BodyOnly);
 
                 // A rejected file keeps its last-good state; retry it after any edit that
                 // could have removed the conflict.
                 let mut retry_paths: Vec<String> = proj
                     .rejected_updates
-                    .keys()
-                    .filter(|rejected| rejected.as_str() != path)
-                    .cloned()
+                    .iter()
+                    .filter(|(_, error)| retry_rejected && retry_rejected_edit(error))
+                    .map(|(path, _)| path.clone())
                     .collect();
                 retry_paths.sort();
                 for rejected_path in retry_paths {
@@ -818,23 +845,30 @@ impl BoneWorkspace {
                         }
                     }
                 }
+                retry_rejected
             }
             Err(e) => {
+                let retry_rejected = !unchanged && retry_rejected_edit(&e);
                 proj.rejected_updates.insert(path.to_string(), e.clone());
                 this_file_parse_err = Some(e);
+                retry_rejected
             }
-        }
-        if proj.rejected_updates.len() > 1
+        };
+        let retryable = proj
+            .rejected_updates
+            .iter()
+            .filter(|(_, error)| retry_rejected_edit(error));
+        if retry_rejected
+            && retryable.clone().nth(1).is_some()
             && proj
                 .session
                 .replace_files(
-                    proj.rejected_updates
-                        .keys()
-                        .map(|path| (path.as_str(), proj.texts[path].as_str())),
+                    retryable.map(|(path, _)| (path.as_str(), proj.texts[path].as_str())),
                 )
                 .is_ok()
         {
-            proj.rejected_updates.clear();
+            proj.rejected_updates
+                .retain(|_, error| !retry_rejected_edit(error));
             this_file_parse_err = None;
             recovered = true;
         }

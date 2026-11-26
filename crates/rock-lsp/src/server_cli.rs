@@ -379,14 +379,11 @@ fn dir_report(dir: &str, diag_fn: DiagFn) -> Result<Value> {
         if bone.file_text(f).is_some() {
             continue;
         }
-        bone.load_project(f);
-        if bone.file_text(f).is_none() {
-            match fs_err::read_to_string(f) {
-                Ok(src) => {
-                    bone.update(f, src);
-                }
-                Err(e) => unreadable.push(json!({ "file": f, "error": e.to_string() })),
-            }
+        bone.load_project_for_report(f);
+        if bone.file_text(f).is_none()
+            && let Err(e) = fs_err::read_to_string(f)
+        {
+            unreadable.push(json!({ "file": f, "error": e.to_string() }));
         }
     }
 

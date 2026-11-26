@@ -83,7 +83,7 @@ fn semantic_recovery_reports_real_cause_and_repaired_request_succeeds() {
 }
 
 #[test]
-fn batch_fallback_reports_failed_per_file_update() {
+fn batch_recovery_reports_rejected_source() {
     let capture = Recording::start();
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"cw7\"\n").unwrap();
@@ -99,7 +99,7 @@ fn batch_fallback_reports_failed_per_file_update() {
         records.iter().any(|record| record.contains("load_project")
             && record.contains(&path)
             && record.contains(cause)),
-        "per-file indexing diagnostics must not be discarded: {records:?}"
+        "rejected source diagnostics must not be discarded: {records:?}"
     );
 
     let good = "fn main() { let count = 1 }\n";

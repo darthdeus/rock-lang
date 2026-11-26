@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use rock_core::errors::CompilerErrorCode;
 use skull_parser::stdlib::ModuleSet;
 use skull_parser::{
     Ast, FunctionBody, GlobalPolicy, ItemKind, MacroRegistry, PackageTag,
@@ -506,7 +507,10 @@ fn parse_with_facts(
     package: Option<PackageTag>,
     global_policy: GlobalPolicy,
 ) -> Result<Ast, CompilerError> {
-    let mut module = skull_parser::parse_module(text, file)?;
+    let mut module = skull_parser::parse_module(text, file).map_err(|error| match error.code {
+        CompilerErrorCode::Unknown => error.with_code(CompilerErrorCode::SyntaxError),
+        _ => error,
+    })?;
     module.package = package;
     module.global_policy = global_policy;
     Ok(module)
@@ -539,15 +543,18 @@ impl Session {
         files: Vec<SessionFile>,
         aliases: &bone_core::modules::NsAliases,
     ) -> Result<Self, CompilerError> {
-        Self::new_with_mode(warm.into(), files, aliases, false)
+        Self::new_with_mode(warm.into(), files, aliases, false, None)
     }
 
+    /// Return the rejected sources alongside the workspace built from the rest.
     pub fn new_for_editor(
         warm: Arc<[Ast]>,
         files: Vec<SessionFile>,
         aliases: &bone_core::modules::NsAliases,
-    ) -> Result<Self, CompilerError> {
-        Self::new_with_mode(warm, files, aliases, true)
+    ) -> Result<(Self, FxHashMap<String, CompilerError>), CompilerError> {
+        let mut rejected = FxHashMap::default();
+        let session = Self::new_with_mode(warm, files, aliases, true, Some(&mut rejected))?;
+        Ok((session, rejected))
     }
 
     fn new_with_mode(
@@ -555,6 +562,7 @@ impl Session {
         files: Vec<SessionFile>,
         aliases: &bone_core::modules::NsAliases,
         editor: bool,
+        mut rejected: Option<&mut FxHashMap<String, CompilerError>>,
     ) -> Result<Self, CompilerError> {
         let mut ws = Workspace::default();
 
@@ -602,7 +610,7 @@ impl Session {
             global_policy,
         } in files
         {
-            if session.files.contains_key(&path) {
+            if session.files.contains_key(&path) || session.declared_facts.contains_key(&path) {
                 comp_error!(
                     Span::unknown(),
                     "bone session: duplicate file `{}` in initial set",
@@ -610,8 +618,24 @@ impl Session {
                 );
             }
 
-            let module =
-                parse_with_facts(&text, ustr(path.as_str()), package.clone(), global_policy)?;
+            let module = match parse_with_facts(
+                &text,
+                ustr(path.as_str()),
+                package.clone(),
+                global_policy,
+            ) {
+                Ok(module) => module,
+                Err(error) => {
+                    let Some(rejected) = rejected.as_deref_mut() else {
+                        return Err(error);
+                    };
+                    session
+                        .declared_facts
+                        .insert(path.clone(), (package, global_policy));
+                    rejected.insert(path, error);
+                    continue;
+                }
+            };
 
             // Looked up, not interned: user modules take their ids after the warm
             // modules, so a warm-alone build interns the warm modules alone.
@@ -647,13 +671,38 @@ impl Session {
             user_modules.push(module);
         }
 
-        let unexpanded = ModuleSet::new(session.warm.clone(), user_modules);
-        session.registry = collect_registry(unexpanded.iter());
-        reject_macro_name_collisions(&unexpanded)?;
-
-        let registry = session.registry.clone();
-        let (ws, _) = session.build(unexpanded, &registry)?;
-        session.ws = ws;
+        let mut unexpanded = ModuleSet::new(session.warm.clone(), user_modules);
+        // Cap full retries so even many independent hard errors cannot cause
+        // quadratic work. Lexer failures have already been collected in one pass.
+        const MAX_BUILD_RETRIES: usize = 8;
+        let mut retries = MAX_BUILD_RETRIES;
+        session.ws = loop {
+            let built = reject_macro_name_collisions(&unexpanded).and_then(|()| {
+                let registry = collect_registry(unexpanded.iter());
+                let (ws, _) = session.build(unexpanded, &registry)?;
+                session.registry = registry;
+                Ok(ws)
+            });
+            match built {
+                Ok(ws) => break ws,
+                Err(error) => {
+                    let Some(rejected) = rejected.as_deref_mut().filter(|_| retries > 0) else {
+                        return Err(error);
+                    };
+                    let path = error.location.file.as_str();
+                    let Some(file) = session.files.remove(path) else {
+                        return Err(error);
+                    };
+                    session.paths.retain(|p| p != path);
+                    session
+                        .declared_facts
+                        .insert(path.to_owned(), (file.package, file.global_policy));
+                    rejected.insert(path.to_owned(), error);
+                    retries -= 1;
+                    unexpanded = session.combined_unexpanded()?;
+                }
+            }
+        };
         session.rebuild_dependents();
 
         Ok(session)
@@ -762,7 +811,8 @@ impl Session {
             })
             .collect();
         files.extend(edits.into_iter().map(|(path, text)| make_file(path, text)));
-        let mut next = Self::new_with_mode(self.warm.clone(), files, &self.aliases, self.editor)?;
+        let mut next =
+            Self::new_with_mode(self.warm.clone(), files, &self.aliases, self.editor, None)?;
         next.ws.comptime_inputs = self.ws.comptime_inputs.clone();
         next.declared_facts = std::mem::take(&mut self.declared_facts);
         *self = next;
@@ -881,6 +931,7 @@ impl Session {
         unexpanded: ModuleSet,
         registry: &MacroRegistry,
     ) -> Result<(Workspace, Vec<ModuleId>), CompilerError> {
+        log::debug!("session build: {} user modules", unexpanded.rest().len());
         debug_assert!(Arc::ptr_eq(unexpanded.shared(), &self.warm));
         let warm_len = self.warm.len();
         // Read from the ASTs being built, not the stored `UserFile`s, so the
