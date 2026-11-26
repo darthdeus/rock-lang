@@ -1121,7 +1121,8 @@ fn stone_poll_all_events() -> bool {
     if !stone_is_initialized() { return false }
     input_update_window_authority()
     let running = true
-    let event = stone_event_new()
+    // Poll handlers consume the fields before the next event overwrites them.
+    static event = stone_event_new()
 
     while stone_poll_event(event) {
         let event_type = get_stone_event_type(event)
