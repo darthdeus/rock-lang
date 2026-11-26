@@ -1503,7 +1503,7 @@ pub(crate) fn do_run_allocation_sites(
     let project_path = rock_engine_host::project::resolve_project_dir(project)?;
     rock_engine_host::engine_build::build_engine_libs(&project_path.to_string_lossy())?;
     let out_dir = sim_output_dir()?;
-    let compiled = compile_sims_with_allocation(
+    let mut compiled = compile_sims_with_allocation(
         project_path.clone(),
         out_dir.path().to_path_buf(),
         Some(&manifest_path),

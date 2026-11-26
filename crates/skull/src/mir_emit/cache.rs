@@ -59,6 +59,7 @@ pub(super) struct IncrementalRepairStats {
 pub(super) enum CacheLifetime {
     Retained,
     OneShot,
+    Snapshot,
 }
 
 pub(super) struct RootSet {
@@ -280,22 +281,68 @@ impl SkullEmitCache {
             .and_then(|snapshot| snapshot.baseline.lifecycle_plan.as_deref())
     }
 
-    pub fn artifact_fingerprint(&self, ws: &Workspace) -> Result<String, CompilerError> {
-        let edit = &self.edit;
-        let (Some(lifecycle), Some(definitions), Some(layout)) = (
-            edit.lifecycle_plan.as_deref(),
-            edit.definition_plan.as_deref(),
-            edit.global_layout.as_deref(),
-        ) else {
-            return Err(CompilerError::new_no_location(
-                "Artifact fingerprint requires retained assembly".to_string(),
-            ));
+    pub fn artifact_fingerprint(&mut self, ws: &Workspace) -> Result<String, CompilerError> {
+        let mut built_specs = Vec::new();
+        // Overlay delivery retains old definitions for existing VMs. The
+        // fingerprint describes the same current assembly as a fresh build.
+        let snapshot = if self.edit.changed_since_full.is_empty()
+            && self.edit.changed_consts_since_full.is_empty()
+        {
+            None
+        } else {
+            Some(assemble(
+                ws,
+                self,
+                &mut built_specs,
+                CacheLifetime::Snapshot,
+                None,
+                None,
+            )?)
         };
-        let reads = artifact_comptime_reads(self, &[], &edit.unit_comptime_reads, true);
+        let edit = &self.edit;
+        let (artifact, lifecycle, definitions, layout, emitted, unit_reads) =
+            if let Some((emit, bodies, reads)) = &snapshot {
+                (
+                    &emit.code_artifact,
+                    &emit.lifecycle_plan,
+                    &emit.definition_plan,
+                    emit.global_layout.as_str(),
+                    bodies,
+                    reads,
+                )
+            } else {
+                let (Some(lifecycle), Some(definitions), Some(layout)) = (
+                    edit.lifecycle_plan.as_deref(),
+                    edit.definition_plan.as_deref(),
+                    edit.global_layout.as_deref(),
+                ) else {
+                    return Err(CompilerError::new_no_location(
+                        "Artifact fingerprint requires retained assembly".to_string(),
+                    ));
+                };
+                (
+                    &edit.code_artifact,
+                    lifecycle,
+                    definitions,
+                    layout,
+                    &edit.emitted,
+                    &edit.unit_comptime_reads,
+                )
+            };
+        let mut reads = self
+            .chunks
+            .iter()
+            .filter(|(body, _)| emitted.contains(*body))
+            .filter_map(|(_, chunk)| chunk.as_ref().ok())
+            .chain(built_specs.iter().map(|(_, chunk)| chunk))
+            .flat_map(|chunk| chunk.comptime_reads.iter().cloned())
+            .collect::<Vec<_>>();
+        reads.extend(unit_reads.globals.values().flatten().cloned());
+        reads.extend(unit_reads.decorators.iter().cloned());
         crate::artifact_fingerprint::compute(
             ws,
             self.scx.interner(),
-            &edit.code_artifact,
+            artifact,
             lifecycle,
             definitions,
             layout,

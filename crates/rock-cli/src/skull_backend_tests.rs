@@ -1033,7 +1033,7 @@ mod force_full_tests {
 
         let fresh_main = fx.path("fresh_main.lua");
         let fresh_inc = fx.path("fresh_incremental.lua");
-        let fresh =
+        let mut fresh =
             IncrementalProject::init(fx.dir.path().to_str().unwrap(), &fresh_main, &fresh_inc)
                 .expect("fresh init v2");
         let main_fresh = std::fs::read_to_string(&fresh_main).expect("fresh main.lua");

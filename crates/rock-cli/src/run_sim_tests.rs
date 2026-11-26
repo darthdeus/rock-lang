@@ -203,7 +203,7 @@ fn reload_lane_reuses_the_compiled_session_and_isolates_its_chunk() {
     let source = project.path().join("main.rock");
     std::fs::write(&source, "@nomangle fn answer() -> int { 41 }\n").unwrap();
     let main = shared.path().join(rock_host::project::MAIN_LUA_FILENAME);
-    let stone = crate::skull_backend::IncrementalProject::init_with_tests(
+    let mut stone = crate::skull_backend::IncrementalProject::init_with_tests(
         project.path().to_str().unwrap(),
         &main,
         &shared.path().join("incremental.lua"),
@@ -212,7 +212,7 @@ fn reload_lane_reuses_the_compiled_session_and_isolates_its_chunk() {
     let original = std::fs::read(&main).unwrap();
     let fingerprint = stone.artifact_fingerprint().unwrap();
     std::fs::remove_file(&source).unwrap();
-    let lane = reload_lane_session(project.path(), true, shared.path(), Some(stone), true)
+    let mut lane = reload_lane_session(project.path(), true, shared.path(), Some(stone), true)
         .expect("reuse without reading source")
         .expect("selected lane");
     assert_eq!(lane.stone.artifact_fingerprint().unwrap(), fingerprint);

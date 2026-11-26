@@ -344,7 +344,7 @@ print(before)
 }
 
 #[test]
-fn fingerprint_includes_new_body_specializations() {
+fn fingerprint_ignores_unpublished_body_specializations() {
     let original =
         "fn identity<T>(value: T) -> T { return value }\nfn main() { let _ = identity(1) }";
     let changed = original.replace(
@@ -357,7 +357,25 @@ fn fingerprint_includes_new_body_specializations() {
     let ws2 = ws_of(&changed);
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "main")]);
     assert!(overlay.code_artifact.entries.len() > baseline.code_artifact.entries.len());
-    assert_ne!(cache.artifact_fingerprint(&ws2).unwrap(), before);
+    assert_eq!(cache.artifact_fingerprint(&ws2).unwrap(), before);
+}
+
+#[test]
+fn fingerprint_ignores_specializations_kept_only_for_live_overlays() {
+    let original = "fn identity<T>(value: T) -> T { return value }
+        fn main() { print(identity(1)) }";
+    let changed = original.replace("print(identity(1))", "print(identity(1.0))");
+    let ws1 = ws_with_stdlib(original);
+    let (_, mut cache) = emit_full_of(&ws1, "retained baseline");
+    let before = cache.artifact_fingerprint(&ws1).unwrap();
+    let ws2 = ws_with_stdlib(&changed);
+    emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "main")]);
+    let (_, mut fresh) = emit_full_of(&ws2, "fresh edited program");
+    let after = cache.artifact_fingerprint(&ws2).unwrap();
+    assert_ne!(after, before);
+    assert_eq!(after, fresh.artifact_fingerprint(&ws2).unwrap());
+    emit_overlay(&ws1, &mut cache, &[body_id(&ws1, "main")]);
+    assert_eq!(cache.artifact_fingerprint(&ws1).unwrap(), before);
 }
 
 #[test]

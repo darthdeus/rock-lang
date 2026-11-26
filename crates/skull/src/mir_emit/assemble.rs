@@ -1298,11 +1298,13 @@ pub(super) fn assemble(
         &definitions_lua,
         &asm.out,
     ]);
-    cache.value_ctors = value_ctors;
+    if lifetime != CacheLifetime::Snapshot {
+        cache.value_ctors = value_ctors;
+    }
     step("assembly: initializers", &mut steps);
     let mut phases = asm.phases();
 
-    let emitted_bodies = if lifetime == CacheLifetime::Retained {
+    let emitted_bodies = if lifetime != CacheLifetime::OneShot {
         emitted_bodies(ws, cache, &needed_foreign, specialized_instances)
     } else {
         FxHashSet::default()
@@ -1315,7 +1317,7 @@ pub(super) fn assemble(
         emits_main,
         ..
     } = asm;
-    if cache.validate_artifact {
+    if cache.validate_artifact && lifetime != CacheLifetime::Snapshot {
         let reads = one_shot_reads
             .unwrap_or_else(|| artifact_comptime_reads(cache, built_specs, &unit_reads, true));
         crate::artifact_fingerprint::validate(ws, &code_artifact, &definition_plan, &reads)

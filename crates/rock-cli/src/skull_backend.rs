@@ -2353,9 +2353,9 @@ impl IncrementalProject {
         self.cache.registered_sim_names(self.project.workspace())
     }
 
-    pub fn artifact_fingerprint(&self) -> Result<String> {
+    pub fn artifact_fingerprint(&mut self) -> Result<String> {
         self.cache
-            .artifact_fingerprint(self.workspace())
+            .artifact_fingerprint(self.project.workspace())
             .map_err(|error| anyhow::anyhow!(error.message))
     }
 
