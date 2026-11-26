@@ -129,6 +129,15 @@ extern "C" {
     fn stone_new_image_from_data(data_handle: u64, filter_mode: c_int) -> u64;
     fn stone_image_update_from_data(image_handle: u64, data_handle: u64) -> bool;
     fn stone_unload_image(handle: u64);
+    fn stone_load_image(
+        path: *const c_char,
+        filter_mode: c_int,
+        flags: c_int,
+        width: c_int,
+        height: c_int,
+    ) -> u64;
+    fn stone_reload_image(handle: u64, path: *const c_char) -> bool;
+    fn stone_native_find_texture(path: *const c_char) -> u64;
     fn stone_destroy_image_data(handle: u64);
     fn stone_mesh_create(
         mode: c_int,
@@ -629,6 +638,31 @@ unsafe fn stage_restores_every_texture_unit_a_shader_samples(gl: &glow::Context)
     stone_destroy_shader(shader);
 }
 
+unsafe fn texture_lookup_follows_every_live_load_of_a_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = |name: &str| {
+        let file = dir.path().join(name);
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]))
+            .save(&file)
+            .unwrap();
+        CString::new(file.to_str().unwrap()).unwrap()
+    };
+    let (first_path, second_path) = (path("first.png"), path("second.png"));
+
+    let first = stone_load_image(first_path.as_ptr(), 0, 0, 0, 0);
+    let again = stone_load_image(first_path.as_ptr(), 0, 0, 0, 0);
+    assert!(first != 0 && again != 0 && first != again);
+    stone_unload_image(again);
+    assert_eq!(stone_native_find_texture(first_path.as_ptr()), first);
+
+    assert!(stone_reload_image(first, second_path.as_ptr()));
+    assert_eq!(stone_native_find_texture(second_path.as_ptr()), first);
+    assert_eq!(stone_native_find_texture(first_path.as_ptr()), 0);
+
+    stone_unload_image(first);
+    assert_eq!(stone_native_find_texture(second_path.as_ptr()), 0);
+}
+
 fn second_native_library_renders_multi_attachment_target_restores_state_and_invalidates_handles() {
     let tmp = tempfile::tempdir().unwrap();
     let plugin_path = compile_second_library(tmp.path());
@@ -654,6 +688,7 @@ fn second_native_library_renders_multi_attachment_target_restores_state_and_inva
         only_published_shaders_are_findable_and_a_failed_reload_keeps_the_live_one();
         owned_attachments_change_only_through_their_owner();
         stage_restores_every_texture_unit_a_shader_samples(gl);
+        texture_lookup_follows_every_live_load_of_a_path();
 
         assert!(stone_native_renderer_api(999).is_null());
         let api_ptr = stone_native_renderer_api(STONE_NATIVE_RENDERER_ABI_VERSION);

@@ -532,8 +532,9 @@ Resource kinds are typed (`STONE_RESOURCE_TARGET = 1`, `SHADER = 2`,
   monotonic non-zero generation (`0` when dead, wrong kind, or after context
   loss). Generations advance on target resize, active-rect change, attachment
   change, texture reload/update, and shader reload.
-- `stone_native_find_shader(name)` and `stone_native_find_texture(path)` resolve
-  registered shaders and loaded images by name/path; `stone_native_target_info`,
+- `stone_native_find_shader(name)` resolves the published program registered
+  under `name`; `stone_native_find_texture(path)` resolves the newest live
+  image loaded or reloaded from `path`; `stone_native_target_info`,
   `stone_native_shader_info`, `stone_native_texture_info`, and
   `stone_native_mesh_info` read current metadata and generation together.
 
