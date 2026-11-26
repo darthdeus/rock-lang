@@ -1,8 +1,3 @@
-pub @nomangle nobox value NativeNavInt {
-    lo: int,
-    hi: int,
-}
-
 pub @nomangle nobox value NativeMeadowGrowth {
     root_x: f32,
     root_y: f32,

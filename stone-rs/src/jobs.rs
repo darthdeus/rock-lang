@@ -208,7 +208,8 @@ impl<W: Send + 'static, R: Send + 'static> Jobs<W, R> {
     }
 
     /// -1 when the handle is unknown or cancelled, 0 while pending, 1 when ready.
-    pub(crate) fn poll(&self, handle: u64) -> i32 {
+    #[cfg(test)]
+    fn poll(&self, handle: u64) -> i32 {
         self.lock_settled(handle, false).status(handle)
     }
 

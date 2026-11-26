@@ -1,24 +1,5 @@
 use stone_core::*;
 
-// Each half of the wire is an int32 (stone-rs NativeNavIntWire). The halves are
-// computed arithmetically, never by letting the FFI truncate an out-of-range
-// double: that conversion is undefined and LuaJIT builds disagree about it.
-pub fn native_nav_int(v: int) -> NativeNavInt {
-    let hi = v ./ 4294967296
-    let low = v - hi * 4294967296
-    let lo = if low > 2147483647 { low - 4294967296 } else { low }
-    return NativeNavInt { lo, hi }
-}
-
-pub fn native_nav_value(v: NativeNavInt) -> int {
-    let lo = if v.lo < 0 { v.lo + 4294967296 } else { v.lo }
-    return lo + v.hi * 4294967296
-}
-
-pub fn native_nav_buffer(n: int) -> NativeBuffer<NativeNavInt> {
-    return native_buffer_alloc(n)
-}
-
 pub @nomangle inline(lua) fn stone_native_library_path() -> string = """
     return os.getenv("ROCK_STONE_LIB") or (ffi.os == "OSX" and "libstone.dylib"
         or ffi.os == "Windows" and "libstone.dll" or "libstone.so")
@@ -32,25 +13,6 @@ pub @nomangle fn stone_native_load() {
 inline(lua) fn stone_native_link() = """
     -- Keep the library alive across reloads and native handle finalizers.
     if not _G.stone then _G.stone = ffi.load(stone_native_library_path()) end
-"""
-
-pub @lua_named struct NativeNavOwner { token: any? = null }
-
-pub inline(lua) fn native_nav_owner(owner: NativeNavOwner, handle: int) = """
-    local function own(id)
-        if id <= 0 then error("native navigation fork failed", 0) end
-        local guard = newproxy(true)
-        local mt = getmetatable(guard)
-        mt.handle = id
-        mt.__gc = function() stone.stone_nav_free(id) end
-        mt.__deepcopy = function() return own(tonumber(stone.stone_nav_fork(id))) end
-        return guard
-    end
-    owner.token = own(handle)
-"""
-
-pub inline(lua) fn native_nav_handle(owner: NativeNavOwner) -> int = """
-    return owner.token and getmetatable(owner.token).handle or 0
 """
 
 @inline inline(lua) fn meadow_word_set(buffer: NativeBufferU8, index: int, value: float, bytes: int, pointer: string) = """
