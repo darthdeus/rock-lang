@@ -832,10 +832,8 @@ impl<'a> Builder<'a> {
                 let vv = match col_value {
                     Some(v) => v,
                     None => {
-                        let v = self.emit_cur(Inst::Load(val_cell));
                         let ty = self.loop_binder_ty(&subs[1], None);
-                        let r = self.loop_element_snapshot(ty, ValueRepr::Scalar(v))?;
-                        self.pack(r)?
+                        self.read_map_entry_value(val_cell, ty)?
                     }
                 };
                 self.bind_for_pattern(&subs[1], vv)?;
@@ -849,10 +847,8 @@ impl<'a> Builder<'a> {
                 let vv = match col_value {
                     Some(v) => v,
                     None => {
-                        let v = self.emit_cur(Inst::Load(val_cell));
                         let ty = self.loop_binder_ty(vars, Some(1));
-                        let r = self.loop_element_snapshot(ty, ValueRepr::Scalar(v))?;
-                        self.pack(r)?
+                        self.read_map_entry_value(val_cell, ty)?
                     }
                 };
                 let pair = ValueRepr::Tuple {
@@ -865,6 +861,21 @@ impl<'a> Builder<'a> {
                 "for-over-Map binds one (item) or two (key, value) vars",
             )),
         }
+    }
+
+    fn read_map_entry_value(
+        &mut self,
+        cell: Idx<Cell>,
+        ty: Option<std::borrow::Cow<'a, MonoTy>>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        // Map storage uses the presence sentinel for unit so the key stays live.
+        let value = if ty.as_deref() == Some(&MonoTy::Unit) {
+            self.emit_cur(Inst::Const(Lit::Nil))
+        } else {
+            self.emit_cur(Inst::Load(cell))
+        };
+        let repr = self.loop_element_snapshot(ty, ValueRepr::Scalar(value))?;
+        self.pack(repr)
     }
 
     pub(crate) fn lower_for_vec(

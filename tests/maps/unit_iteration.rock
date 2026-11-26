@@ -1,0 +1,45 @@
+fn count_unit_entries<T>(entries: Map<int, T>, sample: T) -> int {
+    let count = 0
+    for (_, item) in entries {
+        assert_eq(item, sample)
+        count += 1
+    }
+    return count
+}
+
+@test
+fn map_iteration_exposes_unit_in_all_binding_shapes() {
+    let entries: Map<int, ()> = map_new()
+    entries.insert(1, ())
+    entries.insert(9, ())
+
+    assert_eq(count_unit_entries(entries, ()), 2)
+    let keys = 0
+    for entry in entries {
+        assert(entry.1 == ())
+        keys += entry.0
+    }
+    assert_eq(keys, 10)
+
+    let indices = 0
+    for (i, (_, item)) in enumerate(entries) {
+        assert(item == ())
+        let promoted: ()? = item
+        assert(promoted != null)
+        indices += i
+    }
+    assert_eq(indices, 1)
+}
+
+@test
+fn map_iteration_preserves_present_optional_unit() {
+    let entries: Map<int, ()?> = map_new()
+    entries[1] = ()
+    entries[2] = null
+    let keys = 0
+    for (key, value) in entries {
+        assert(value != null)
+        keys += key
+    }
+    assert_eq(keys, 1)
+}
