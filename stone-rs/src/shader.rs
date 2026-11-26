@@ -211,24 +211,11 @@ pub extern "C" fn stone_shader_register_name(handle: u64, name: *const c_char) -
     if name.is_empty() {
         return false;
     }
-    register_shader_name(handle, name, true)
-}
-
-pub(crate) fn register_shader_name_if_unset(handle: u64, name: &str) {
-    if handle != 0 && !name.is_empty() {
-        let _ = register_shader_name(handle, name, false);
-    }
-}
-
-fn register_shader_name(handle: u64, name: &str, overwrite: bool) -> bool {
     SHADERS.with(|s| {
         let mut map = s.borrow_mut();
         let Some(shader) = map.get_mut(&handle) else {
             return false;
         };
-        if !overwrite && shader.name.is_some() {
-            return true;
-        }
         if let Some(prev) = shader.name.as_deref() {
             if prev != name {
                 SHADER_BY_NAME.with(|by_name| {

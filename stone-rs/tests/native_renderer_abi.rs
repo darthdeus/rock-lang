@@ -489,6 +489,44 @@ unsafe fn stage_scopes_unwind_reject_stale_tokens_and_clear_at_frame_start(gl: &
     stone_destroy_canvas(host);
 }
 
+unsafe fn only_published_shaders_are_findable_and_a_failed_reload_keeps_the_live_one() {
+    let src = CString::new(MRT_SHADER).unwrap();
+    let live = stone_create_shader_from_combined(src.as_ptr());
+    assert_ne!(live, 0);
+    assert!(stone_shader_register_name(live, c"reload_probe".as_ptr()));
+
+    // A reload binds the new program's blocks before it is published.
+    let fresh = stone_create_shader_from_combined(src.as_ptr());
+    assert_ne!(fresh, 0);
+    assert!(stone_shader_bind_uniform_block(
+        fresh,
+        c"reload_probe".as_ptr(),
+        c"ProbeFragU".as_ptr(),
+        2,
+        48,
+        0x1234,
+    ));
+    assert_eq!(stone_native_find_shader(c"reload_probe".as_ptr()), live);
+    // Its layout check fails, so the watcher destroys it unpublished.
+    stone_destroy_shader(fresh);
+    assert_eq!(stone_native_find_shader(c"reload_probe".as_ptr()), live);
+
+    let unpublished = stone_create_shader_from_combined(src.as_ptr());
+    assert!(stone_shader_bind_uniform_block(
+        unpublished,
+        c"never_published".as_ptr(),
+        c"ProbeFragU".as_ptr(),
+        2,
+        48,
+        0x1234,
+    ));
+    assert_eq!(stone_native_find_shader(c"never_published".as_ptr()), 0);
+
+    stone_destroy_shader(unpublished);
+    stone_destroy_shader(live);
+    assert_eq!(stone_native_find_shader(c"reload_probe".as_ptr()), 0);
+}
+
 fn second_native_library_renders_multi_attachment_target_restores_state_and_invalidates_handles() {
     let tmp = tempfile::tempdir().unwrap();
     let plugin_path = compile_second_library(tmp.path());
@@ -511,6 +549,7 @@ fn second_native_library_renders_multi_attachment_target_restores_state_and_inva
 
     with_host(|gl| unsafe {
         stage_scopes_unwind_reject_stale_tokens_and_clear_at_frame_start(gl);
+        only_published_shaders_are_findable_and_a_failed_reload_keeps_the_live_one();
 
         assert!(stone_native_renderer_api(999).is_null());
         let api_ptr = stone_native_renderer_api(STONE_NATIVE_RENDERER_ABI_VERSION);
