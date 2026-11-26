@@ -491,7 +491,8 @@ through a single versioned C function-pointer table:
   scope and snapshots the GL and engine-cached state: bound draw/read
   framebuffers and target cache, draw-buffer mask, viewport, scissor, active
   shader program, indexed uniform-buffer bindings (`0..8`) and generic UBO
-  binding, active texture and texture/sampler bindings (`0..8`), vertex array,
+  binding, active texture and the texture/sampler bindings of every unit a
+  registered shader samples, vertex array,
   blend state, depth state, color mask, clear color/depth, and rasterizer
   toggles (`CULL_FACE`, `STENCIL_TEST`, `POLYGON_OFFSET_FILL`,
   `SAMPLE_ALPHA_TO_COVERAGE`, `RASTERIZER_DISCARD`). It returns a non-zero
@@ -550,6 +551,9 @@ Resource kinds are typed (`STONE_RESOURCE_TARGET = 1`, `SHADER = 2`,
   ownership remains with the native library.
 
 ### Shader uniform-block and texture-slot reflection
+
+Shaders sample texture units `0..32`; `stone_shader_set_texture` refuses a
+unit outside that range with a logged error.
 
 Registered shaders record their uniform-block layouts and `@textures` slot
 assignments in `stone-rs` at publication time:

@@ -8,7 +8,8 @@ use std::cell::{Cell, RefCell};
 use std::ffi::{c_char, c_float, c_int, c_void, CStr};
 use std::num::NonZeroU32;
 
-use crate::gl_state::{BlendGlState, DRAW_BUFFERS};
+use crate::gl_state::{PipelineGlState, DRAW_BUFFERS};
+use crate::shader::MAX_TEXTURE_UNITS;
 use crate::{track_canvas_switch, track_shader_switch, with_gl, DebugGl, CURRENT_SHADER};
 
 pub const STONE_NATIVE_RENDERER_ABI_VERSION: u32 = 1;
@@ -25,7 +26,6 @@ pub const STONE_STAGE_DRAW_BUFFERS_CHANGED: u32 = 1 << 3;
 pub const STONE_STAGE_UNWOUND: u32 = 1 << 4;
 
 const SAVED_UBO_SLOTS: usize = 8;
-const SAVED_TEXTURE_UNITS: usize = 8;
 
 #[derive(Clone, Copy)]
 struct NativeStageState {
@@ -43,39 +43,49 @@ struct NativeStageState {
     ubo_count: usize,
     ubo_slots: [(Option<glow::Buffer>, i32, i32); SAVED_UBO_SLOTS],
     active_texture: u32,
-    tex_unit_count: usize,
-    textures_2d: [Option<glow::Texture>; SAVED_TEXTURE_UNITS],
-    samplers: [Option<glow::Sampler>; SAVED_TEXTURE_UNITS],
+    // Only units some registered shader samples; the rest cannot affect a
+    // later Stone draw.
+    texture_units: u32,
+    textures_2d: [Option<glow::Texture>; MAX_TEXTURE_UNITS],
+    samplers: [Option<glow::Sampler>; MAX_TEXTURE_UNITS],
     vao: Option<glow::VertexArray>,
     draw_buffer_count: usize,
     draw_buffers: [u32; DRAW_BUFFERS],
-    blend: BlendGlState,
-    depth_enabled: bool,
-    depth_func: u32,
-    depth_write: bool,
-    color_mask: [bool; 4],
-    clear_color: [f32; 4],
+    pipeline: PipelineGlState,
     clear_depth: f32,
-    cull_enabled: bool,
     stencil_enabled: bool,
     polygon_offset_fill: bool,
     sample_alpha_to_coverage: bool,
     rasterizer_discard: bool,
 }
 
+#[derive(Clone, Copy)]
+struct GlLimits {
+    ubo_bindings: usize,
+    texture_units: u32,
+    draw_buffers: usize,
+}
+
 thread_local! {
     static NATIVE_STAGE_STACK: RefCell<Vec<(u32, NativeStageState)>> = const { RefCell::new(Vec::new()) };
     static LAST_STAGE_TOKEN: Cell<u32> = const { Cell::new(0) };
+    static GL_LIMITS: Cell<Option<GlLimits>> = const { Cell::new(None) };
 }
 
 pub(crate) fn reset_on_teardown() {
     NATIVE_STAGE_STACK.with(|stack| stack.borrow_mut().clear());
+    GL_LIMITS.with(|limits| limits.set(None));
 }
 
 /// A scope still open at frame start was left by an early return or a script
 /// error; its snapshot describes a frame that is gone.
 pub(crate) fn begin_frame() {
-    let leaked = NATIVE_STAGE_STACK.with(|stack| std::mem::take(&mut *stack.borrow_mut()).len());
+    let leaked = NATIVE_STAGE_STACK.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        let leaked = stack.len();
+        stack.clear();
+        leaked
+    });
     if leaked > 0 {
         crate::log_once!(
             "STONE",
@@ -94,6 +104,31 @@ fn next_stage_token() -> u32 {
     })
 }
 
+unsafe fn gl_limits(gl: &DebugGl) -> GlLimits {
+    GL_LIMITS.with(|cached| {
+        if let Some(limits) = cached.get() {
+            return limits;
+        }
+        let read = |param| gl.get_parameter_i32(param).max(0) as usize;
+        let units = read(glow::MAX_COMBINED_TEXTURE_IMAGE_UNITS).min(MAX_TEXTURE_UNITS);
+        let limits = GlLimits {
+            ubo_bindings: read(glow::MAX_UNIFORM_BUFFER_BINDINGS).min(SAVED_UBO_SLOTS),
+            texture_units: if units >= 32 {
+                u32::MAX
+            } else {
+                (1u32 << units) - 1
+            },
+            draw_buffers: read(glow::MAX_DRAW_BUFFERS).clamp(1, DRAW_BUFFERS),
+        };
+        cached.set(Some(limits));
+        limits
+    })
+}
+
+fn set_units(mask: u32) -> impl Iterator<Item = usize> {
+    (0..MAX_TEXTURE_UNITS).filter(move |unit| mask & (1 << unit) != 0)
+}
+
 unsafe fn read_framebuffer(gl: &DebugGl, param: u32) -> Option<glow::Framebuffer> {
     NonZeroU32::new(gl.get_parameter_i32(param) as u32).map(glow::NativeFramebuffer)
 }
@@ -106,6 +141,14 @@ unsafe fn read_buffer(gl: &DebugGl, param: u32) -> Option<glow::Buffer> {
     NonZeroU32::new(gl.get_parameter_i32(param) as u32).map(glow::NativeBuffer)
 }
 
+unsafe fn read_texture_2d(gl: &DebugGl) -> Option<glow::Texture> {
+    NonZeroU32::new(gl.get_parameter_i32(glow::TEXTURE_BINDING_2D) as u32).map(glow::NativeTexture)
+}
+
+unsafe fn read_sampler(gl: &DebugGl) -> Option<glow::Sampler> {
+    NonZeroU32::new(gl.get_parameter_i32(glow::SAMPLER_BINDING) as u32).map(glow::NativeSampler)
+}
+
 unsafe fn read_indexed_ubo(gl: &DebugGl, index: u32) -> (Option<glow::Buffer>, i32, i32) {
     let buffer =
         NonZeroU32::new(gl.get_parameter_indexed_i32(glow::UNIFORM_BUFFER_BINDING, index) as u32)
@@ -115,13 +158,17 @@ unsafe fn read_indexed_ubo(gl: &DebugGl, index: u32) -> (Option<glow::Buffer>, i
     (buffer, start, size)
 }
 
-unsafe fn read_draw_buffers(gl: &DebugGl, is_default_fbo: bool) -> (usize, [u32; DRAW_BUFFERS]) {
+unsafe fn read_draw_buffers(
+    gl: &DebugGl,
+    limits: GlLimits,
+    is_default_fbo: bool,
+) -> (usize, [u32; DRAW_BUFFERS]) {
     let mut buffers = [glow::NONE; DRAW_BUFFERS];
-    if is_default_fbo {
-        buffers[0] = gl.get_parameter_i32(glow::DRAW_BUFFER0) as u32;
-        return (1, buffers);
-    }
-    let count = (gl.get_parameter_i32(glow::MAX_DRAW_BUFFERS) as usize).clamp(1, DRAW_BUFFERS);
+    let count = if is_default_fbo {
+        1
+    } else {
+        limits.draw_buffers
+    };
     for (i, dst) in buffers.iter_mut().enumerate().take(count) {
         *dst = gl.get_parameter_i32(glow::DRAW_BUFFER0 + i as u32) as u32;
     }
@@ -129,6 +176,7 @@ unsafe fn read_draw_buffers(gl: &DebugGl, is_default_fbo: bool) -> (usize, [u32;
 }
 
 unsafe fn capture_stage_state(gl: &DebugGl) -> NativeStageState {
+    let limits = gl_limits(gl);
     let gl_draw_fbo = read_framebuffer(gl, glow::DRAW_FRAMEBUFFER_BINDING);
     let gl_read_fbo = read_framebuffer(gl, glow::READ_FRAMEBUFFER_BINDING);
     let mut viewport = [0i32; 4];
@@ -137,43 +185,25 @@ unsafe fn capture_stage_state(gl: &DebugGl) -> NativeStageState {
     let mut scissor_box = [0i32; 4];
     gl.get_parameter_i32_slice(glow::SCISSOR_BOX, &mut scissor_box);
 
-    let cached_shader = CURRENT_SHADER.with(|c| *c.borrow());
-    let gl_program = read_program(gl);
-
-    let generic_ubo = read_buffer(gl, glow::UNIFORM_BUFFER_BINDING);
-    let max_ubo = gl
-        .get_parameter_i32(glow::MAX_UNIFORM_BUFFER_BINDINGS)
-        .max(0) as usize;
-    let ubo_count = max_ubo.min(SAVED_UBO_SLOTS);
     let mut ubo_slots = [(None, 0i32, 0i32); SAVED_UBO_SLOTS];
-    for (i, slot) in ubo_slots.iter_mut().enumerate().take(ubo_count) {
+    for (i, slot) in ubo_slots.iter_mut().enumerate().take(limits.ubo_bindings) {
         *slot = read_indexed_ubo(gl, i as u32);
     }
 
     let active_texture = gl.get_parameter_i32(glow::ACTIVE_TEXTURE) as u32;
-    let max_units = gl
-        .get_parameter_i32(glow::MAX_COMBINED_TEXTURE_IMAGE_UNITS)
-        .max(0) as usize;
-    let tex_unit_count = max_units.min(SAVED_TEXTURE_UNITS);
-    let mut textures_2d = [None; SAVED_TEXTURE_UNITS];
-    let mut samplers = [None; SAVED_TEXTURE_UNITS];
-    for i in 0..tex_unit_count {
-        gl.active_texture(glow::TEXTURE0 + i as u32);
-        textures_2d[i] = NonZeroU32::new(gl.get_parameter_i32(glow::TEXTURE_BINDING_2D) as u32)
-            .map(glow::NativeTexture);
-        samplers[i] = NonZeroU32::new(gl.get_parameter_i32(glow::SAMPLER_BINDING) as u32)
-            .map(glow::NativeSampler);
+    let texture_units = crate::shader::texture_units_in_use() & limits.texture_units;
+    let mut textures_2d = [None; MAX_TEXTURE_UNITS];
+    let mut samplers = [None; MAX_TEXTURE_UNITS];
+    for unit in set_units(texture_units) {
+        gl.active_texture(glow::TEXTURE0 + unit as u32);
+        textures_2d[unit] = read_texture_2d(gl);
+        samplers[unit] = read_sampler(gl);
     }
     gl.active_texture(active_texture);
 
-    let vao = NonZeroU32::new(gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING) as u32)
-        .map(glow::NativeVertexArray);
-    let (draw_buffer_count, draw_buffers) = read_draw_buffers(gl, gl_draw_fbo.is_none());
-
-    let mut clear_color = [0.0f32; 4];
-    gl.get_parameter_f32_slice(glow::COLOR_CLEAR_VALUE, &mut clear_color);
     let mut clear_depth = [0.0f32; 1];
     gl.get_parameter_f32_slice(glow::DEPTH_CLEAR_VALUE, &mut clear_depth);
+    let (draw_buffer_count, draw_buffers) = read_draw_buffers(gl, limits, gl_draw_fbo.is_none());
 
     NativeStageState {
         canvas_handle: crate::canvas::current_canvas_handle(),
@@ -184,26 +214,21 @@ unsafe fn capture_stage_state(gl: &DebugGl) -> NativeStageState {
         viewport,
         scissor_enabled,
         scissor_box,
-        cached_shader,
-        gl_program,
-        generic_ubo,
-        ubo_count,
+        cached_shader: CURRENT_SHADER.with(|c| *c.borrow()),
+        gl_program: read_program(gl),
+        generic_ubo: read_buffer(gl, glow::UNIFORM_BUFFER_BINDING),
+        ubo_count: limits.ubo_bindings,
         ubo_slots,
         active_texture,
-        tex_unit_count,
+        texture_units,
         textures_2d,
         samplers,
-        vao,
+        vao: NonZeroU32::new(gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING) as u32)
+            .map(glow::NativeVertexArray),
         draw_buffer_count,
         draw_buffers,
-        blend: BlendGlState::read(gl),
-        depth_enabled: gl.is_enabled(glow::DEPTH_TEST),
-        depth_func: gl.get_parameter_i32(glow::DEPTH_FUNC) as u32,
-        depth_write: gl.get_parameter_bool(glow::DEPTH_WRITEMASK),
-        color_mask: gl.get_parameter_bool_array::<4>(glow::COLOR_WRITEMASK),
-        clear_color,
+        pipeline: PipelineGlState::read(gl),
         clear_depth: clear_depth[0],
-        cull_enabled: gl.is_enabled(glow::CULL_FACE),
         stencil_enabled: gl.is_enabled(glow::STENCIL_TEST),
         polygon_offset_fill: gl.is_enabled(glow::POLYGON_OFFSET_FILL),
         sample_alpha_to_coverage: gl.is_enabled(glow::SAMPLE_ALPHA_TO_COVERAGE),
@@ -236,7 +261,8 @@ unsafe fn restore_stage_state(gl: &DebugGl, saved: &NativeStageState) -> u32 {
         crate::canvas::restore_target_cache(saved.canvas_handle, saved.fbo, saved.target_size);
     }
 
-    let (cur_db_count, cur_dbs) = read_draw_buffers(gl, saved.gl_draw_fbo.is_none());
+    let limits = gl_limits(gl);
+    let (cur_db_count, cur_dbs) = read_draw_buffers(gl, limits, saved.gl_draw_fbo.is_none());
     let db_len = saved.draw_buffer_count.min(cur_db_count);
     if cur_dbs[..db_len] != saved.draw_buffers[..db_len] {
         if saved.gl_draw_fbo.is_none() {
@@ -302,17 +328,13 @@ unsafe fn restore_stage_state(gl: &DebugGl, saved: &NativeStageState) -> u32 {
         gl.bind_buffer(glow::UNIFORM_BUFFER, saved.generic_ubo);
     }
 
-    for i in 0..saved.tex_unit_count {
-        gl.active_texture(glow::TEXTURE0 + i as u32);
-        let cur_tex = NonZeroU32::new(gl.get_parameter_i32(glow::TEXTURE_BINDING_2D) as u32)
-            .map(glow::NativeTexture);
-        if cur_tex != saved.textures_2d[i] {
-            gl.bind_texture(glow::TEXTURE_2D, saved.textures_2d[i]);
+    for unit in set_units(saved.texture_units) {
+        gl.active_texture(glow::TEXTURE0 + unit as u32);
+        if read_texture_2d(gl) != saved.textures_2d[unit] {
+            gl.bind_texture(glow::TEXTURE_2D, saved.textures_2d[unit]);
         }
-        let cur_sampler = NonZeroU32::new(gl.get_parameter_i32(glow::SAMPLER_BINDING) as u32)
-            .map(glow::NativeSampler);
-        if cur_sampler != saved.samplers[i] {
-            gl.bind_sampler(i as u32, saved.samplers[i]);
+        if read_sampler(gl) != saved.samplers[unit] {
+            gl.bind_sampler(unit as u32, saved.samplers[unit]);
         }
     }
     gl.active_texture(saved.active_texture);
@@ -323,24 +345,8 @@ unsafe fn restore_stage_state(gl: &DebugGl, saved: &NativeStageState) -> u32 {
         gl.bind_vertex_array(saved.vao);
     }
 
-    saved.blend.restore(gl);
-    gl.set_enabled(glow::DEPTH_TEST, saved.depth_enabled);
-    gl.depth_func(saved.depth_func);
-    gl.depth_mask(saved.depth_write);
-    gl.color_mask(
-        saved.color_mask[0],
-        saved.color_mask[1],
-        saved.color_mask[2],
-        saved.color_mask[3],
-    );
-    gl.clear_color(
-        saved.clear_color[0],
-        saved.clear_color[1],
-        saved.clear_color[2],
-        saved.clear_color[3],
-    );
+    saved.pipeline.restore(gl);
     gl.clear_depth_f32(saved.clear_depth);
-    gl.set_enabled(glow::CULL_FACE, saved.cull_enabled);
     gl.set_enabled(glow::STENCIL_TEST, saved.stencil_enabled);
     gl.set_enabled(glow::POLYGON_OFFSET_FILL, saved.polygon_offset_fill);
     gl.set_enabled(
