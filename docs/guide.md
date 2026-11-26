@@ -147,6 +147,13 @@ fields included; no other copy sees the change. A call result is a
 temporary, so its fields cannot be assigned. The math types (`Vec2`,
 `Vec3`, `Vec4`, `Mat4`) are value types.
 
+Storing a value in a collection, reading it back by value, or copying a
+collection's elements follows the same rules as assignment. Each copy owns
+its scalar and nested value fields. Reference fields such as Vec, Map,
+structs and closures still refer to the same objects. For example, writing
+`cloned[0].x` after `vec.clone()` affects only the clone, while mutating a
+Vec field of that element affects the shared Vec.
+
 A value is stored inline, so it cannot contain itself by value, even
 as `T?` or through other values: `value Node { next: Node? }` is a
 compile error. Recurse through a reference instead, such as a Vec, a

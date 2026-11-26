@@ -1,0 +1,47 @@
+value ClonePoint { x: int, y: int }
+value ClonePayload { point: ClonePoint, items: [int] }
+struct CloneRef { x: int }
+value CloneReferences { x: int, lookup: Map<int, int>, object: CloneRef, tick: fn() -> int }
+
+@test
+fn clone_copies_value_elements_and_shares_their_reference_fields() {
+    let points = [ClonePoint { x: 1, y: 2 }]
+    let payloads = [ClonePayload { point: ClonePoint { x: 1, y: 2 }, items: [2] }]
+    let point_copy = points.clone()
+    let payload_copy = payloads.clone()
+
+    points[0].x = 3
+    payloads[0].point.x = 3
+    payload_copy[0].point.y = 4
+    payloads[0].items[0] = 5
+
+    assert_eq(point_copy[0].x, 1)
+    assert_eq(payload_copy[0].point.x, 1)
+    assert_eq(payloads[0].point.y, 2)
+    assert_eq(payload_copy[0].items[0], 5)
+}
+
+@test
+fn clone_preserves_reference_identity_inside_nullable_value_slots() {
+    let count = 0
+    let rows: [CloneReferences?] = vec_new_with_capacity(4)
+    rows.push(CloneReferences { x: 1, lookup: map_new(), object: CloneRef { x: 0 },
+        tick: () => { count += 1; return count } })
+    rows.push(null)
+    let copy = rows.clone()
+    assert_eq(copy.capacity(), rows.capacity())
+    assert(copy[1] == null)
+
+    let original = rows[0].unwrap()
+    original.lookup[1] = 7
+    original.object.x = 8
+    assert_eq(original.tick(), 1)
+    let cloned = copy[0].unwrap()
+    assert_eq(cloned.lookup[1], 7)
+    assert_eq(cloned.object.x, 8)
+    assert_eq(cloned.tick(), 2)
+
+    original.x = 4
+    rows[0] = original
+    assert_eq(copy[0].unwrap().x, 1)
+}

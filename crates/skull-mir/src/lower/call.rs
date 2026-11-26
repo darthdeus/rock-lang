@@ -1155,7 +1155,7 @@ impl<'a> Builder<'a> {
                     }
                 }
             }
-            if let Some(r) = self.flat_vec_data_primitive(e, name.as_str(), &arg_idxs)? {
+            if let Some(r) = self.vec_data_primitive(e, name, &arg_idxs)? {
                 return Ok(r);
             }
             // The element type comes from the call's own type. The concrete plan must
@@ -3650,15 +3650,9 @@ impl<'a> Builder<'a> {
         v: Idx<Inst>,
     ) -> Result<ValueRepr, CompilerError> {
         let (payload, nullable) = ty.peel_nullable();
-        let Some(name) = payload
-            .nominal()
-            .filter(|name| self.is_value_struct(*name) && !self.is_nobox_struct(*name))
-        else {
+        let Some(name) = self.boxed_value_copy_name(payload) else {
             return Ok(ValueRepr::Scalar(v));
         };
-        if self.scx.values_first_class {
-            return Ok(ValueRepr::Scalar(v));
-        }
         if nullable {
             return Ok(ValueRepr::Scalar(self.nullable_boxed_value_copy(
                 v,
@@ -3667,6 +3661,14 @@ impl<'a> Builder<'a> {
             )?));
         }
         self.boxed_value_copy_repr(v, name, Some(payload))
+    }
+
+    pub(crate) fn boxed_value_copy_name(&self, payload: &MonoTy) -> Option<Ustr> {
+        payload.nominal().filter(|&name| {
+            !self.scx.values_first_class
+                && self.is_value_struct(name)
+                && !self.is_nobox_struct(name)
+        })
     }
 
     /// Column storage has no element slot to index, so the read decomposes into

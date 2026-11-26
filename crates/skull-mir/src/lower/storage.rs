@@ -892,13 +892,13 @@ impl<'a> Builder<'a> {
         })
     }
 
-    pub(crate) fn flat_vec_data_primitive(
+    pub(crate) fn vec_data_primitive(
         &mut self,
         e: Idx<Expr>,
-        name: &str,
+        name: Ustr,
         args: &[Idx<Expr>],
     ) -> Result<Option<ValueBundle>, CompilerError> {
-        let (recv, op) = match (name, args) {
+        let (recv, op) = match (name.as_str(), args) {
             ("__vec_data_get", &[recv, index]) => (recv, VecDataOp::Get(index)),
             ("__vec_data_set", &[recv, index, value]) => (recv, VecDataOp::Set(index, value)),
             ("__vec_data_unset", &[recv, index]) => (recv, VecDataOp::Unset(index)),
@@ -910,6 +910,9 @@ impl<'a> Builder<'a> {
             _ => return Ok(None),
         };
         let Some((elem, storage)) = self.vec_flat_elem_of(recv)? else {
+            if matches!(op, VecDataOp::Clone) {
+                return self.clone_boxed_value_vec(e, name, recv);
+            }
             return Ok(None);
         };
 
@@ -1075,6 +1078,43 @@ impl<'a> Builder<'a> {
         let value =
             value.unwrap_or_else(|| ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))));
         self.value_bundle_for_expr(e, value).map(Some)
+    }
+
+    fn clone_boxed_value_vec(
+        &mut self,
+        e: Idx<Expr>,
+        name: Ustr,
+        recv: Idx<Expr>,
+    ) -> Result<Option<ValueBundle>, CompilerError> {
+        let Some((ContainerFamily::Vec, [ty])) =
+            self.concrete_expr_ty(recv).and_then(ContainerFamily::of)
+        else {
+            return Ok(None);
+        };
+        if self.boxed_value_copy_name(ty.peel_nullable().0).is_none() {
+            return Ok(None);
+        }
+        let func = self.resolve_funcref(e, name)?;
+        let module = self.ws.module(func.module);
+        if !bone_core::modules::is_stdlib_module_file(module.file.as_str()) {
+            return Ok(None);
+        }
+
+        // The bulk clone retains capacity. The live slots need independent
+        // value storage, using the same copy as a store into another owner.
+        let copy = self.lower_direct_call_repr(e, func, &[recv], false)?;
+        let ValueRepr::Scalar(vec) = *copy.value() else {
+            return Err(self.gap_here("boxed Vec clone returned a non-scalar representation"));
+        };
+        let len = self.read_field(vec, self.vec_length_field(recv)?);
+        self.for_each_row(len, |s, _, index| {
+            let kind = ContainerKind::VecInBounds;
+            let value = s.read_index(vec, index, kind);
+            let value = s.copied_value_box(ty, value)?;
+            s.write_index(vec, index, value, kind);
+            Ok(s.int_plus_one(index))
+        })?;
+        Ok(Some(copy))
     }
 
     fn emit_flat_vec(
