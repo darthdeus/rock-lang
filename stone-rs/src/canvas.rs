@@ -882,7 +882,7 @@ pub extern "C" fn stone_canvas_resize(handle: u64, width: c_int, height: c_int) 
 
     let resized = with_gl(|gl| unsafe {
         if !canvas_dimensions_supported(gl, width, height) {
-            return false;
+            return None;
         }
         let status = canvas.respecify_with_children(gl, &child_pairs, width, height);
         let complete = status == glow::FRAMEBUFFER_COMPLETE;
@@ -900,9 +900,9 @@ pub extern "C" fn stone_canvas_resize(handle: u64, width: c_int, height: c_int) 
             canvas.respecify_with_children(gl, &child_pairs, canvas.width, canvas.height);
         }
         rebind_current(gl);
-        complete
+        Some(complete)
     });
-    let Some(complete) = resized else {
+    let Some(respecified) = resized else {
         crate::log_once!(
             "CANVAS",
             "stone_canvas_resize: no GL context for canvas {}",
@@ -910,27 +910,23 @@ pub extern "C" fn stone_canvas_resize(handle: u64, width: c_int, height: c_int) 
         );
         return false;
     };
-    if !complete {
+    let Some(complete) = respecified else {
         return false;
-    }
+    };
 
-    with_canvas_mut(handle, |c| {
-        c.width = width;
-        c.height = height;
-        c.active_w = width;
-        c.active_h = height;
-        c.generation = crate::handles::next_generation();
-    });
-    for &(_, child_handle, _) in &children {
-        with_canvas_mut(child_handle, |c| {
-            c.width = width;
-            c.height = height;
-            c.active_w = width;
-            c.active_h = height;
+    // Re-specified storage has new contents even when the old size was kept.
+    for target in std::iter::once(handle).chain(children.iter().map(|&(_, child, _)| child)) {
+        with_canvas_mut(target, |c| {
+            if complete {
+                c.width = width;
+                c.height = height;
+                c.active_w = width;
+                c.active_h = height;
+            }
             c.generation = crate::handles::next_generation();
         });
     }
-    true
+    complete
 }
 
 /// True (and logged) when `handle` is an attachment owned by another target.

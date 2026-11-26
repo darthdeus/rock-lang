@@ -481,6 +481,10 @@ through a single versioned C function-pointer table:
   (null otherwise). Callers validate `abi_version == 1` and
   `struct_size >= sizeof(StoneNativeRendererApiV1)` before dereferencing fields.
   The pointer stays valid for the lifetime of the loaded Stone shared library.
+- Every entry is render-thread only: it must run on the thread that owns
+  Stone's GL context. Elsewhere it does nothing and returns `0`/false (a
+  destroy called from a worker thread leaks the GL objects); the first such
+  call logs a warning.
 - `packages/stone/engine/rendering_ffi.h` declares `StoneNativeRendererApiV1`
   for C callers. Version 1 only appends fields; `stone-rs` asserts every
   field's offset at compile time and a test checks the header against the
@@ -526,12 +530,20 @@ Resource kinds are typed (`STONE_RESOURCE_TARGET = 1`, `SHADER = 2`,
 `TEXTURE = 3`, `MESH = 4`):
 
 - `stone_native_context_generation()` returns the live GL context epoch (`0`
-  after teardown or before window creation).
+  after teardown or before window creation); it changes each time Stone
+  creates a context.
 - `stone_native_handle_valid(kind, handle)` and
-  `stone_native_handle_generation(kind, handle)` report liveness and a
-  monotonic non-zero generation (`0` when dead, wrong kind, or after context
-  loss). Generations advance on target resize, active-rect change, attachment
-  change, texture reload/update, and shader reload.
+  `stone_native_handle_generation(kind, handle)` report whether `handle` names
+  a live resource of `kind`, and its non-zero generation (`0` when it does
+  not). Handle numbers are minted per kind and never reused, so one number can
+  name live resources of two kinds but never a later resource of the same
+  kind. Generations advance on target resize (including a failed resize that
+  re-specified storage), active-rect change, attachment change, texture
+  reload/update, and shader reload.
+- Context loss means teardown: `stone_teardown` destroys every target, shader,
+  texture and mesh, so every handle from before reports invalid. Stone does
+  not detect a GL context lost any other way (such as a driver reset); handles
+  stay valid then.
 - `stone_native_find_shader(name)` resolves the published program registered
   under `name`; `stone_native_find_texture(path)` resolves the newest live
   image loaded or reloaded from `path`; `stone_native_target_info`,
