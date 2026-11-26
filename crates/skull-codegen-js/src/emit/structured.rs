@@ -1,5 +1,5 @@
 use super::*;
-use skull_mir::cfg::structure::CountedLoop;
+use skull_mir::sinking::may_throw;
 
 impl Emitter<'_> {
     pub(super) fn push(&mut self, line: &str) {
@@ -50,15 +50,14 @@ impl Emitter<'_> {
 
     pub(super) fn inst_emits(&self, iid: Idx<Inst>) -> bool {
         let inst = &self.mf.insts[iid];
-        if matches!(inst, Inst::Store { .. } | Inst::StoreIndex { .. }) {
+        if !inst.produces_value() {
             return true;
         }
         let k = raw(iid) as usize;
-        if inst.produces_value() {
-            (!self.inlinable[k] && self.use_count[k] > 0)
-                || (self.use_count[k] == 0 && effects::evaluated_when_unused(inst))
+        if self.use_count[k] == 0 {
+            may_throw(inst)
         } else {
-            true
+            !self.inlinable[k]
         }
     }
 
@@ -78,16 +77,6 @@ impl Emitter<'_> {
 
     pub(super) fn is_nil(&self, iid: Idx<Inst>) -> bool {
         matches!(self.mf.insts[iid], Inst::Const(Lit::Nil))
-    }
-
-    pub(super) fn counted_slot_bound(
-        &mut self,
-        li: &CountedLoop,
-    ) -> Result<(String, String), CompilerError> {
-        Ok((
-            cell_name(self.mf, li.slot),
-            self.render_inst_expr(li.bound)?,
-        ))
     }
 
     /// JS access paths of an intrinsic call's result lanes; `None` for a real function, which packs

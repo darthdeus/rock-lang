@@ -24,6 +24,106 @@ fn run_program(file: &str, source: &str, extra_runtime: &[&str], after_program: 
 }
 
 #[test]
+fn counted_loop_keeps_header_and_latch_work() {
+    use skull_mir::mir::{Inst, Lit, MirFunc, Term};
+
+    let ws = ws_with("fn main() {}");
+    let mut func = MirFunc::new(Ustr::from("probe"));
+    let entry = func.entry();
+    let header = func.new_block();
+    let body = func.new_block();
+    let latch = func.new_block();
+    let exit = func.new_block();
+    let cursor = func.new_cell(None);
+    let count = func.new_cell(None);
+    func.mark_loop_binding(cursor);
+    let zero = func.emit(entry, Inst::Const(Lit::Int(0)));
+    let one = func.emit(entry, Inst::Const(Lit::Int(1)));
+    let limit = func.emit(entry, Inst::Const(Lit::Int(3)));
+    for cell in [cursor, count] {
+        func.emit(entry, Inst::Store { cell, value: zero });
+    }
+    func.set_term(entry, Term::Goto(header));
+    for block in [header, latch] {
+        let current = func.emit(block, Inst::Load(count));
+        let value = func.emit(block, Inst::IntAdd(current, one));
+        func.emit(block, Inst::Store { cell: count, value });
+    }
+    let current = func.emit(header, Inst::Load(cursor));
+    let cond = func.emit(header, Inst::IntLt(current, limit));
+    func.set_term(
+        header,
+        Term::Branch {
+            cond,
+            then_bb: body,
+            else_bb: exit,
+        },
+    );
+    func.set_term(body, Term::Goto(latch));
+    let current = func.emit(latch, Inst::Load(cursor));
+    let value = func.emit(latch, Inst::IntAdd(current, one));
+    func.emit(
+        latch,
+        Inst::Store {
+            cell: cursor,
+            value,
+        },
+    );
+    func.set_term(latch, Term::Goto(header));
+    let result = func.emit(exit, Inst::Load(count));
+    func.set_term(exit, Term::Return(vec![result]));
+
+    let js = skull_codegen_js::emit::emit_fn(&ws, &func, "probe").expect("emit loop");
+    assert_eq!(
+        run_node(&format!("{js}\nconsole.log(probe());")).trim(),
+        "7"
+    );
+}
+
+#[test]
+fn discarded_dynamic_format_still_traps_before_a_call() {
+    let output = run_program(
+        "<test>",
+        r#"
+@nomangle fn probe(width: int, mark: fn()) {
+    let unused = "{3.25:{width}.2f}"
+    mark()
+}
+fn main() { probe(8, () => {}) }
+"#,
+        &[],
+        r#"
+let marks = 0;
+try { probe(1000000000, () => { marks++; }); }
+catch (_) { console.log(marks); }
+"#,
+    );
+    assert_eq!(output.trim(), "0");
+}
+
+#[test]
+fn explicit_return_of_closure_inside_branch() {
+    let output = run_program(
+        "<test>",
+        r#"
+fn choose(flag: bool) -> fn() -> int {
+    if flag { return () => 42 }
+    return () => -7
+}
+
+fn main() {
+    let take_then = choose(true)
+    let take_else = choose(false)
+    print("{take_then()} {take_else()}")
+}
+"#,
+        &[],
+        "",
+    );
+    assert_eq!(output.trim(), "42 -7");
+}
+
+#[test]
 fn duplicate_runtime_type_symbols_are_rejected_by_js_program_emission() {
     let ws = ws_with(
         r#"

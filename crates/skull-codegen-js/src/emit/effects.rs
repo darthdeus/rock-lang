@@ -1,36 +1,11 @@
 use super::*;
 
-/// A value inst that still runs as a statement when unused: calls, bounds-checking or host-getter
-/// indexes, column/strided element checks and range-checked uint ops.
-pub(super) fn evaluated_when_unused(inst: &Inst) -> bool {
-    match inst {
-        Inst::Index { kind, .. } => {
-            matches!(
-                kind,
-                ContainerKind::Vec
-                    | ContainerKind::VecInBounds
-                    | ContainerKind::VecNonNull
-                    | ContainerKind::VecNonNullInBounds
-                    | ContainerKind::Map
-                    | ContainerKind::Record(_)
-            ) || kind.is_native_buffer()
-        }
-        _ => matches!(
-            inst,
-            Inst::Call { .. }
-                | Inst::CallValue { .. }
-                | Inst::VecCheckedIndex { .. }
-                | Inst::UintShl(..)
-                | Inst::UintShr(..)
-                | Inst::IntToUint(_)
-                | Inst::FloatToUint(_)
-        ),
-    }
-}
-
 impl Emitter<'_> {
     pub(super) fn emit_block_effects(&mut self, b: Idx<Block>) -> Result<(), CompilerError> {
-        for iid in self.mf.blocks[b].insts.clone() {
+        for &iid in &self.mf.blocks[b].insts {
+            if !self.inst_emits(iid) {
+                continue;
+            }
             match &self.mf.insts[iid] {
                 Inst::Store { cell, value } => {
                     let rhs = self.render_val(*value)?;
@@ -117,10 +92,6 @@ impl Emitter<'_> {
                     );
                     self.push(&line);
                 }
-                other if self.use_count[raw(iid) as usize] == 0 && evaluated_when_unused(other) => {
-                    let line = format!("{};", self.render_inst_expr(iid)?);
-                    self.push(&line);
-                }
                 Inst::CallMulti { dests, func, args } => {
                     let call = self.render_call(iid, *func, args)?;
                     // An intrinsic is one JS expression: lanes of a multi-lane result are read off
@@ -161,21 +132,6 @@ impl Emitter<'_> {
                     let v = self.render_val(*value)?;
                     self.push(&format!("__rock_globals[{}] = {v};", js_string_lit(slot)));
                 }
-                other
-                    if other.produces_value()
-                        && !self.inlinable[raw(iid) as usize]
-                        && self.use_count[raw(iid) as usize] > 0 =>
-                {
-                    // Bind a used, non-inlinable value at its program position so cell reads capture their
-                    // value here and effectful calls keep their order.
-                    let expr = self.render_inst_expr(iid)?;
-                    // A cross-case temp is hoist-declared: assign, don't re-`let`.
-                    if self.hoisted_temps.contains(&raw(iid)) {
-                        self.push(&format!("v{} = {};", self.mf.emit_inst_id(iid), expr));
-                    } else {
-                        self.push(&format!("let v{} = {};", self.mf.emit_inst_id(iid), expr));
-                    }
-                }
                 Inst::ArrayPush {
                     arr,
                     value,
@@ -185,7 +141,22 @@ impl Emitter<'_> {
                     let v = self.render_val(*value)?;
                     self.push(&format!("{a}._data[{a}.len] = {v}; {a}.len = {a}.len + 1;"));
                 }
-                other if other.produces_value() => {}
+                other if other.produces_value() => {
+                    let expr = self.render_inst_expr(iid)?;
+                    if self.use_count[raw(iid) as usize] == 0 {
+                        self.push(&format!("{expr};"));
+                    } else {
+                        let binding = if self.hoisted_temps.contains(&raw(iid)) {
+                            ""
+                        } else {
+                            "let "
+                        };
+                        self.push(&format!(
+                            "{binding}v{} = {expr};",
+                            self.mf.emit_inst_id(iid)
+                        ));
+                    }
+                }
                 other => return Err(err(format!("JS subset: unsupported effect {other:?}"))),
             }
         }

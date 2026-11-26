@@ -53,7 +53,25 @@ inline(lua) fn check_lua_error_order() = """
     end
 """
 
-@test(backends = "lua")
+@test(backends = "lua,js")
 fn checks_and_dynamic_format_trap_before_the_later_call() {
     check_lua_error_order()
 }
+
+inline(js) fn check_lua_error_order() = """
+    for (const [compute, good, bad] of [
+        [format_then_mark, 8, 1000000000],
+        [bracket_then_mark, 8, 1000000000],
+        [cast_then_mark, 2, -1],
+        [shift_then_mark, 2, 32],
+    ]) {
+        for (const [input, expected] of [[good, 1], [bad, 0]]) {
+            let marks = 0, caught = false;
+            try { compute(input, () => { marks++; }); }
+            catch (_) { caught = true; }
+            if (caught !== (expected === 0) || marks !== expected) {
+                throw new Error("wrong evaluation order: " + compute.name);
+            }
+        }
+    }
+"""

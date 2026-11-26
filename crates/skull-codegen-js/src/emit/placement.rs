@@ -1,66 +1,26 @@
 use super::*;
 use skull_mir::cfg::placement::{self as walk, BlockFlow, NativeLoop, PlacementEmit};
-use skull_mir::cfg::structure::{self as cfg_structure, CountedBound, CountedLoop, Placement};
+use skull_mir::cfg::structure::{Placement, place};
 
 const NESTING_COST_ELSE_IF: u32 = 2;
 const NESTING_COST_BRANCH: u32 = 5;
 const NESTING_COST_LOOP: u32 = 6;
 const MAX_NESTING: u32 = 7200;
 
-type CountedLoops = rustc_hash::FxHashMap<Idx<Block>, CountedLoop>;
-
 pub(super) struct Shape {
     pub(super) placement: Placement,
     forward: Vec<u32>,
-    counted: CountedLoops,
 }
 
 impl Shape {
     pub(super) fn analyze(em: &Emitter<'_>, rpo: &[Idx<Block>]) -> Option<Self> {
         let func = em.mf;
         let entry = rpo[0];
-        let mut counted = CountedLoops::default();
-        for &header in rpo {
-            if let Some(loop_info) =
-                cfg_structure::counted_loop(func, header, CountedBound::InlineOnly)
-            {
-                counted.insert(header, loop_info);
-            }
-        }
-        let forward = walk::thread_forwarders(func, rpo, |b| {
-            !counted.contains_key(&b) && !em.block_has_statement(b)
-        });
-
+        let forward = walk::thread_forwarders(func, rpo, |b| !em.block_has_statement(b));
         let succ = walk::threaded_successors(func, &forward);
-
-        let mut unplaced = Vec::with_capacity(counted.len());
-        for (&header, loop_info) in &counted {
-            if loop_info.latch != header {
-                unplaced.push(loop_info.latch);
-            }
-        }
         let raising: Vec<_> = rpo.iter().copied().filter(|&b| em.raises(b)).collect();
-        let placement = cfg_structure::place(entry, &succ, &unplaced, &raising)?;
-
-        for (&header, loop_info) in &counted {
-            let mut latches = placement.latches(header);
-            if latches.next() != Some(loop_info.latch) || latches.next().is_some() {
-                return None;
-            }
-            let body = Idx::from_raw(RawIdx::from_u32(
-                forward[raw(loop_info.body_entry) as usize],
-            ));
-            let exit = Idx::from_raw(RawIdx::from_u32(forward[raw(loop_info.exit) as usize]));
-            if !placement.in_loop(header, body) || placement.in_loop(header, exit) {
-                return None;
-            }
-        }
-
-        Some(Self {
-            placement,
-            forward,
-            counted,
-        })
+        let placement = place(entry, &succ, &[], &raising)?;
+        Some(Self { placement, forward })
     }
 
     fn thread(&self, block: Idx<Block>) -> Idx<Block> {
@@ -115,12 +75,8 @@ impl PlacementEmit for JsPlacement<'_, '_> {
         self.shape.thread(block)
     }
 
-    fn native_loop(&self, header: Idx<Block>) -> Option<NativeLoop> {
-        self.shape.counted.get(&header).map(|loop_info| NativeLoop {
-            latch: loop_info.latch,
-            body: loop_info.body_entry,
-            exit: loop_info.exit,
-        })
+    fn native_loop(&self, _header: Idx<Block>) -> Option<NativeLoop> {
+        None
     }
 
     fn block(&mut self, block: Idx<Block>) -> Result<BlockFlow, Self::Error> {
@@ -229,25 +185,13 @@ impl PlacementEmit for JsPlacement<'_, '_> {
     fn begin_loop(
         &mut self,
         header: Idx<Block>,
-        native: Option<NativeLoop>,
+        _native: Option<NativeLoop>,
     ) -> Result<Self::Loop, Self::Error> {
         self.enter_nesting(NESTING_COST_LOOP, Some(header), None)?;
-        let label = format!("L{}", self.em.mf.emit_block_id(header));
-        if native.is_some() {
-            let loop_info = self
-                .shape
-                .counted
-                .get(&header)
-                .copied()
-                .ok_or_else(|| err("JS subset: invalid counted-loop placement"))?;
-            let (slot, bound) = self.em.counted_slot_bound(&loop_info)?;
-            let cmp = if loop_info.inclusive { "<=" } else { "<" };
-            self.em.push(&format!(
-                "{label}: for (; {slot} {cmp} {bound}; {slot} = {slot} + 1) {{"
-            ));
-        } else {
-            self.em.push(&format!("{label}: while (true) {{"));
-        }
+        self.em.push(&format!(
+            "L{}: while (true) {{",
+            self.em.mf.emit_block_id(header)
+        ));
         self.em.indent += 1;
         Ok(LoopToken {
             nesting_cost: NESTING_COST_LOOP,
@@ -283,14 +227,8 @@ impl PlacementEmit for JsPlacement<'_, '_> {
         Ok(())
     }
 
-    fn break_loop(&mut self, header: Idx<Block>, innermost: bool) -> Result<bool, Self::Error> {
-        let statement = if innermost {
-            "break;".to_owned()
-        } else {
-            format!("break L{};", self.em.mf.emit_block_id(header))
-        };
-        self.em.push(&statement);
-        Ok(true)
+    fn break_loop(&mut self, _header: Idx<Block>, _innermost: bool) -> Result<bool, Self::Error> {
+        Ok(false)
     }
 }
 
