@@ -140,3 +140,90 @@ fn main() { install(5); print(SAVED(), OTHER()) }
         .expect("the escaping sibling has a code slot");
     assert!(synchronous_body.contains(other_slot));
 }
+
+#[test]
+fn recursive_callback_lift_rebuilds_the_caller_and_keeps_its_sibling_slot() {
+    use crate::common::{body_id, edit, function_body, run_luajit, ws_with_stdlib};
+
+    let source = r#"
+global saved: fn() -> int = () => 0
+
+fn follow(n: int, f: fn() -> int) -> int {
+    if n == 0 { return f() }
+    return follow(n - 1, f)
+}
+
+@nomangle fn install(x: int) -> int {
+    let result = follow(3, () => x + 1)
+    saved = () => x + 10
+    return result
+}
+
+@nomangle fn read_saved() -> fn() -> int { return saved }
+fn main() { let _ = install(0); let _ = read_saved() }
+"#;
+    let before = ws_with_stdlib(source);
+    let changed = ws_with_stdlib(&source.replace("return f()", "return f() + 100"));
+    let update = edit(&before, &changed, &[body_id(&changed, "follow")]);
+    let overlay = update.overlay.expect("compatible recursive body edit");
+    let install = function_body(&update.base.lua, "install");
+    assert_eq!(install.matches("__rock_code_slot_ref(").count(), 1);
+    assert!(install.contains("__rock_lifted_callback_"));
+    assert_ne!(install, function_body(&update.incremental.lua, "install"));
+    let steps = format!(
+        "{}\nassert(install(2) == 3)\nlocal old = read_saved()\n{}\nassert(install(2) == 103 and old() == 12)\nprint('ok')",
+        update.base.lua, overlay.lua
+    );
+    assert_eq!(run_luajit(&steps), "ok");
+
+    let escaping = ws_with_stdlib(&source.replace("return f()", "saved = f; return f()"));
+    let escaped = edit(&before, &escaping, &[body_id(&escaping, "follow")]);
+    let install = function_body(&escaped.incremental.lua, "install");
+    assert_eq!(install.matches("__rock_code_slot_ref(").count(), 2);
+    assert!(!install.contains("__rock_lifted_callback_"));
+}
+
+#[test]
+fn recursive_lift_keeps_boxed_delivery_when_the_lua_wire_is_too_wide() {
+    use crate::common::{run_main, try_emit_module};
+
+    for (parameter_count, capture_count) in [(115, 95), (115, 8)] {
+        let parameters: Vec<_> = (0..parameter_count)
+            .map(|index| format!("a{index}"))
+            .collect();
+        let arguments = parameters.join(", ");
+        let types = parameters
+            .iter()
+            .map(|name| format!("{name}: int"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let zeroes = std::iter::repeat_n("0", parameters.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let captures: Vec<_> = (0..capture_count)
+            .map(|index| format!("v{index}"))
+            .collect();
+        let declarations = captures
+            .iter()
+            .enumerate()
+            .map(|(index, name)| format!("let {name} = value + {index}\n"))
+            .collect::<String>();
+        let sum = captures.join(" + ");
+        let src = format!(
+            r#"
+fn forward(n: int, callback: fn() -> int, {types}) -> int {{
+    if n == 0 {{ return callback() + a0 }}
+    return forward(n - 1, callback, {arguments})
+}}
+fn invoke(value: int) -> int {{
+    {declarations}
+    return forward(3, () => {sum}, {zeroes})
+}}
+fn main() {{ print(invoke(2)) }}
+"#
+        );
+        let lua = try_emit_module(&src).expect("the ordinary closure fits LuaJIT's wire");
+        let expected = (2..2 + captures.len()).sum::<usize>().to_string();
+        assert_eq!(run_main(&lua), expected);
+    }
+}

@@ -268,14 +268,22 @@ fn finish_body_chunk(
         allocation_bodies: &mut allocation_bodies,
         times: &mut times,
     };
-    let mut lua = emitter.emit(
-        name,
-        f.name.as_str(),
-        &mut mf,
-        &[],
-        bind.as_ref(),
-        noalloc::marked(f).then_some(f),
-    )?;
+    let lifted;
+    let contract = if noalloc::marked(f) {
+        lifted = mf
+            .nested_fns
+            .iter()
+            .filter(|nf| nf.direct_only)
+            .map(|nf| nf.name)
+            .collect();
+        Some(noalloc::Contract {
+            source: f,
+            lifted: &lifted,
+        })
+    } else {
+        None
+    };
+    let mut lua = emitter.emit(name, f.name.as_str(), &mut mf, &[], bind.as_ref(), contract)?;
     let mut abi_deps = FxHashMap::default();
     collect_abi_dependencies(&mf, &mut abi_deps);
     // Nested-fn statics fold into this chunk, or hot reload would not see them.
@@ -286,6 +294,7 @@ fn finish_body_chunk(
         Some(&mut NestedChunk {
             deps: &mut deps,
             statics: &mut statics,
+            contract,
         }),
         &mut lua,
     )?;
@@ -327,6 +336,7 @@ pub(crate) struct BodyEmitter<'a> {
 pub(crate) struct NestedChunk<'a> {
     pub(crate) deps: &'a mut FxHashSet<FuncRef>,
     pub(crate) statics: &'a mut Vec<skull_mir::mir::StaticCell>,
+    pub(crate) contract: Option<noalloc::Contract<'a>>,
 }
 
 impl BodyEmitter<'_> {
@@ -337,7 +347,7 @@ impl BodyEmitter<'_> {
         mf: &mut MirFunc,
         inherited_statics: &[skull_mir::mir::StaticCell],
         bound: Option<&skull_codegen_lua::CalleeBindingPlan>,
-        contract: Option<&bone_semantic::hir::Function>,
+        contract: Option<noalloc::Contract<'_>>,
     ) -> Result<String, CompilerError> {
         skull_codegen_lua::regalloc_time_reset();
         let te = Instant::now();
@@ -411,7 +421,11 @@ impl BodyEmitter<'_> {
                 chunk.statics.extend(nf.statics.iter().cloned());
             }
             let name = nf.name.as_str();
-            lua.push_str(&self.emit(name, name, nf, inherited_statics, None, None)?);
+            let contract = chunk
+                .as_ref()
+                .and_then(|chunk| chunk.contract)
+                .filter(|contract| contract.lifted.contains(&nf.name));
+            lua.push_str(&self.emit(name, name, nf, inherited_statics, None, contract)?);
             if chunk.is_some() {
                 let mut children = std::mem::take(&mut nf.nested_fns);
                 let mut next_inherited = inherited_statics.to_vec();

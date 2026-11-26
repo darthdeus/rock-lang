@@ -9,18 +9,10 @@ use comfy_la_arena::Idx;
 use rustc_hash::FxHashMap as HashMap;
 use skull_mir::mir::{Block, Inst, MirFunc, Term};
 
-/// `LJ_MAX_SLOTS` (`lj_def.h`). `bcreg_bump` rejects at `sz >= LJ_MAX_SLOTS`,
-/// so a frame of 249 registers is the widest that loads.
-pub(crate) const LJ_MAX_SLOTS: usize = 250;
-
-/// `LJ_MAX_LOCVAR` (`lj_def.h`). `var_new` checks `nactvar + n` while
-/// declaring the `n`-th name of a group, so the widest group ending at `A`
-/// active locals checks `A - 1`: 200 locals load and 201 do not.
-pub(crate) const LJ_MAX_LOCVAR: usize = 200;
-
-/// The callee slot plus the `LJ_FR2` frame-link slot. Assumes a 64-bit
-/// LuaJIT (`LJ_FR2 = 1`); a 32-bit build reserves one less.
-pub(crate) const CALL_BASE_SLOTS: usize = 2;
+pub(crate) use skull_mir::lua_interop::{
+    LUAJIT_CALL_BASE_SLOTS as CALL_BASE_SLOTS, LUAJIT_FRAME_SLOT_LIMIT as LJ_MAX_SLOTS,
+    LUAJIT_MAX_ACTIVE_LOCALS as LJ_MAX_LOCVAR,
+};
 
 /// Active locals a numeric `for` adds inside its block: `(for index)`,
 /// `(for limit)`, `(for step)` and the visible variable (`parse_for_num`).

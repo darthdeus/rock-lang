@@ -109,6 +109,7 @@ pub(crate) fn emit_coroutine_with_artifact(
         Some(&mut crate::mir_emit::NestedChunk {
             deps: &mut nested_deps,
             statics: &mut nested_statics,
+            contract: None,
         }),
         &mut out.lua,
     )?;

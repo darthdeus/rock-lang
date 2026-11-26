@@ -192,6 +192,7 @@ impl InlineCandidateTable {
 pub struct InlineCache {
     cands: HashMap<CacheKey, Option<Arc<CalleeBody>>>,
     callback_cands: HashMap<CacheKey, Option<Arc<CalleeBody>>>,
+    pub(crate) callback_lift: crate::callback_lift::Cache,
     shared: Option<Arc<InlineCandidateTable>>,
     scratch: InlineScratch,
 }
@@ -258,6 +259,7 @@ impl InlineCache {
     pub fn replace_candidate_table(&mut self, table: Arc<InlineCandidateTable>) {
         self.cands.clear();
         self.callback_cands.clear();
+        self.callback_lift = Default::default();
         self.shared = Some(table);
     }
 
@@ -277,6 +279,7 @@ impl InlineCache {
     pub fn invalidate(&mut self, fref: FuncRef) {
         self.cands.retain(|inst, _| inst.func != fref);
         self.callback_cands.retain(|inst, _| inst.func != fref);
+        self.callback_lift.invalidate(fref);
     }
 }
 
@@ -523,6 +526,7 @@ fn compact_region(
     }
 
     let mut template = MirFunc::new(header.name);
+    template.direct_only = header.direct_only;
     template.code_identity = header.code_identity.clone();
     template.code_abi_fingerprint = header.code_abi_fingerprint.clone();
     template.code_compatibility = header.code_compatibility.clone();
@@ -1102,7 +1106,7 @@ impl CallbackProof {
 }
 
 /// The delivery record must agree with the concrete owner already on the call.
-fn call_target<'a>(
+pub(crate) fn call_target<'a>(
     func: &'a MirFunc,
     call_id: Idx<Inst>,
     fref: FuncRef,

@@ -913,6 +913,8 @@ pub struct LambdaAbi {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MirFunc {
     pub name: Ustr,
+    /// A private nested body reached only by compiler-generated direct calls.
+    pub direct_only: bool,
     pub code_identity: Option<crate::code_identity::CodeIdentity>,
     /// Contains no backend symbol or build-local `RepId`.
     pub code_abi_fingerprint: Option<String>,
@@ -963,6 +965,7 @@ pub struct MirFunc {
     pub call_abi_plans:
         bone_core::prelude::FxHashMap<Idx<Inst>, crate::lower::BackendFnAbiPlanHandle>,
     pub call_rep_plans: bone_core::prelude::FxHashMap<Idx<Inst>, crate::lower::FunctionRepPlan>,
+    /// Result width for a call whose physical lane count differs from its source ABI.
     pub flat_call_lanes: bone_core::prelude::FxHashMap<Idx<Inst>, usize>,
     pub closure_env_plans: bone_core::prelude::FxHashMap<Idx<Inst>, ClosureEnvPlan>,
     /// Not derivable from `dests.len()`: a one-leaf element is two dests either way.
@@ -1027,6 +1030,7 @@ impl MirFunc {
         let entry = blocks.alloc(Block::new());
         Self {
             name,
+            direct_only: false,
             code_identity: None,
             code_abi_fingerprint: None,
             lambda_abis: Default::default(),

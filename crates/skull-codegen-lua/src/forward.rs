@@ -89,27 +89,33 @@ pub(crate) fn tail_forwards<'a>(
         let Term::Return(values) = &block.term else {
             continue;
         };
-        if direct
-            && let Some(&call_id) = block.insts.last()
-            && let Inst::Call {
-                func: callee_ref, ..
-            } = &func.insts[call_id]
-        {
-            let callee = func_of(ws, *callee_ref);
-            let exact_wire =
-                func.call_abi_plans
+        if direct && let Some(&call_id) = block.insts.last() {
+            let exact_wire = |lanes| match lanes {
+                0 => values.is_empty(),
+                1 => values.as_slice() == [call_id],
+                _ => false,
+            };
+            let can_tail_call = match func.insts[call_id] {
+                Inst::Call {
+                    func: callee_ref, ..
+                } => {
+                    let callee = func_of(ws, callee_ref);
+                    // Foreign bodies can return extra values past the declared wire.
+                    callee.inline_body.is_none()
+                        && !callee.is_extern
+                        && !callee.is_coroutine
+                        && func
+                            .call_abi_plans
+                            .get(&call_id)
+                            .is_some_and(|abi| exact_wire(abi.result_lanes()))
+                }
+                Inst::CallValue { .. } => func
+                    .flat_call_lanes
                     .get(&call_id)
-                    .is_some_and(|abi| match abi.result_lanes() {
-                        0 => values.is_empty(),
-                        1 => values.as_slice() == [call_id],
-                        _ => false,
-                    });
-            // Foreign bodies can return extra Lua values beyond their declared wire.
-            if exact_wire
-                && callee.inline_body.is_none()
-                && !callee.is_extern
-                && !callee.is_coroutine
-            {
+                    .is_some_and(|&lanes| exact_wire(lanes)),
+                _ => false,
+            };
+            if can_tail_call {
                 forwards[raw(block_id) as usize] = Some(&block.insts[block.insts.len() - 1..]);
                 continue;
             }
@@ -125,7 +131,10 @@ pub(crate) fn tail_forwards<'a>(
         if dests.len() != values.len() {
             continue;
         }
-        let cell_references = cell_references.get_or_init(|| cell_reference_counts(func));
+        let lifted_tail =
+            direct && func.direct_only && func.flat_call_lanes.get(&call_id) == Some(&dests.len());
+        let cell_references =
+            (!lifted_tail).then(|| cell_references.get_or_init(|| cell_reference_counts(func)));
         let exact_wire = values
             .iter()
             .zip(dests)
@@ -133,7 +142,10 @@ pub(crate) fn tail_forwards<'a>(
             .all(|(i, (&value, &dest))| {
                 block.insts[first + i + 1] == value
                     && matches!(func.insts[value], Inst::Load(cell) if cell == dest)
-                    && cell_references[raw(dest) as usize] == 2
+                    && cell_references.map_or_else(
+                        || !func.cells[dest].borrowed && !dests[..i].contains(&dest),
+                        |references| references[raw(dest) as usize] == 2,
+                    )
             });
         if !exact_wire {
             continue;

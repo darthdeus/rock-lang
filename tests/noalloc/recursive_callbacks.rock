@@ -1,0 +1,124 @@
+fn follow(depth: int, callback: fn() -> int) -> int {
+    if depth == 0 { return callback() }
+    return follow(depth - 1, callback)
+}
+
+fn first(depth: int, callback: fn(int) -> int) -> int {
+    if depth == 0 { return callback(1) }
+    return second(depth - 1, callback)
+}
+
+fn second(depth: int, callback: fn(int) -> int) -> int {
+    if depth == 0 { return callback(2) }
+    return callback(depth) + first(depth - 1, callback)
+}
+
+@noalloc fn capture_through_recursion(value: int) -> int {
+    return follow(3, () => value + 1)
+}
+
+@noalloc fn mutate_through_recursion(start: int) -> (int, int) {
+    let count = start
+    let result = first(3, delta => {
+        count += delta
+        return count
+    })
+    return (count, result)
+}
+
+fn escape_at_end(depth: int, callback: fn() -> int) -> fn() -> int {
+    if depth == 0 { return callback }
+    return escape_at_end(depth - 1, callback)
+}
+
+fn escaping(start: int) -> fn() -> int {
+    let count = start
+    return escape_at_end(3, () => {
+        count += 1
+        return count
+    })
+}
+
+@test fn recursive_callback_delivery() {
+    assert(capture_through_recursion(9) == 10)
+    let (count, result) = mutate_through_recursion(5)
+    assert(count == 9 && result == 16)
+}
+
+@test fn recursive_escape_keeps_its_activation() {
+    let a = escaping(1)
+    let b = escaping(10)
+    assert(a() == 2 && b() == 11 && a() == 3)
+}
+
+fn run_loop(n: int, callback: fn(int)) {
+    let i = 0
+    while i < n {
+        callback(i)
+        i += 1
+    }
+}
+
+@noalloc fn capture_through_loop(start: int) -> int {
+    let total = start
+    run_loop(4, value => { total += value })
+    return total
+}
+
+@noalloc fn recurse_inside_callback(depth: int, base: int) -> int {
+    if depth == 0 { return base }
+    return follow(2, () => base + recurse_inside_callback(depth - 1, base + 1))
+}
+
+fn shared_through_recursion(start: int) -> int {
+    let count = start
+    let get = () => count
+    return first(3, delta => {
+        count += delta
+        return get()
+    }) + get()
+}
+
+global seen_on_unwind: int = 0
+
+@nomangle fn fail_through_recursion(start: int) {
+    let count = start
+    defer { seen_on_unwind = count }
+    let _ = follow(3, () => {
+        count += 1
+        error("recursive callback failed")
+        return 0
+    })
+}
+
+inline(lua) fn recursive_callback_failed() -> bool = """
+    local ok, err = pcall(fail_through_recursion, 10)
+    return not ok and string.find(tostring(err), "recursive callback failed", 1, true) ~= nil
+"""
+
+@test fn loop_and_overlapping_activations() {
+    assert(capture_through_loop(10) == 16)
+    assert(recurse_inside_callback(3, 5) == 26)
+    assert(shared_through_recursion(5) == 25)
+}
+
+@test(backends = "lua")
+fn recursive_callback_mutation_survives_unwind() {
+    assert(recursive_callback_failed())
+    assert(seen_on_unwind == 11)
+}
+
+@noalloc fn tail_forward(depth: int, start: int) -> (int, int) {
+    let count = start
+    let result = follow(depth, () => {
+        count += 1
+        return count
+    })
+    return (count, result)
+}
+
+@test(backends = "lua")
+fn lifted_callback_preserves_tail_recursion() {
+    let (count, result) = tail_forward(40000, 9)
+    assert(count == 10 && result == 10)
+}

@@ -1,12 +1,13 @@
-use rustc_hash::FxHashSet as HashSet;
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use bone_core::hir::FnBackend;
 use bone_core::prelude::CompilerError;
 use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
+use skull_mir::code_identity::LambdaSiteId;
 use skull_mir::concrete::ConcretePlans;
 use skull_mir::lower::ScalarCtx;
-use skull_mir::mir::{FuncRef, Inst, MirFunc};
+use skull_mir::mir::{Cell, FuncRef, Inst, MirFunc};
 use skull_mir::verify::Stage;
 
 use crate::InlineCache;
@@ -139,7 +140,31 @@ pub fn prepare_body(
     debug_verify(ws, opts.target, mf, Stage::LOWERED, &"lowering");
     let outcome = inliner.run(ws, mf, BodyPass::Inline, Stage::LOWERED, obs)?;
     let mut spliced = outcome.dependencies;
-    convert(ws, mf, name, opts, obs, &outcome.callbacks)?;
+    convert(
+        ws,
+        mf,
+        name,
+        opts,
+        obs,
+        &outcome.callbacks,
+        |mf, sites, shared| {
+            let caller = &ws.module(inliner.self_ref.module).functions[inliner.self_ref.func];
+            crate::callback_lift::run(
+                crate::callback_lift::Context {
+                    ws,
+                    scx: inliner.scx,
+                    plans: inliner.plans,
+                    allow_acyclic: caller.annotations.iter().any(|a| a.is_builtin("noalloc")),
+                },
+                &mut inliner.cache.callback_lift,
+                mf,
+                name,
+                &mut spliced,
+                sites,
+                shared,
+            )
+        },
+    )?;
     if opts.inline_hoisted {
         inline_hoisted(ws, &mut inliner, &mut mf.nested_fns, &mut spliced, obs)?;
     }
@@ -154,7 +179,9 @@ pub fn convert_body(
     obs: &mut dyn PassObserver,
 ) -> Result<(), ChainError> {
     debug_verify(ws, opts.target, mf, Stage::LOWERED, &"lowering");
-    convert(ws, mf, name, opts, obs, &HashSet::default())
+    convert(ws, mf, name, opts, obs, &HashSet::default(), |_, _, _| {
+        false
+    })
 }
 
 fn convert(
@@ -164,15 +191,28 @@ fn convert(
     opts: &ChainOptions<'_>,
     obs: &mut dyn PassObserver,
     callbacks: &HashSet<Idx<Inst>>,
+    lift: impl FnOnce(
+        &mut MirFunc,
+        &mut Option<HashMap<Idx<Inst>, LambdaSiteId>>,
+        &mut HashMap<Idx<Inst>, Idx<Cell>>,
+    ) -> bool,
 ) -> Result<(), ChainError> {
     cleanup(ws, opts.target, mf, BodyPass::Cleanup, obs)?;
-    let lambda_sites = (!callbacks.is_empty()).then(|| crate::closure::lambda_sites(mf));
+    let mut lambda_sites = (!callbacks.is_empty()).then(|| crate::closure::lambda_sites(mf));
     if crate::lambda_inline::inline_lambda_calls(mf, callbacks) {
         cleanup(ws, opts.target, mf, BodyPass::Cleanup, obs)?;
     }
-    obs.begin(BodyPass::Closure, mf);
     let named = mf.nested_fns.len();
-    crate::convert_closures_framed(mf, name, lambda_sites.as_ref(), None, None);
+    let mut shared = HashMap::default();
+    let lifted = lift(mf, &mut lambda_sites, &mut shared);
+    if lifted && shared.is_empty() {
+        cleanup(ws, opts.target, mf, BodyPass::Cleanup, obs)?;
+    }
+    obs.begin(BodyPass::Closure, mf);
+    crate::closure::convert_closures_with_lifted(mf, name, lambda_sites.as_ref(), &shared);
+    if !shared.is_empty() {
+        cleanup_converted(ws, opts.target, mf, obs)?;
+    }
     for nf in &mf.nested_fns[named..] {
         (opts.reserve)(&nf.name);
     }
@@ -205,6 +245,15 @@ fn recover_and_elide(
     obs.bounds_elided(count);
     obs.end(BodyPass::Bounds, mf);
     verify_after(ws, opts.target, mf, Stage::CONVERTED, BodyPass::Bounds);
+}
+
+fn cleanup_converted(
+    ws: &Workspace,
+    target: FnBackend,
+    mf: &mut MirFunc,
+    obs: &mut dyn PassObserver,
+) -> Result<(), ChainError> {
+    cleanup(ws, target, mf, BodyPass::HoistedInline, obs)
 }
 
 fn cleanup(

@@ -4,6 +4,7 @@
 
 pub mod body_chain;
 pub mod bound;
+mod callback_lift;
 mod capture_lifetime;
 mod cleanup;
 mod closure;

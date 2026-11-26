@@ -99,12 +99,19 @@ pub(crate) fn checked_integer_guard(mf: &MirFunc, call: Idx<Inst>) -> bool {
                     if matches!(mf.insts[*unsigned], Inst::Const(Lit::Bool(_)))))
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct Contract<'a> {
+    pub source: &'a Function,
+    pub lifted: &'a FxHashSet<ustr::Ustr>,
+}
+
 pub(super) fn validate(
     ws: &Workspace,
-    f: &Function,
+    contract: Contract<'_>,
     mf: &MirFunc,
     emission: &LuaEmission,
 ) -> Result<(), CompilerError> {
+    let f = contract.source;
     let failure = |span, reason| {
         CompilerError::new_with_label(span, format!("`@noalloc` function `{}`: {reason}", f.name))
     };
@@ -170,6 +177,10 @@ pub(super) fn validate(
                     "calls non-@noalloc `{}`",
                     skull_mir::mangle::declared_name(callee.name.as_str())
                 )
+            }
+            Inst::CallValue { callee, .. } | Inst::CallValueMulti { callee, .. } if matches!(mf.insts[callee], Inst::Global(name) if contract.lifted.contains(&name)) =>
+            {
+                continue;
             }
             Inst::CallValue { .. } if checked_integer_guard(mf, id) => continue,
             Inst::CallValue { .. } | Inst::CallValueMulti { .. } => {

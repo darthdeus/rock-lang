@@ -182,11 +182,32 @@ pub fn convert_closures_framed(
     frame: Option<&FrameInfo<'_>>,
     precomputed: Option<(&ScopeTree, &Ownership)>,
 ) {
+    convert_closures_impl(mf, name_base, sites, frame, precomputed, None);
+}
+
+pub(crate) fn convert_closures_with_lifted(
+    mf: &mut MirFunc,
+    name_base: &str,
+    sites: Option<&HashMap<Idx<Inst>, LambdaSiteId>>,
+    shared_loads: &HashMap<Idx<Inst>, Idx<Cell>>,
+) {
+    convert_closures_impl(mf, name_base, sites, None, None, Some(shared_loads));
+}
+
+fn convert_closures_impl(
+    mf: &mut MirFunc,
+    name_base: &str,
+    sites: Option<&HashMap<Idx<Inst>, LambdaSiteId>>,
+    frame: Option<&FrameInfo<'_>>,
+    precomputed: Option<(&ScopeTree, &Ownership)>,
+    shared_loads: Option<&HashMap<Idx<Inst>, Idx<Cell>>>,
+) {
     if !mf
         .insts
         .iter()
         .any(|(_, i)| matches!(i, Inst::Lambda { .. }))
         && frame.is_none_or(|f| f.boxed_cells().next().is_none())
+        && shared_loads.is_none_or(HashMap::is_empty)
     {
         refresh_owner_compatibility(mf, None, LambdaTopologyFingerprint::default());
         return;
@@ -247,6 +268,10 @@ pub fn convert_closures_framed(
     if let Some(f) = frame {
         // Detached regions access the live pointer but never initialize it.
         boxed.extend(f.boxed_cells());
+    }
+
+    if let Some(loads) = shared_loads {
+        boxed.extend(loads.values().copied());
     }
 
     let mut lambda_sid: HashMap<Idx<Inst>, ScopeId> = HashMap::default();
@@ -350,6 +375,10 @@ pub fn convert_closures_framed(
         let orig = std::mem::take(&mut mf.blocks[b].insts);
         let mut new: Vec<Idx<Inst>> = Vec::with_capacity(orig.len());
         for id in orig {
+            if shared_loads.is_some_and(|loads| loads.contains_key(&id)) {
+                new.push(id);
+                continue;
+            }
             match mf.insts[id].clone() {
                 Inst::Load(c) | Inst::Store { cell: c, .. } => {
                     let value = match mf.insts[id] {

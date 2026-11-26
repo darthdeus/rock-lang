@@ -9,6 +9,15 @@ use crate::lower::backend_variant;
 use crate::mir::FuncRef;
 use crate::monoty::{MonoCtor, MonoTy};
 
+/// LuaJIT's `LJ_MAX_LOCVAR` limits the active locals, including parameters.
+pub const LUAJIT_MAX_ACTIVE_LOCALS: usize = 200;
+
+/// LuaJIT rejects frame sizes at `LJ_MAX_SLOTS`.
+pub const LUAJIT_FRAME_SLOT_LIMIT: usize = 250;
+
+/// The callee and frame-link slots in a 64-bit LuaJIT call.
+pub const LUAJIT_CALL_BASE_SLOTS: usize = 2;
+
 fn published(function: &Function) -> bool {
     function.backend != FnBackend::Js
         && function

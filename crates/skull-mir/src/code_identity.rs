@@ -564,7 +564,7 @@ impl CodeArtifact {
             self.mark_value(identity.clone());
         }
         for nested in &mf.nested_fns {
-            self.visit_mir(nested, true, ws, interner);
+            self.visit_mir(nested, !nested.direct_only, ws, interner);
         }
     }
 
@@ -743,10 +743,28 @@ impl CodeArtifact {
     }
 }
 
+/// Distinguish private bodies that may have different call contracts across overlays.
+pub fn direct_body_fingerprint(
+    mf: &MirFunc,
+    ws: &bone_core::workspace::Workspace,
+    interner: &MonoInterner,
+) -> u64 {
+    body_fingerprint_with_vars(mf, ws, interner, &FxHashSet::default())
+}
+
 fn body_fingerprint(
     mf: &MirFunc,
     ws: &bone_core::workspace::Workspace,
     interner: &MonoInterner,
+) -> u64 {
+    body_fingerprint_with_vars(mf, ws, interner, &ws.comptime_inputs.volatile_vars)
+}
+
+fn body_fingerprint_with_vars(
+    mf: &MirFunc,
+    ws: &bone_core::workspace::Workspace,
+    interner: &MonoInterner,
+    volatile_vars: &FxHashSet<Ustr>,
 ) -> u64 {
     // A duplicate-body witness only, never used to find a slot. Only the reachable
     // body is hashed, so cloned lowering leftovers cannot split one lambda.
@@ -754,9 +772,7 @@ fn body_fingerprint(
         .comptime_reads
         .iter()
         .filter_map(|read| match &read.input {
-            crate::mir::ComptimeInputId::Var(name)
-                if ws.comptime_inputs.volatile_vars.contains(name) =>
-            {
+            crate::mir::ComptimeInputId::Var(name) if volatile_vars.contains(name) => {
                 Some(read.span)
             }
             _ => None,

@@ -10,3 +10,20 @@ fn seed() -> int { return 7 }
 fn called_initializer_closure_reads_its_dependency() {
     assert_eq(first, 7)
 }
+
+global recursive_first: int = make_recursive(6)
+global recursive_second: int = seed()
+
+fn follow(depth: int, read: fn() -> int) -> int {
+    if depth == 0 { return read() }
+    return follow(depth - 1, read)
+}
+
+@noalloc fn make_recursive(offset: int) -> int {
+    return follow(3, () => recursive_second + offset)
+}
+
+@test
+fn initializer_reads_a_lifted_recursive_callback_dependency() {
+    assert_eq(recursive_first, 13)
+}
