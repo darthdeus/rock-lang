@@ -61,7 +61,24 @@ extern "C" {
         capacity: c_int,
         stride: c_int,
     ) -> bool;
+    fn stone_target_create(
+        width: c_int,
+        height: c_int,
+        formats: *const c_int,
+        count: c_int,
+        with_depth: bool,
+    ) -> u64;
     fn stone_target_resize(handle: u64, width: c_int, height: c_int) -> bool;
+    fn stone_native_target_info(
+        handle: u64,
+        width: *mut c_int,
+        height: *mut c_int,
+        format: *mut c_int,
+        color_attachments: *mut c_int,
+        has_depth: *mut bool,
+    ) -> u64;
+    fn stone_canvas_resize(handle: u64, width: c_int, height: c_int) -> bool;
+    fn stone_canvas_attach_color_target(color: u64, attachment: u64, slot: c_int) -> bool;
     fn stone_target_destroy(handle: u64);
     fn stone_target_attachment(handle: u64, slot: c_int) -> u64;
 
@@ -527,6 +544,48 @@ unsafe fn only_published_shaders_are_findable_and_a_failed_reload_keeps_the_live
     assert_eq!(stone_native_find_shader(c"reload_probe".as_ptr()), 0);
 }
 
+unsafe fn target_width(handle: u64) -> c_int {
+    let (mut w, mut h, mut fmt, mut count, mut depth) = (0, 0, 0, 0, false);
+    stone_native_target_info(handle, &mut w, &mut h, &mut fmt, &mut count, &mut depth);
+    w
+}
+
+unsafe fn owned_attachments_change_only_through_their_owner() {
+    let formats: [c_int; 2] = [0, 3];
+    let target = stone_target_create(16, 16, formats.as_ptr(), 2, false);
+    assert_ne!(target, 0);
+    let child = stone_target_attachment(target, 1);
+    assert_ne!(child, 0);
+    let other = stone_create_canvas(16, 16, STONE_CANVAS_RGBA8, false);
+    let target_gen = stone_native_handle_generation(STONE_RESOURCE_TARGET, target);
+    let child_gen = stone_native_handle_generation(STONE_RESOURCE_TARGET, child);
+
+    stone_destroy_canvas(child);
+    stone_target_destroy(child);
+    assert!(stone_native_handle_valid(STONE_RESOURCE_TARGET, child));
+    assert!(!stone_canvas_resize(child, 20, 20));
+    assert!(!stone_target_resize(child, 20, 20));
+    assert_eq!(target_width(child), 16);
+    assert!(!stone_canvas_attach_color_target(target, other, 1));
+    assert_eq!(stone_target_attachment(target, 1), child);
+    assert!(!stone_canvas_attach_color_target(other, child, 1));
+    assert_eq!(stone_target_attachment(other, 1), 0);
+    assert_eq!(
+        stone_native_handle_generation(STONE_RESOURCE_TARGET, target),
+        target_gen
+    );
+    assert_eq!(
+        stone_native_handle_generation(STONE_RESOURCE_TARGET, child),
+        child_gen
+    );
+
+    assert!(stone_target_resize(target, 24, 24));
+    assert_eq!(target_width(child), 24);
+    stone_target_destroy(target);
+    assert!(!stone_native_handle_valid(STONE_RESOURCE_TARGET, child));
+    stone_destroy_canvas(other);
+}
+
 fn second_native_library_renders_multi_attachment_target_restores_state_and_invalidates_handles() {
     let tmp = tempfile::tempdir().unwrap();
     let plugin_path = compile_second_library(tmp.path());
@@ -550,6 +609,7 @@ fn second_native_library_renders_multi_attachment_target_restores_state_and_inva
     with_host(|gl| unsafe {
         stage_scopes_unwind_reject_stale_tokens_and_clear_at_frame_start(gl);
         only_published_shaders_are_findable_and_a_failed_reload_keeps_the_live_one();
+        owned_attachments_change_only_through_their_owner();
 
         assert!(stone_native_renderer_api(999).is_null());
         let api_ptr = stone_native_renderer_api(STONE_NATIVE_RENDERER_ABI_VERSION);

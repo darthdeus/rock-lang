@@ -542,6 +542,9 @@ Resource kinds are typed (`STONE_RESOURCE_TARGET = 1`, `SHADER = 2`,
   `stone_target_destroy(handle)` releases all of them together.
 - `stone_target_attachment(handle, slot)` returns the canvas handle for colour
   attachment `slot` (`0` = primary target, `1..7` = secondary attachments).
+- Secondary attachments created by `stone_target_create` belong to their
+  target: destroying, resizing or re-attaching one directly (or attaching
+  another canvas at its slot) is refused with a logged error.
 - Script-side Rock code borrows a native-owned target (or attachment) for
   drawing with `native_target_canvas(handle, slot)` and `sampled_canvas(...)`;
   ownership remains with the native library.
