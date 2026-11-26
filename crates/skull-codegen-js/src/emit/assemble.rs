@@ -84,7 +84,7 @@ pub(super) fn assemble_program_core(
     let mut out = String::new();
     let mut code_artifact = CodeArtifact::default();
     for (name, mf) in &deco_bodies {
-        let mut artifact = js_code_artifact(ws, mf);
+        let mut artifact = js_code_artifact(ws, scx.interner(), mf);
         artifact.set_body_names(mf, name);
         code_artifact.merge(artifact);
     }
@@ -141,7 +141,7 @@ pub(super) fn assemble_program_core(
             }
         };
         out.push_str(&definition);
-        let mut artifact = js_code_artifact(ws, &g.mf);
+        let mut artifact = js_code_artifact(ws, scx.interner(), &g.mf);
         artifact.set_body_names(&g.mf, &g.init_name);
         code_artifact.merge(artifact);
     }

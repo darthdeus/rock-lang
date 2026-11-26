@@ -159,9 +159,7 @@ pub fn prepare_coroutine(
             &"coroutine preparation",
         );
     }
-    let volatile_vars = &ws.comptime_inputs.volatile_vars;
-    let mut code_artifact =
-        CodeArtifact::from_mir_tree_with_volatile_vars(&lowered.step, volatile_vars);
+    let mut code_artifact = CodeArtifact::from_mir_tree(&lowered.step, ws, interner);
     code_artifact.set_body_names(&lowered.step, &step_name);
     if let Some(identity) = &lowered.step.code_identity {
         if let Some(entry) = code_artifact.entries.get_mut(identity) {
@@ -170,7 +168,7 @@ pub fn prepare_coroutine(
         }
     }
     for aux in defers.iter().chain(hooks.iter().map(|(_, aux)| aux)) {
-        let mut artifact = CodeArtifact::from_mir_tree_with_volatile_vars(aux, volatile_vars);
+        let mut artifact = CodeArtifact::from_mir_tree(aux, ws, interner);
         artifact.set_body_names(aux, aux.name.as_str());
         code_artifact.merge(artifact);
     }
@@ -247,8 +245,9 @@ fn add_coroutine_code_values(
             enclosing: owner.clone(),
             role: Ustr::from(role),
         };
-        artifact.add_generated_value(identity.clone(), generated_compatibility(role), body);
-        identity.logical_key(ws, interner)
+        let key = identity.logical_key(ws, interner);
+        artifact.add_generated_value(identity, &key, generated_compatibility(role), body);
+        key
     };
     let resume = generated("resume", &plan.resume());
     let advance = plan.advance().map(|body| generated("advance", &body));

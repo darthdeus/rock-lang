@@ -47,6 +47,7 @@ pub(super) fn emit_decorator_unit(
             };
             emit_lowered(
                 ws,
+                scx.interner(),
                 cg,
                 &mut out,
                 &mf,

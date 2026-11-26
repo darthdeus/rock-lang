@@ -2,8 +2,12 @@ use super::*;
 
 /// The code identities of `mf` and its nested bodies. Volatile build values
 /// are metadata, so a changed build clock does not read as a body edit.
-pub(super) fn js_code_artifact(ws: &Workspace, mf: &MirFunc) -> CodeArtifact {
-    CodeArtifact::from_mir_tree_with_volatile_vars(mf, &ws.comptime_inputs.volatile_vars)
+pub(super) fn js_code_artifact(
+    ws: &Workspace,
+    interner: &skull_mir::monoty::MonoInterner,
+    mf: &MirFunc,
+) -> CodeArtifact {
+    CodeArtifact::from_mir_tree(mf, ws, interner)
 }
 
 /// Emit a `co fn` following the Lua ctor contract: the object is the frame.

@@ -412,6 +412,7 @@ pub(super) fn emit_global_unit(
             // called, so they are not init-ordering constraints.
             emit_lowered(
                 ws,
+                scx.interner(),
                 cg,
                 &mut out,
                 &mf,

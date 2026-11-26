@@ -137,6 +137,7 @@ pub(super) struct UnitOut {
 
 pub(super) fn emit_lowered(
     ws: &Workspace,
+    interner: &skull_mir::monoty::MonoInterner,
     cg: &CodegenCtx,
     out: &mut UnitOut,
     mf: &MirFunc,
@@ -155,11 +156,7 @@ pub(super) fn emit_lowered(
     crate::push_value_ctor_calls(&lua, &mut out.global_names);
     out.comptime_reads = mf.comptime_reads.clone();
     out.lua = lua;
-    let mut code_artifact =
-        skull_mir::code_identity::CodeArtifact::from_mir_tree_with_volatile_vars(
-            mf,
-            &ws.comptime_inputs.volatile_vars,
-        );
+    let mut code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(mf, ws, interner);
     code_artifact.set_body_names(mf, body_name);
     out.code_artifact = code_artifact.into();
     out.times.validation += tv.elapsed();

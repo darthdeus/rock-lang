@@ -249,10 +249,7 @@ fn finish_body_chunk(
     let embedded_deps = ordinary.then(|| deps.clone());
     collect_callee_frefs(&mf, &mut deps);
     let mut code_artifact =
-        skull_mir::code_identity::CodeArtifact::from_mir_tree_with_volatile_vars(
-            &mf,
-            &ws.comptime_inputs.volatile_vars,
-        );
+        skull_mir::code_identity::CodeArtifact::from_mir_tree(&mf, ws, scx.interner());
     code_artifact.set_body_names(&mf, name);
     // Global-init ordering is stated over declarations, not specializations.
     let (direct_globals, direct_calls) = if ordinary {

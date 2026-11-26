@@ -493,12 +493,13 @@ impl CodeArtifact {
 
     /// Volatile comptime values are metadata in body witnesses, but the
     /// surrounding code shape is still hashed, so a body edit cannot hide.
-    pub fn from_mir_tree_with_volatile_vars(
+    pub fn from_mir_tree(
         root: &MirFunc,
-        volatile_vars: &FxHashSet<Ustr>,
+        ws: &bone_core::workspace::Workspace,
+        interner: &MonoInterner,
     ) -> Self {
         let mut out = Self::default();
-        out.visit_mir(root, false, volatile_vars);
+        out.visit_mir(root, false, ws, interner);
         out.unify_owner_topologies();
         out
     }
@@ -540,12 +541,18 @@ impl CodeArtifact {
         }
     }
 
-    fn visit_mir(&mut self, mf: &MirFunc, escaping: bool, volatile_vars: &FxHashSet<Ustr>) {
+    fn visit_mir(
+        &mut self,
+        mf: &MirFunc,
+        escaping: bool,
+        ws: &bone_core::workspace::Workspace,
+        interner: &MonoInterner,
+    ) {
         match (&mf.code_identity, &mf.code_compatibility) {
             (Some(identity), Some(compatibility)) => self.insert(CodeEntry {
                 identity: identity.clone(),
                 compatibility: compatibility.clone(),
-                body_fingerprint: body_fingerprint(mf, volatile_vars),
+                body_fingerprint: body_fingerprint(mf, ws, interner),
                 body_name: Some(mf.name),
                 escaping,
                 capture_free: compatibility.capture.fields.is_empty(),
@@ -557,7 +564,7 @@ impl CodeArtifact {
             self.mark_value(identity.clone());
         }
         for nested in &mf.nested_fns {
-            self.visit_mir(nested, true, volatile_vars);
+            self.visit_mir(nested, true, ws, interner);
         }
     }
 
@@ -591,11 +598,12 @@ impl CodeArtifact {
     pub fn add_generated_value(
         &mut self,
         identity: CodeIdentity,
+        logical_key: &str,
         compatibility: CodeCompatibility,
         body_name: &str,
     ) {
         let mut fingerprint = Fnv64::new();
-        fingerprint.write_str(&format!("{identity:?}"));
+        fingerprint.write_str(logical_key);
         self.insert(CodeEntry {
             identity,
             compatibility,
@@ -735,19 +743,32 @@ impl CodeArtifact {
     }
 }
 
-fn body_fingerprint(mf: &MirFunc, volatile_vars: &FxHashSet<Ustr>) -> u64 {
+fn body_fingerprint(
+    mf: &MirFunc,
+    ws: &bone_core::workspace::Workspace,
+    interner: &MonoInterner,
+) -> u64 {
     // A duplicate-body witness only, never used to find a slot. Only the reachable
     // body is hashed, so cloned lowering leftovers cannot split one lambda.
     let volatile_comptime_spans = mf
         .comptime_reads
         .iter()
         .filter_map(|read| match &read.input {
-            crate::mir::ComptimeInputId::Var(name) if volatile_vars.contains(name) => {
+            crate::mir::ComptimeInputId::Var(name)
+                if ws.comptime_inputs.volatile_vars.contains(name) =>
+            {
                 Some(read.span)
             }
             _ => None,
         })
         .collect::<Vec<_>>();
+    // The debug form of a CodeIdentity includes interned type ids, whose
+    // assignment order can vary when specializations lower in parallel.
+    let aliases = mf
+        .nested_fn_identities
+        .iter()
+        .map(|(&name, identity)| (name, identity.logical_key(ws, interner)))
+        .collect();
     let mut hasher = BodyHasher::for_body(mf);
     for block in crate::cfg::reachable_blocks_from(mf, mf.entry) {
         hasher.tag(1);
@@ -756,7 +777,7 @@ fn body_fingerprint(mf: &MirFunc, volatile_vars: &FxHashSet<Ustr>) -> u64 {
                 .inst_spans
                 .get(*inst_id)
                 .is_some_and(|span| volatile_comptime_spans.contains(span));
-            hasher.inst(&mf.insts[*inst_id], &mf.nested_fn_identities, volatile);
+            hasher.inst(&mf.insts[*inst_id], &aliases, volatile);
         }
         hasher.tag(2);
         hasher.term(&mf.blocks[block].term);
@@ -905,10 +926,10 @@ impl BodyHasher {
         }
     }
 
-    fn aliased_name(&mut self, name: Ustr, aliases: &FxHashMap<Ustr, CodeIdentity>) {
+    fn aliased_name(&mut self, name: Ustr, aliases: &FxHashMap<Ustr, String>) {
         if let Some(identity) = aliases.get(&name) {
             self.tag(1);
-            self.string(&format!("__rock_nested_{identity:?}"));
+            self.string(identity);
         } else {
             self.tag(0);
             self.artifact_name(name.as_str());
@@ -997,7 +1018,7 @@ impl BodyHasher {
 
     /// Operands go through the IR's own visitors, so only payload that is not an
     /// instruction or cell index is listed per variant.
-    fn inst(&mut self, inst: &Inst, aliases: &FxHashMap<Ustr, CodeIdentity>, volatile: bool) {
+    fn inst(&mut self, inst: &Inst, aliases: &FxHashMap<Ustr, String>, volatile: bool) {
         use std::hash::Hash;
         if let Inst::MakeFlatVec(vec) = inst {
             let opcode: isize = match vec.contents {
@@ -1355,6 +1376,60 @@ mod tests {
             assert_eq!(at_once.census.missing_identity, bodies.len());
             assert_eq!(at_once.census.duplicate_identity, 1);
         }
+    }
+
+    #[test]
+    fn closure_body_fingerprint_does_not_depend_on_type_interning_order() {
+        use crate::monoty::MonoTy;
+        let file = Ustr::from("fixture.rock");
+        let ast =
+            skull_parser::parse_module_clean("fn make<T>(value: T) -> T { value }", file).unwrap();
+        let mut ws = bone_core::workspace::Workspace::default();
+        bone_semantic::semantic_passes::build_namespaces(&mut ws, [&ast], &Default::default())
+            .unwrap();
+        let modules = bone_semantic::semantic_passes::lower_and_infer(&mut ws, &[ast]).unwrap();
+        let module = modules[0];
+        let func = ws.module(module).functions.iter().next().unwrap().0;
+        let declaration = FuncRef { module, func };
+        let fingerprint = |seed: MonoTy, ty: MonoTy| {
+            let interner = MonoInterner::default();
+            interner.intern(seed);
+            let instance = Instance::intern(&interner, declaration, vec![ty]);
+            let root = CodeIdentity::Named(instance.clone());
+            let mut mir = MirFunc::new(Ustr::from("make"));
+            mir.code_identity = Some(root.clone());
+            mir.code_compatibility = Some(CodeCompatibility {
+                call_abi: "fixture".into(),
+                capture: CaptureSchema::empty(),
+                frame: None,
+                lambda_topology: LambdaTopologyFingerprint::default(),
+            });
+            let name = Ustr::from("nested");
+            mir.nested_fn_identities.insert(
+                name,
+                CodeIdentity::Lambda {
+                    enclosing: CodeOwner::Instance(instance),
+                    site: LambdaSiteId {
+                        file,
+                        path: Ustr::from("0"),
+                    },
+                },
+            );
+            let value = mir.insts.alloc(Inst::Global(name));
+            mir.blocks[mir.entry].insts.push(value);
+            mir.blocks[mir.entry].term = Term::Return(vec![value]);
+            CodeArtifact::from_mir_tree(&mir, &ws, &interner)
+                .body_fingerprint(&root)
+                .unwrap()
+        };
+        assert_eq!(
+            fingerprint(MonoTy::Int, MonoTy::Int),
+            fingerprint(MonoTy::Bool, MonoTy::Int)
+        );
+        assert_ne!(
+            fingerprint(MonoTy::Bool, MonoTy::Int),
+            fingerprint(MonoTy::Bool, MonoTy::Bool)
+        );
     }
 
     #[test]

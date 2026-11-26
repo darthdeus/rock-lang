@@ -13,7 +13,7 @@ use skull_mir::mir::{ComptimeInputId, ComptimeRead, comptime_value_hash};
 use skull_mir::monoty::MonoInterner;
 use ustr::Ustr;
 
-const FINGERPRINT_VERSION: &str = "semantic-artifact-v3";
+const FINGERPRINT_VERSION: &str = "semantic-artifact-v4";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FingerprintError(pub String);

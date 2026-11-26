@@ -22,10 +22,7 @@ fn converted(src: &str, edit: impl FnOnce(&mut MirFunc)) -> (MirFunc, String) {
             None,
         ));
     }
-    let mut artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree_with_volatile_vars(
-        &mf,
-        &Default::default(),
-    );
+    let mut artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&mf, &ws, &interner);
     artifact.set_body_names(&mf, "f");
     lua.push_str("__rock_code_slot_begin()\n");
     for entry in artifact.entries.values().filter(|e| e.escaping) {

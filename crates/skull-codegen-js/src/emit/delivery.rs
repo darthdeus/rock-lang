@@ -310,7 +310,7 @@ pub(super) fn emit_lowered_fn(
         return emit_coroutine_js(ws, interner, &plan, concrete, mf, names, hoisted, gctx);
     }
     let out = emit_body_with_nested(ws, mf, js_name, names, hoisted, gctx)?;
-    let mut code_artifact = js_code_artifact(ws, mf);
+    let mut code_artifact = js_code_artifact(ws, interner, mf);
     code_artifact.set_body_names(mf, js_name);
     Ok((out, code_artifact))
 }
