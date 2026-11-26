@@ -160,6 +160,7 @@ pub extern(ffi, "stone") fn stone_read_canvas_pixel_channel(handle: int, x: int,
 extern(ffi, "stone") fn stone_read_depth_pixel(handle: int, x: int, y: int) -> float
 extern(ffi, "stone") fn stone_read_window_rect(x: int, y: int, w: int, h: int, out: PtrU8)
 extern(ffi, "stone") fn stone_reset_cursor()
+extern(ffi, "stone") fn stone_restore_after_custom_draw()
 pub extern(ffi, "stone") fn stone_sampler_bound(unit: int) -> bool
 pub extern(ffi, "stone") fn stone_save_screenshot(filepath: string, width: int, height: int, max_size: int) -> bool
 extern(ffi, "stone") fn stone_save_screenshot_sized(filepath: string, width: int, height: int, max_size: int, out_w: Ptr<int>, out_h: Ptr<int>) -> bool

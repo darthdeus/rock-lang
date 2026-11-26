@@ -36,6 +36,7 @@ const STONE_RESOURCE_MESH: c_int = 4;
 const STONE_STAGE_RESTORED: u32 = 1 << 0;
 const STONE_STAGE_TARGET_CHANGED: u32 = 1 << 1;
 const STONE_STAGE_SHADER_CHANGED: u32 = 1 << 2;
+const STONE_STAGE_UNWOUND: u32 = 1 << 4;
 
 const STONE_CANVAS_RGBA8: c_int = 0;
 
@@ -78,6 +79,7 @@ extern "C" {
     fn stone_set_shader(handle: u64);
     fn stone_create_canvas(width: c_int, height: c_int, format: c_int, with_depth: bool) -> u64;
     fn stone_set_canvas(handle: u64);
+    fn stone_destroy_canvas(handle: u64);
     fn stone_clear_canvas(r: c_float, g: c_float, b: c_float, a: c_float);
     fn stone_set_blend_mode_i(mode: c_int);
     fn stone_set_depth_mode(compare: *const c_char, write: bool);
@@ -412,6 +414,81 @@ fn compile_second_library(dir: &std::path::Path) -> PathBuf {
     out
 }
 
+unsafe fn bound_draw_fbo(gl: &glow::Context) -> i32 {
+    gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING)
+}
+
+unsafe fn stage_scopes_unwind_reject_stale_tokens_and_clear_at_frame_start(gl: &glow::Context) {
+    let host = stone_create_canvas(16, 16, STONE_CANVAS_RGBA8, false);
+    let other = stone_create_canvas(8, 8, STONE_CANVAS_RGBA8, false);
+    assert!(host != 0 && other != 0);
+    stone_set_canvas(host);
+    stone_set_blend_mode_i(0);
+    let host_fbo = bound_draw_fbo(gl);
+    let entry_src_rgb = gl.get_parameter_i32(glow::BLEND_SRC_RGB);
+
+    // End without begin.
+    assert_eq!(stone_native_stage_end(0), 0);
+    assert_eq!(stone_native_stage_end(0x7fff_0001), 0);
+    assert!(!stone_native_frame_active());
+
+    // Nested scopes close in LIFO order.
+    let outer = stone_native_stage_begin();
+    let inner = stone_native_stage_begin();
+    assert!(outer != 0 && inner != 0 && outer != inner);
+    stone_set_canvas(other);
+    let flags = stone_native_stage_end(inner);
+    assert_ne!(flags & STONE_STAGE_RESTORED, 0);
+    assert_eq!(flags & STONE_STAGE_UNWOUND, 0);
+    assert!(stone_native_frame_active());
+    assert_eq!(stone_native_frame_target(), host);
+    let flags = stone_native_stage_end(outer);
+    assert_ne!(flags & STONE_STAGE_RESTORED, 0);
+    assert_eq!(flags & STONE_STAGE_UNWOUND, 0);
+    assert!(!stone_native_frame_active());
+
+    // Ending the outer scope with the inner one still open unwinds the inner
+    // scope and restores the outer snapshot.
+    let outer = stone_native_stage_begin();
+    let inner = stone_native_stage_begin();
+    stone_set_canvas(other);
+    stone_set_blend_mode_i(4);
+    let flags = stone_native_stage_end(outer);
+    assert_ne!(flags & STONE_STAGE_RESTORED, 0);
+    assert_ne!(flags & STONE_STAGE_UNWOUND, 0);
+    assert_ne!(flags & STONE_STAGE_TARGET_CHANGED, 0);
+    assert!(!stone_native_frame_active());
+    assert_eq!(bound_draw_fbo(gl), host_fbo);
+    assert_eq!(gl.get_parameter_i32(glow::BLEND_SRC_RGB), entry_src_rgb);
+    assert_eq!(
+        stone_native_stage_end(inner),
+        0,
+        "an unwound scope is closed"
+    );
+
+    // A stale token from a closed scope cannot close a later scope.
+    let first = stone_native_stage_begin();
+    assert_ne!(stone_native_stage_end(first) & STONE_STAGE_RESTORED, 0);
+    let second = stone_native_stage_begin();
+    stone_set_canvas(other);
+    assert_eq!(stone_native_stage_end(first), 0);
+    assert!(stone_native_frame_active());
+    assert_eq!(stone_native_frame_target(), other);
+    assert_ne!(stone_native_stage_end(second) & STONE_STAGE_RESTORED, 0);
+    assert_eq!(bound_draw_fbo(gl), host_fbo);
+
+    // A scope left open by an early return is dropped at the next frame start.
+    let leaked = stone_native_stage_begin();
+    assert!(stone_native_frame_active());
+    stone_rs::stone_reset_frame_stats();
+    assert!(!stone_native_frame_active());
+    assert_eq!(stone_native_stage_end(leaked), 0);
+
+    stone_set_canvas(0);
+    stone_destroy_canvas(other);
+    stone_destroy_canvas(host);
+}
+
 fn second_native_library_renders_multi_attachment_target_restores_state_and_invalidates_handles() {
     let tmp = tempfile::tempdir().unwrap();
     let plugin_path = compile_second_library(tmp.path());
@@ -433,6 +510,8 @@ fn second_native_library_renders_multi_attachment_target_restores_state_and_inva
     let mut shader_after_teardown = 0u64;
 
     with_host(|gl| unsafe {
+        stage_scopes_unwind_reject_stale_tokens_and_clear_at_frame_start(gl);
+
         assert!(stone_native_renderer_api(999).is_null());
         let api_ptr = stone_native_renderer_api(STONE_NATIVE_RENDERER_ABI_VERSION);
         assert!(!api_ptr.is_null());

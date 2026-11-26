@@ -598,6 +598,7 @@ pub const STONE_STAGE_RESTORED: int = 1
 pub const STONE_STAGE_TARGET_CHANGED: int = 2
 pub const STONE_STAGE_SHADER_CHANGED: int = 4
 pub const STONE_STAGE_DRAW_BUFFERS_CHANGED: int = 8
+pub const STONE_STAGE_UNWOUND: int = 16
 
 // Borrow a live native-owned render target (or attachment) as a Canvas value
 // for script-side drawing. Ownership stays with the native library.

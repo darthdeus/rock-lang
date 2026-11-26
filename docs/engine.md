@@ -487,22 +487,30 @@ through a single versioned C function-pointer table:
 
 ### Stage scope and GL state save/restore
 
-- `stone_native_stage_begin() -> uint32_t` opens a LIFO render-thread frame
+- `stone_native_stage_begin() -> uint32_t` opens a render-thread frame
   scope and snapshots the GL and engine-cached state: bound draw/read
   framebuffers and target cache, draw-buffer mask, viewport, scissor, active
   shader program, indexed uniform-buffer bindings (`0..8`) and generic UBO
   binding, active texture and texture/sampler bindings (`0..8`), vertex array,
   blend state, depth state, color mask, clear color/depth, and rasterizer
   toggles (`CULL_FACE`, `STENCIL_TEST`, `POLYGON_OFFSET_FILL`,
-  `SAMPLE_ALPHA_TO_COVERAGE`, `RASTERIZER_DISCARD`). Returns `0` if called
-  without a live GL context on the calling thread.
-- `stone_native_stage_end(uint32_t scope) -> uint32_t` validates LIFO scope
-  nesting, restores saved state (re-binding the framebuffer or shader program
-  only when the stage changed them), closes the frame scope, and returns a
-  `STONE_STAGE_*` bitmask (`RESTORED = 1`, `TARGET_CHANGED = 2`,
-  `SHADER_CHANGED = 4`, `DRAW_BUFFERS_CHANGED = 8`), or `0` on mismatch.
+  `SAMPLE_ALPHA_TO_COVERAGE`, `RASTERIZER_DISCARD`). It returns a non-zero
+  token that identifies this scope, or `0` without a live GL context on the
+  calling thread.
+- `stone_native_stage_end(uint32_t scope) -> uint32_t` restores the state saved
+  by `scope` (re-binding the framebuffer or shader program only when the stage
+  changed them), closes it, and returns a `STONE_STAGE_*` bitmask
+  (`RESTORED = 1`, `TARGET_CHANGED = 2`, `SHADER_CHANGED = 4`,
+  `DRAW_BUFFERS_CHANGED = 8`, `UNWOUND = 16`). Scopes opened inside `scope` and
+  still open are closed with it (`UNWOUND`). It returns `0` and restores
+  nothing when `scope` is not open: never begun, already closed (tokens are not
+  reused), or dropped at frame start.
+- Scopes still open when the next frame starts are dropped without restoring.
 - `queue_custom_draw` in `packages/stone/engine/rendering/batch.rock` brackets
   every custom draw with `stone_native_stage_begin` / `stone_native_stage_end`.
+  When the end returns `0`, the batch re-binds its target, depth and blend
+  state, resets the rasterizer toggles and colour mask, and re-applies its
+  shader before the next batch.
 - `stone_native_frame_active()`, `stone_native_frame_target()`, and
   `stone_native_frame_size(&w, &h)` are valid only on the render thread while a
   stage scope is open; off-thread or outside a stage they report inactive.
