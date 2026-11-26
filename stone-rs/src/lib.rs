@@ -1050,6 +1050,7 @@ fn release_native_window() {
             });
         }
         *window = None;
+        handles::set_context_live(false);
     });
 }
 
@@ -1119,11 +1120,26 @@ where
     WINDOW.with(|w| w.borrow_mut().as_mut().map(|window| f(window)))
 }
 
+static OFF_THREAD_GL_CALLS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+fn off_thread_gl_calls() -> u64 {
+    OFF_THREAD_GL_CALLS.load(Ordering::Relaxed)
+}
+
 pub(crate) fn with_gl<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&DebugGl) -> R,
 {
-    with_window(|w| f(&w.gl))
+    let result = with_window(|w| f(&w.gl));
+    if result.is_none() && handles::context_live() {
+        OFF_THREAD_GL_CALLS.fetch_add(1, Ordering::Relaxed);
+        crate::log_once!(
+            "STONE",
+            "a Stone rendering call ran off the render thread and was ignored; every rendering entry is render-thread only"
+        );
+    }
+    result
 }
 
 /// rock-ffi stone
@@ -1261,6 +1277,7 @@ pub extern "C" fn stone_create_window_ex(
         return ptr::null_mut();
     };
     handles::bump_context_generation();
+    handles::set_context_live(true);
     canvas::reset_current_canvas_handle();
     WINDOW.with(|slot| slot.borrow_mut().insert(Box::new(window)).as_mut() as *mut StoneWindow)
 }
@@ -3260,6 +3277,17 @@ pub extern "C" fn stone_reset_frame_stats() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gl_calls_off_the_render_thread_are_counted_while_a_context_is_live() {
+        let before = off_thread_gl_calls();
+        assert!(with_gl(|_| ()).is_none());
+        assert_eq!(off_thread_gl_calls(), before);
+        handles::set_context_live(true);
+        assert!(with_gl(|_| ()).is_none());
+        handles::set_context_live(false);
+        assert!(off_thread_gl_calls() > before);
+    }
+
     use super::*;
 
     #[test]
