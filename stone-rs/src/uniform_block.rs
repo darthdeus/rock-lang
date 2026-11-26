@@ -8,6 +8,15 @@ use std::ffi::{c_char, c_int, CStr};
 use crate::stream_buffer::{Stream, StreamRange};
 use crate::{with_gl, SHADERS};
 
+#[derive(Clone)]
+pub(crate) struct BlockMember {
+    pub name: String,
+    pub offset: i32,
+    pub kind: i32,
+    pub capacity: i32,
+    pub stride: i32,
+}
+
 /// One of a program's uniform blocks.
 struct BlockBuffer {
     /// The program the block belongs to. An upload binds its range at once
@@ -31,6 +40,8 @@ struct BlockBuffer {
     binding: u32,
     /// Packer and shader layout fingerprints must match even at equal size.
     fingerprint: u64,
+    /// Registered std140 member layout for native-renderer reflection.
+    members: Vec<BlockMember>,
 }
 
 thread_local! {
@@ -355,6 +366,7 @@ pub extern "C" fn stone_shader_bind_uniform_block(
         let bytes = vec![0u8; size as usize];
 
         BLOCK_PROGRAMS.with(|m| m.borrow_mut().insert(program, handle));
+        crate::shader::register_shader_name_if_unset(handle, &key);
         BLOCKS.with(|b| {
             let mut map = b.borrow_mut();
             let blocks = map.entry(handle).or_default();
@@ -371,6 +383,7 @@ pub extern "C" fn stone_shader_bind_uniform_block(
                 uploaded: false,
                 drawn: false,
                 reported: false,
+                members: Vec::new(),
             };
             match blocks.iter_mut().find(|x| x.binding == fresh.binding) {
                 Some(existing) => *existing = fresh,
@@ -630,10 +643,145 @@ pub extern "C" fn stone_shader_check_uniform_block_layout(
                 ok = false;
             }
         }
+        if ok {
+            BLOCKS.with(|b| {
+                if let Some(block) = b
+                    .borrow_mut()
+                    .get_mut(&handle)
+                    .and_then(|bs| bs.iter_mut().find(|x| x.name == bname))
+                {
+                    if block.members.is_empty() {
+                        block.members = member_names
+                            .iter()
+                            .zip(plan_offsets.iter())
+                            .map(|(m, &off)| BlockMember {
+                                name: m.strip_suffix("[0]").unwrap_or(m).to_string(),
+                                offset: off,
+                                kind: -1,
+                                capacity: 0,
+                                stride: 0,
+                            })
+                            .collect();
+                    }
+                }
+            });
+        }
         ok
     })
     .unwrap_or_else(|| {
         ::log::error!(target: "SHADER", "check_uniform_block_layout: no GL context");
         false
+    })
+}
+
+/// Record one uniform-block member's std140 layout for native-renderer queries.
+/// rock-ffi stone-rendering private
+#[no_mangle]
+pub extern "C" fn stone_shader_register_block_member(
+    handle: u64,
+    binding: c_int,
+    name: *const c_char,
+    offset: c_int,
+    kind: c_int,
+    capacity: c_int,
+    stride: c_int,
+) -> bool {
+    if handle == 0 || name.is_null() || binding < 0 || offset < 0 {
+        return false;
+    }
+    let Ok(member_name) = unsafe { CStr::from_ptr(name) }.to_str() else {
+        return false;
+    };
+    if member_name.is_empty() {
+        return false;
+    }
+    BLOCKS.with(|b| {
+        let mut map = b.borrow_mut();
+        let Some(block) = map
+            .get_mut(&handle)
+            .and_then(|bs| bs.iter_mut().find(|x| x.binding == binding as u32))
+        else {
+            return false;
+        };
+        let entry = BlockMember {
+            name: member_name.to_string(),
+            offset,
+            kind,
+            capacity,
+            stride,
+        };
+        if let Some(existing) = block.members.iter_mut().find(|m| m.name == member_name) {
+            *existing = entry;
+        } else {
+            block.members.push(entry);
+        }
+        true
+    })
+}
+
+pub(crate) fn block_count(handle: u64) -> Option<usize> {
+    program_of(handle)?;
+    Some(BLOCKS.with(|b| b.borrow().get(&handle).map_or(0, Vec::len)))
+}
+
+pub(crate) fn find_block_by_binding(handle: u64, binding: i32) -> i32 {
+    if binding < 0 {
+        return -1;
+    }
+    BLOCKS.with(|b| {
+        b.borrow()
+            .get(&handle)
+            .and_then(|bs| bs.iter().position(|x| x.binding == binding as u32))
+            .map_or(-1, |idx| idx as i32)
+    })
+}
+
+pub(crate) fn find_block_by_name(handle: u64, name: &str) -> i32 {
+    BLOCKS.with(|b| {
+        b.borrow()
+            .get(&handle)
+            .and_then(|bs| bs.iter().position(|x| x.name == name))
+            .map_or(-1, |idx| idx as i32)
+    })
+}
+
+pub(crate) fn block_info(handle: u64, index: usize) -> Option<(i32, i32, i32, u64, String)> {
+    BLOCKS.with(|b| {
+        b.borrow()
+            .get(&handle)
+            .and_then(|bs| bs.get(index))
+            .map(|block| {
+                (
+                    block.binding as i32,
+                    block.size as i32,
+                    block.members.len() as i32,
+                    block.fingerprint,
+                    block.name.clone(),
+                )
+            })
+    })
+}
+
+pub(crate) fn block_member_info(
+    handle: u64,
+    block_index: usize,
+    member_index: usize,
+) -> Option<(i32, i32, i32, i32, String)> {
+    BLOCKS.with(|b| {
+        b.borrow()
+            .get(&handle)
+            .and_then(|bs| bs.get(block_index))
+            .and_then(|block| block.members.get(member_index))
+            .map(|m| (m.offset, m.kind, m.capacity, m.stride, m.name.clone()))
+    })
+}
+
+pub(crate) fn block_member_offset(handle: u64, block_index: usize, member_name: &str) -> i32 {
+    BLOCKS.with(|b| {
+        b.borrow()
+            .get(&handle)
+            .and_then(|bs| bs.get(block_index))
+            .and_then(|block| block.members.iter().find(|m| m.name == member_name))
+            .map_or(-1, |m| m.offset)
     })
 }

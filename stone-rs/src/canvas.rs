@@ -1,7 +1,8 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_float, c_int, CStr};
 
+use crate::gl_state::DRAW_BUFFERS;
 use crate::handles::Class;
 use crate::{track_canvas_switch, with_gl, with_window};
 
@@ -18,6 +19,13 @@ pub(crate) struct Canvas {
     pub active_h: i32,
     format: c_int,
     bound_as_target: bool,
+    pub generation: u64,
+    // Secondary color attachment handles (slots 1..DRAW_BUFFERS) owned by this
+    // target and resized/destroyed atomically with it.
+    owned_attachments: [u64; DRAW_BUFFERS],
+    // All secondary color attachment handles currently attached to this FBO
+    // (owned or attached via stone_canvas_attach_color_target).
+    attached_slots: [u64; DRAW_BUFFERS],
 }
 
 impl Canvas {
@@ -72,6 +80,81 @@ impl Canvas {
         status
     }
 
+    unsafe fn respecify_texture_only(&self, gl: &crate::DebugGl, width: i32, height: i32) {
+        let (internal_format, pixel_format, pixel_type, _) = color_format(self.format);
+        gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            internal_format as i32,
+            width,
+            height,
+            0,
+            pixel_format,
+            pixel_type,
+            glow::PixelUnpackData::Slice(None::<&[u8]>),
+        );
+        gl.bind_texture(glow::TEXTURE_2D, None);
+    }
+
+    unsafe fn respecify_with_children(
+        &self,
+        gl: &crate::DebugGl,
+        children: &[(usize, Canvas)],
+        width: i32,
+        height: i32,
+    ) -> u32 {
+        for (_, child) in children {
+            child.respecify_texture_only(gl, width, height);
+        }
+        let (internal_format, pixel_format, pixel_type, _) = color_format(self.format);
+        let color = (self.texture, internal_format, pixel_format, pixel_type);
+        let depth = self.depth_texture.map(|depth| {
+            (
+                depth,
+                glow::DEPTH_COMPONENT24,
+                glow::DEPTH_COMPONENT,
+                glow::UNSIGNED_INT,
+            )
+        });
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(self.fbo));
+        for (texture, internal_format, pixel_format, pixel_type) in
+            std::iter::once(color).chain(depth)
+        {
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                internal_format as i32,
+                width,
+                height,
+                0,
+                pixel_format,
+                pixel_type,
+                glow::PixelUnpackData::Slice(None::<&[u8]>),
+            );
+        }
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
+        if status == glow::FRAMEBUFFER_COMPLETE {
+            if children.is_empty() {
+                establish_blank_contents(gl, self.int_format(), self.has_depth());
+            } else {
+                let mut slots = [(0usize, false); DRAW_BUFFERS];
+                slots[0] = (0, self.int_format());
+                let mut count = 1usize;
+                for &(slot, child) in children {
+                    if count < DRAW_BUFFERS {
+                        slots[count] = (slot, child.int_format());
+                        count += 1;
+                    }
+                }
+                establish_blank_contents_multi(gl, &slots[..count], self.has_depth());
+            }
+        }
+        status
+    }
+
     unsafe fn delete(&self, gl: &crate::DebugGl) {
         gl.delete_texture(self.texture);
         if let Some(depth) = self.depth_texture {
@@ -88,11 +171,32 @@ fn rebind_current(gl: &crate::DebugGl) {
 thread_local! {
     static CANVASES: RefCell<HashMap<u64, Canvas>> = RefCell::new(HashMap::new());
     static CURRENT_FBO: RefCell<Option<glow::Framebuffer>> = const { RefCell::new(None) };
+    static CURRENT_CANVAS_HANDLE: Cell<u64> = const { Cell::new(0) };
     static CURRENT_TARGET_SIZE: RefCell<(f32, f32)> = const { RefCell::new((0.0, 0.0)) };
     // Letterbox rectangle in logical window pixels with a top-left origin;
     // the GL viewport uses bottom-origin drawable pixels.
     static PRESENT_VIEWPORT: RefCell<Option<(i32, i32, i32, i32)>> = const { RefCell::new(None) };
     static DEFAULT_FBO: RefCell<Option<glow::Framebuffer>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn current_canvas_handle() -> u64 {
+    CURRENT_CANVAS_HANDLE.with(Cell::get)
+}
+
+pub(crate) fn current_target_size_raw() -> (f32, f32) {
+    CURRENT_TARGET_SIZE.with(|c| *c.borrow())
+}
+
+pub(crate) fn restore_target_cache(handle: u64, fbo: Option<glow::Framebuffer>, size: (f32, f32)) {
+    CURRENT_CANVAS_HANDLE.with(|c| c.set(handle));
+    CURRENT_FBO.with(|c| *c.borrow_mut() = fbo);
+    CURRENT_TARGET_SIZE.with(|c| *c.borrow_mut() = size);
+}
+
+pub(crate) fn reset_current_canvas_handle() {
+    CURRENT_CANVAS_HANDLE.with(|c| c.set(0));
+    CURRENT_FBO.with(|c| *c.borrow_mut() = None);
+    CURRENT_TARGET_SIZE.with(|c| *c.borrow_mut() = (0.0, 0.0));
 }
 
 fn with_canvas<T>(handle: u64, f: impl FnOnce(&Canvas) -> T) -> Option<T> {
@@ -301,8 +405,13 @@ pub extern "C" fn stone_set_present_viewport(active: bool, x: c_int, y: c_int, w
 #[no_mangle]
 pub extern "C" fn stone_set_canvas_active(handle: u64, w: c_int, h: c_int) {
     with_canvas_mut(handle, |canvas| {
-        canvas.active_w = w.clamp(1, canvas.width);
-        canvas.active_h = h.clamp(1, canvas.height);
+        let new_w = w.clamp(1, canvas.width);
+        let new_h = h.clamp(1, canvas.height);
+        if canvas.active_w != new_w || canvas.active_h != new_h {
+            canvas.active_w = new_w;
+            canvas.active_h = new_h;
+            canvas.generation = crate::handles::next_generation();
+        }
     });
 }
 
@@ -342,6 +451,7 @@ pub extern "C" fn stone_set_canvas(handle: u64) {
             gl.disable(glow::SCISSOR_TEST);
         });
         CURRENT_FBO.with(|c| *c.borrow_mut() = None);
+        CURRENT_CANVAS_HANDLE.with(|c| c.set(0));
 
         with_window(|window| {
             let (dw, dh) = window.window.drawable_size();
@@ -386,6 +496,7 @@ pub extern "C" fn stone_set_canvas(handle: u64) {
             }
         });
         CURRENT_FBO.with(|c| *c.borrow_mut() = Some(canvas.fbo));
+        CURRENT_CANVAS_HANDLE.with(|c| c.set(handle));
         CURRENT_TARGET_SIZE
             .with(|c| *c.borrow_mut() = (canvas.active_w as f32, canvas.active_h as f32));
     });
@@ -427,6 +538,88 @@ unsafe fn establish_blank_contents(gl: &crate::DebugGl, int_format: bool, has_de
         crate::gl_state::clear_depth_unmasked(gl, 1.0);
     }
 
+    if saved_scissor {
+        gl.enable(glow::SCISSOR_TEST);
+    }
+    gl.color_mask(
+        saved_color_mask[0],
+        saved_color_mask[1],
+        saved_color_mask[2],
+        saved_color_mask[3],
+    );
+    gl.depth_mask(saved_depth_mask);
+    gl.clear_color(
+        saved_clear_color[0],
+        saved_clear_color[1],
+        saved_clear_color[2],
+        saved_clear_color[3],
+    );
+    gl.clear_depth_f32(saved_clear_depth[0]);
+}
+
+/// Clear every color attachment in `slots` (pair of `(slot_index, is_int_format)`)
+/// and optional depth, restoring all touched GL state including draw buffers.
+unsafe fn establish_blank_contents_multi(
+    gl: &crate::DebugGl,
+    slots: &[(usize, bool)],
+    has_depth: bool,
+) {
+    let saved_scissor = gl.is_enabled(glow::SCISSOR_TEST);
+    let saved_color_mask = gl.get_parameter_bool_array::<4>(glow::COLOR_WRITEMASK);
+    let saved_depth_mask = gl.get_parameter_bool(glow::DEPTH_WRITEMASK);
+    let mut saved_clear_color = [0.0f32; 4];
+    gl.get_parameter_f32_slice(glow::COLOR_CLEAR_VALUE, &mut saved_clear_color);
+    let mut saved_clear_depth = [0.0f32; 1];
+    gl.get_parameter_f32_slice(glow::DEPTH_CLEAR_VALUE, &mut saved_clear_depth);
+
+    let max_slot = slots.iter().map(|&(s, _)| s).max().unwrap_or(0);
+    let count = (max_slot + 1).min(DRAW_BUFFERS);
+    let mut saved_draw_buffers = [glow::NONE; DRAW_BUFFERS];
+    for (i, dst) in saved_draw_buffers.iter_mut().enumerate().take(count) {
+        *dst = gl.get_parameter_i32(glow::DRAW_BUFFER0 + i as u32) as u32;
+    }
+
+    gl.disable(glow::SCISSOR_TEST);
+    gl.color_mask(true, true, true, true);
+
+    let mut non_int_bufs = [glow::NONE; DRAW_BUFFERS];
+    let mut has_non_int = false;
+    let mut all_bufs = [glow::NONE; DRAW_BUFFERS];
+    let mut has_int = false;
+    for &(slot, is_int) in slots {
+        if slot >= DRAW_BUFFERS {
+            continue;
+        }
+        all_bufs[slot] = glow::COLOR_ATTACHMENT0 + slot as u32;
+        if is_int {
+            has_int = true;
+        } else {
+            non_int_bufs[slot] = glow::COLOR_ATTACHMENT0 + slot as u32;
+            has_non_int = true;
+        }
+    }
+    if has_non_int {
+        gl.draw_buffers(&non_int_bufs[..count]);
+        gl.clear_color(0.0, 0.0, 0.0, 0.0);
+        gl.clear(glow::COLOR_BUFFER_BIT);
+    }
+    if has_int {
+        gl.draw_buffers(&all_bufs[..count]);
+        for &(slot, is_int) in slots {
+            if is_int && slot < DRAW_BUFFERS {
+                gl.clear_buffer_i32_slice(glow::COLOR, slot as u32, &[0, 0, 0, 0]);
+            }
+        }
+    }
+    if has_depth {
+        crate::gl_state::clear_depth_unmasked(gl, 1.0);
+    }
+
+    let restore_len = saved_draw_buffers[..count]
+        .iter()
+        .rposition(|&b| b != glow::NONE)
+        .map_or(1, |idx| idx + 1);
+    gl.draw_buffers(&saved_draw_buffers[..restore_len]);
     if saved_scissor {
         gl.enable(glow::SCISSOR_TEST);
     }
@@ -528,6 +721,9 @@ pub extern "C" fn stone_create_canvas(
             active_h: height,
             format,
             bound_as_target: false,
+            generation: crate::handles::next_generation(),
+            owned_attachments: [0; DRAW_BUFFERS],
+            attached_slots: [0; DRAW_BUFFERS],
         };
         gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(texture), 0);
         gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::TEXTURE_2D, depth_texture, 0);
@@ -666,11 +862,22 @@ pub extern "C" fn stone_canvas_resize(handle: u64, width: c_int, height: c_int) 
         return true;
     }
 
+    let mut children: Vec<(usize, u64, Canvas)> = Vec::new();
+    for (slot, &child_handle) in canvas.owned_attachments.iter().enumerate().skip(1) {
+        if child_handle != 0 {
+            let Some(child) = lookup_canvas(child_handle) else {
+                return false;
+            };
+            children.push((slot, child_handle, child));
+        }
+    }
+    let child_pairs: Vec<(usize, Canvas)> = children.iter().map(|&(s, _, c)| (s, c)).collect();
+
     let resized = with_gl(|gl| unsafe {
         if !canvas_dimensions_supported(gl, width, height) {
             return false;
         }
-        let status = canvas.respecify(gl, width, height);
+        let status = canvas.respecify_with_children(gl, &child_pairs, width, height);
         let complete = status == glow::FRAMEBUFFER_COMPLETE;
         if !complete {
             crate::log_once!(
@@ -683,7 +890,7 @@ pub extern "C" fn stone_canvas_resize(handle: u64, width: c_int, height: c_int) 
                 canvas.width,
                 canvas.height
             );
-            canvas.respecify(gl, canvas.width, canvas.height);
+            canvas.respecify_with_children(gl, &child_pairs, canvas.width, canvas.height);
         }
         rebind_current(gl);
         complete
@@ -705,7 +912,17 @@ pub extern "C" fn stone_canvas_resize(handle: u64, width: c_int, height: c_int) 
         c.height = height;
         c.active_w = width;
         c.active_h = height;
+        c.generation = crate::handles::next_generation();
     });
+    for &(_, child_handle, _) in &children {
+        with_canvas_mut(child_handle, |c| {
+            c.width = width;
+            c.height = height;
+            c.active_w = width;
+            c.active_h = height;
+            c.generation = crate::handles::next_generation();
+        });
+    }
     true
 }
 
@@ -716,12 +933,149 @@ pub extern "C" fn stone_destroy_canvas(handle: u64) {
         return;
     }
 
-    CANVASES.with(|canvases| {
-        if let Some(canvas) = canvases.borrow_mut().remove(&handle) {
-            crate::handles::retire(Class::Canvas, handle);
-            with_gl(|gl| unsafe { canvas.delete(gl) });
+    let removed = CANVASES.with(|canvases| canvases.borrow_mut().remove(&handle));
+    if let Some(canvas) = removed {
+        if CURRENT_CANVAS_HANDLE.with(Cell::get) == handle {
+            CURRENT_CANVAS_HANDLE.with(|c| c.set(0));
+            CURRENT_FBO.with(|c| *c.borrow_mut() = None);
         }
-    });
+        crate::handles::retire(Class::Canvas, handle);
+        with_gl(|gl| unsafe { canvas.delete(gl) });
+        for child_handle in canvas.owned_attachments.into_iter().skip(1) {
+            if child_handle != 0 {
+                stone_destroy_canvas(child_handle);
+            }
+        }
+    }
+}
+
+/// Create a native-owned render target with `attachment_count` (1..=8) colour
+/// attachments whose formats are `STONE_CANVAS_*` codes plus an optional depth
+/// attachment. Owned secondary attachments resize and release atomically with
+/// the returned target handle.
+/// rock-ffi stone-rendering
+#[no_mangle]
+pub extern "C" fn stone_target_create(
+    width: c_int,
+    height: c_int,
+    attachment_formats: *const c_int,
+    attachment_count: c_int,
+    with_depth: bool,
+) -> u64 {
+    if attachment_formats.is_null()
+        || !(1..=DRAW_BUFFERS as c_int).contains(&attachment_count)
+        || width < 1
+        || height < 1
+    {
+        return 0;
+    }
+    let formats =
+        unsafe { std::slice::from_raw_parts(attachment_formats, attachment_count as usize) };
+    if formats.iter().any(|f| !(0..=3).contains(f)) {
+        return 0;
+    }
+    let primary = stone_create_canvas(width, height, formats[0], with_depth);
+    if primary == 0 {
+        return 0;
+    }
+    for (slot, &fmt) in formats.iter().enumerate().skip(1) {
+        let child = stone_create_canvas(width, height, fmt, false);
+        if child == 0 {
+            stone_destroy_canvas(primary);
+            return 0;
+        }
+        if !stone_canvas_attach_color_target(primary, child, slot as i32) {
+            stone_destroy_canvas(child);
+            stone_destroy_canvas(primary);
+            return 0;
+        }
+        with_canvas_mut(primary, |c| {
+            c.owned_attachments[slot] = child;
+            c.attached_slots[slot] = child;
+        });
+    }
+    if formats.len() > 1 {
+        if let Some(canvas) = lookup_canvas(primary) {
+            let mut slots = [(0usize, false); DRAW_BUFFERS];
+            for (slot, &fmt) in formats.iter().enumerate() {
+                slots[slot] = (slot, fmt == 3);
+            }
+            with_gl(|gl| unsafe {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(canvas.fbo));
+                establish_blank_contents_multi(gl, &slots[..formats.len()], with_depth);
+                rebind_current(gl);
+            });
+        }
+    }
+    primary
+}
+
+/// Resize a native-owned render target and all of its owned attachments.
+/// Invalidates cached handle generations on success.
+/// rock-ffi stone-rendering
+#[no_mangle]
+pub extern "C" fn stone_target_resize(handle: u64, width: c_int, height: c_int) -> bool {
+    stone_canvas_resize(handle, width, height)
+}
+
+/// Destroy a native-owned render target and all of its owned attachments.
+/// rock-ffi stone-rendering
+#[no_mangle]
+pub extern "C" fn stone_target_destroy(handle: u64) {
+    stone_destroy_canvas(handle);
+}
+
+/// Return the canvas handle for color attachment `slot` (0 = primary target,
+/// 1..7 = secondary attached target), or 0 if absent or invalid.
+/// rock-ffi stone-rendering
+#[no_mangle]
+pub extern "C" fn stone_target_attachment(handle: u64, slot: c_int) -> u64 {
+    if handle == 0 || !(0..DRAW_BUFFERS as c_int).contains(&slot) {
+        return 0;
+    }
+    if slot == 0 {
+        return if stone_canvas_exists(handle) {
+            handle
+        } else {
+            0
+        };
+    }
+    let Some(att) = with_canvas(handle, |c| c.attached_slots[slot as usize]) else {
+        return 0;
+    };
+    if att != 0 && stone_canvas_exists(att) {
+        att
+    } else {
+        0
+    }
+}
+
+pub(crate) fn canvas_generation(handle: u64) -> u64 {
+    if handle == 0 {
+        return 0;
+    }
+    with_canvas(handle, |c| c.generation).unwrap_or(0)
+}
+
+pub(crate) fn canvas_info(handle: u64) -> Option<(u64, i32, i32, c_int, i32, bool)> {
+    if handle == 0 {
+        return None;
+    }
+    let c = lookup_canvas(handle)?;
+    let mut color_attachments = 1i32;
+    for &att in c.attached_slots.iter().skip(1) {
+        if att != 0 && stone_canvas_exists(att) {
+            color_attachments += 1;
+        }
+    }
+    Some((
+        c.generation,
+        c.active_w,
+        c.active_h,
+        c.format,
+        color_attachments,
+        c.has_depth(),
+    ))
 }
 
 pub(crate) fn destroy_all() {
@@ -841,7 +1195,7 @@ pub extern "C" fn stone_canvas_attach_color_target(
         return false;
     }
 
-    with_gl(|gl| unsafe {
+    let ok = with_gl(|gl| unsafe {
         let attach = |texture| {
             let attachment = glow::COLOR_ATTACHMENT0 + slot as u32;
             gl.framebuffer_texture_2d(glow::FRAMEBUFFER, attachment, glow::TEXTURE_2D, texture, 0);
@@ -861,7 +1215,14 @@ pub extern "C" fn stone_canvas_attach_color_target(
         rebind_current(gl);
         ok
     })
-    .unwrap_or(false)
+    .unwrap_or(false);
+    if ok {
+        with_canvas_mut(color_handle, |c| {
+            c.attached_slots[slot as usize] = id_handle;
+            c.generation = crate::handles::next_generation();
+        });
+    }
+    ok
 }
 
 /// Read a single channel from a canvas at (x, y) in screen coordinates (top-left origin).

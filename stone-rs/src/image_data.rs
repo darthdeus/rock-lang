@@ -339,6 +339,7 @@ pub extern "C" fn stone_image_update_from_data(image_handle: u64, data_handle: u
         };
         if fresh {
             crate::image_texture::refresh_image_mipmaps(image_handle, texture);
+            crate::image_texture::bump_image_generation(image_handle);
             return true;
         }
 
@@ -361,6 +362,7 @@ pub extern "C" fn stone_image_update_from_data(image_handle: u64, data_handle: u
         .is_some();
         if updated {
             crate::image_texture::refresh_image_mipmaps(image_handle, texture);
+            crate::image_texture::bump_image_generation(image_handle);
         }
         updated
     });

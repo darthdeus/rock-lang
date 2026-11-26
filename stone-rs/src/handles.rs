@@ -44,6 +44,20 @@ impl Class {
 
 static ISSUED: [AtomicU64; Class::COUNT] = [const { AtomicU64::new(0) }; Class::COUNT];
 static RETIRED: [AtomicU64; Class::COUNT] = [const { AtomicU64::new(0) }; Class::COUNT];
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+static CONTEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn next_generation() -> u64 {
+    NEXT_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
+
+pub(crate) fn bump_context_generation() -> u64 {
+    CONTEXT_GENERATION.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+pub(crate) fn context_generation() -> u64 {
+    CONTEXT_GENERATION.load(Ordering::SeqCst)
+}
 
 pub(crate) fn mint(class: Class) -> u64 {
     debug_assert!(class.mints(), "{class:?} does not mint through the seam");

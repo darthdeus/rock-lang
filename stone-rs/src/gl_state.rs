@@ -178,7 +178,7 @@ pub(crate) struct BlendGlState {
 }
 
 impl BlendGlState {
-    unsafe fn read(gl: &DebugGl) -> Self {
+    pub(crate) unsafe fn read(gl: &DebugGl) -> Self {
         Self {
             enabled: gl.is_enabled(glow::BLEND),
             equation_rgb: gl.get_parameter_i32(glow::BLEND_EQUATION_RGB) as u32,
@@ -190,7 +190,7 @@ impl BlendGlState {
         }
     }
 
-    unsafe fn restore(self, gl: &DebugGl) {
+    pub(crate) unsafe fn restore(self, gl: &DebugGl) {
         gl.set_enabled(glow::BLEND, self.enabled);
         gl.blend_equation_separate(self.equation_rgb, self.equation_alpha);
         gl.blend_func_separate(self.src_rgb, self.dst_rgb, self.src_alpha, self.dst_alpha);
@@ -478,18 +478,5 @@ pub extern "C" fn stone_set_draw_buffer_mask(mask: c_int) {
     }
     with_gl(|gl| unsafe {
         gl.draw_buffers(&buffers[..len as usize]);
-    });
-}
-
-/// rock-ffi stone-rendering private
-#[no_mangle]
-pub extern "C" fn stone_restore_after_custom_draw() {
-    with_gl(|gl| unsafe {
-        gl.disable(glow::CULL_FACE);
-        gl.disable(glow::STENCIL_TEST);
-        gl.disable(glow::POLYGON_OFFSET_FILL);
-        gl.disable(glow::SAMPLE_ALPHA_TO_COVERAGE);
-        gl.disable(glow::RASTERIZER_DISCARD);
-        gl.color_mask(true, true, true, true);
     });
 }
