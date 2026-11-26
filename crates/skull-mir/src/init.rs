@@ -18,7 +18,6 @@ type Local = u32;
 const SCALAR: Local = Local::MAX;
 type NodeId = usize;
 type ObjectId = usize;
-type BodyId = usize;
 type CallId = usize;
 
 #[derive(Clone, Copy)]
@@ -47,10 +46,12 @@ enum Field {
     Name(Ustr),
     Position(usize),
     Element,
+    All,
+    Callbacks,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Callee {
+enum Callee {
     Named(Ustr),
     Opaque,
     Allocate,
@@ -66,7 +67,7 @@ pub enum Callee {
 }
 
 /// These intrinsics have typed access to a coroutine's runtime frame.
-pub fn callee(ws: &Workspace, func: FuncRef, name: Option<Ustr>) -> Callee {
+fn classify(ws: &Workspace, func: FuncRef, name: Option<Ustr>) -> Callee {
     let module = ws.module(func.module);
     if is_stdlib_module_file(module.file.as_str()) {
         let f = &module.functions[func.func];
@@ -108,7 +109,6 @@ enum Op {
     StoreField(Local, Field, Local),
     Call(Target, Operands, Operands),
     Return(Operands),
-    SetInner(Local),
 }
 
 struct Region {
@@ -143,7 +143,7 @@ impl InitBodies {
         ws: &Workspace,
         mf: &MirFunc,
         name: Ustr,
-        resolve: &impl Fn(&MirFunc, Idx<Inst>, FuncRef) -> Callee,
+        resolve: &impl Fn(&MirFunc, Idx<Inst>, FuncRef) -> Option<Ustr>,
     ) {
         let mut builder = Builder {
             ws,
@@ -154,16 +154,20 @@ impl InitBodies {
             regions: Vec::new(),
         };
         let coroutine = if mf.is_coroutine {
-            let mut first = FxHashSet::default();
+            let blocks = reachable_blocks_from(mf, mf.entry);
+            let mut first = vec![false; mf.blocks.len()];
             let mut pending = vec![mf.entry];
             while let Some(block) = pending.pop() {
-                if first.insert(block) && !matches!(mf.blocks[block].term, Term::Yield { .. }) {
+                if !std::mem::replace(&mut first[raw(block) as usize], true)
+                    && !matches!(mf.blocks[block].term, Term::Yield { .. })
+                {
                     successors(&mf.blocks[block].term, |next| pending.push(next));
                 }
             }
-            let (starts, resumes): (Vec<_>, Vec<_>) = reachable_blocks_from(mf, mf.entry)
+            // Separate blocks before the first possible suspension from later ones.
+            let (starts, resumes): (Vec<_>, Vec<_>) = blocks
                 .into_iter()
-                .partition(|block| first.contains(block));
+                .partition(|&block| first[raw(block) as usize]);
             builder.blocks(starts.iter().copied(), &mf.params);
             builder.blocks(resumes, &[]);
             let armed: FxHashSet<_> = starts
@@ -269,7 +273,7 @@ fn value_local(mf: &MirFunc, id: Idx<Inst>) -> Option<Local> {
     .then(|| raw(id))
 }
 
-impl<F: Fn(&MirFunc, Idx<Inst>, FuncRef) -> Callee> Builder<'_, F> {
+impl<F: Fn(&MirFunc, Idx<Inst>, FuncRef) -> Option<Ustr>> Builder<'_, F> {
     fn cell(&self, cell: Idx<Cell>) -> Local {
         self.mf.insts.len() as Local + raw(cell)
     }
@@ -283,14 +287,10 @@ impl<F: Fn(&MirFunc, Idx<Inst>, FuncRef) -> Callee> Builder<'_, F> {
         blocks: impl IntoIterator<Item = Idx<Block>>,
         params: &[Idx<Cell>],
     ) -> usize {
-        let mf = self.mf;
         let index = self.regions.len();
-        let offset = mf.insts.len() as Local;
+        let offset = self.mf.insts.len() as Local;
         self.regions.push(Region {
-            params: Operands::push(
-                &mut self.locals,
-                params.iter().map(|&cell| offset + raw(cell)),
-            ),
+            params: Operands::push(&mut self.locals, params.iter().map(|&id| offset + raw(id))),
             ops: Vec::new(),
             may_repeat: false,
         });
@@ -298,23 +298,23 @@ impl<F: Fn(&MirFunc, Idx<Inst>, FuncRef) -> Callee> Builder<'_, F> {
         let mut may_repeat = false;
         for block in blocks {
             ops.extend(
-                mf.blocks[block]
+                self.mf.blocks[block]
                     .insts
                     .iter()
-                    .filter_map(|&iid| self.operation(iid)),
+                    .filter_map(|&id| self.operation(id)),
             );
-            let term = &mf.blocks[block].term;
+            let term = &self.mf.blocks[block].term;
             if let Term::Return(values) | Term::Yield { values, .. } = term
-                && values.iter().any(|&id| value_local(mf, id).is_some())
+                && values.iter().any(|&id| value_local(self.mf, id).is_some())
             {
                 ops.push(Op::Return(Operands::push(
                     &mut self.locals,
                     values
                         .iter()
-                        .map(|&id| value_local(mf, id).unwrap_or(SCALAR)),
+                        .map(|&id| value_local(self.mf, id).unwrap_or(SCALAR)),
                 )));
             }
-            // Every CFG cycle has at least one edge to an earlier block.
+            // Every CFG cycle includes an edge to an earlier block.
             successors(term, |target| may_repeat |= raw(target) <= raw(block));
         }
         self.regions[index].ops = ops;
@@ -322,8 +322,8 @@ impl<F: Fn(&MirFunc, Idx<Inst>, FuncRef) -> Callee> Builder<'_, F> {
         index
     }
 
-    fn index_field(&self, index: Idx<Inst>, kind: ContainerKind) -> Field {
-        match (&self.mf.insts[index], kind) {
+    fn index(&self, id: Idx<Inst>, kind: ContainerKind) -> Field {
+        match (&self.mf.insts[id], kind) {
             (Inst::Const(Lit::Str(name)), ContainerKind::Map | ContainerKind::Record(_)) => {
                 Field::Name(*name)
             }
@@ -332,84 +332,131 @@ impl<F: Fn(&MirFunc, Idx<Inst>, FuncRef) -> Callee> Builder<'_, F> {
         }
     }
 
-    fn scalar_global(&self, name: Ustr) -> bool {
-        self.ws
-            .globals_by_name
-            .get(&name)
-            .is_some_and(|&ty| scalar(self.ws, ty))
+    fn resolve(&self, id: Idx<Inst>, func: FuncRef) -> Callee {
+        classify(self.ws, func, (self.resolve)(self.mf, id, func))
     }
 
-    fn scalar_record(&self, name: Ustr) -> bool {
-        self.ws.nominals.struct_id(name).is_some_and(|id| {
-            self.ws.module(id.module).structs[id.def]
-                .fields
-                .iter()
-                .all(|field| scalar(self.ws, field.ty))
-        })
-    }
-
-    fn operation(&mut self, iid: Idx<Inst>) -> Option<Op> {
+    fn operation(&mut self, id: Idx<Inst>) -> Option<Op> {
         let mf = self.mf;
-        let dest = raw(iid);
+        let dest = raw(id);
         let tracked = |id| value_local(mf, id);
-        let value = |id| tracked(id).unwrap_or(SCALAR);
-        fn fields<'a>(
-            mf: &'a MirFunc,
-            fields: &'a [(Ustr, Idx<Inst>)],
-        ) -> impl Iterator<Item = (Field, Local)> + 'a {
-            fields
-                .iter()
-                .filter_map(|&(f, v)| value_local(mf, v).map(|local| (Field::Name(f), local)))
-        }
-        fn elements<'a>(
-            mf: &'a MirFunc,
-            values: &'a [Idx<Inst>],
-            field: impl Fn(usize) -> Field + 'a,
-        ) -> impl Iterator<Item = (Field, Local)> + 'a {
-            values.iter().enumerate().filter_map(move |(index, &v)| {
-                value_local(mf, v).map(|local| (field(index), local))
-            })
-        }
-        let offset = mf.insts.len() as Local;
-        let destinations = |dests: &[Idx<Cell>], pool: &mut Vec<Local>| {
-            Operands::push(pool, dests.iter().map(|&v| offset + raw(v)))
+        let scalar_global = |name| {
+            self.ws
+                .globals_by_name
+                .get(&name)
+                .is_some_and(|&ty| scalar(self.ws, ty))
         };
-        let args = |args: &[Idx<Inst>], pool: &mut Vec<Local>| {
-            Operands::push(pool, args.iter().copied().map(value))
+        let args = |pool, args: &[Idx<Inst>]| {
+            Operands::push(pool, args.iter().map(|&id| tracked(id).unwrap_or(SCALAR)))
         };
-        let direct = |f| Target::Direct((self.resolve)(mf, iid, f));
-        let result = |func: FuncRef| {
-            let f = &self.ws.module(func.module).functions[func.func];
-            if f.return_ty.is_some_and(|ty| scalar(self.ws, ty)) {
-                SCALAR
-            } else {
-                dest
-            }
-        };
-        let indirect = |v| Target::Value(raw(v));
-        Some(match &mf.insts[iid] {
-            Inst::Global(name) => match mf.fn_value_symbols.get(&iid) {
-                Some(&func) => Op::Function(dest, (self.resolve)(mf, iid, func)),
-                None => Op::Read(
-                    if self.scalar_global(*name) {
-                        SCALAR
-                    } else {
-                        dest
-                    },
-                    *name,
-                ),
+        let field = |base, field| Op::Field(dest, raw(base), field);
+        let store = |base, field, src| Some(Op::StoreField(raw(base), field, tracked(src)?));
+
+        Some(match &mf.insts[id] {
+            Inst::Global(name) => match mf.fn_value_symbols.get(&id) {
+                Some(&func) => Op::Function(dest, self.resolve(id, func)),
+                None => Op::Read(if scalar_global(*name) { SCALAR } else { dest }, *name),
             },
-            Inst::StoreGlobal { name, value } if !self.scalar_global(*name) => {
+            Inst::StoreGlobal { name, value } if !scalar_global(*name) => {
                 Op::Write(*name, tracked(*value)?)
             }
             Inst::Load(cell) => Op::Copy(dest, self.cell(*cell)),
             Inst::Store { cell, value } => Op::Copy(self.cell(*cell), tracked(*value)?),
-            Inst::MakeEnv { fn_ref, fields: fs } => Op::Object(
-                dest,
-                *fn_ref,
-                Operands::push(&mut self.fields, fields(mf, fs)),
+            Inst::Field {
+                base, field: name, ..
+            } => field(*base, Field::Name(*name)),
+            Inst::TupleIndex { base, index } => field(*base, Field::Position(*index)),
+            Inst::Index { base, index, kind } => field(*base, self.index(*index, *kind)),
+            Inst::StoreField {
+                base, field, value, ..
+            } => return store(*base, Field::Name(*field), *value),
+            Inst::StoreIndex {
+                base,
+                index,
+                value,
+                kind,
+            } => return store(*base, self.index(*index, *kind), *value),
+            Inst::ArrayPush { arr, value, .. } => return store(*arr, Field::Element, *value),
+            Inst::MapNext {
+                val_cell, table, ..
+            } => Op::Field(self.cell(*val_cell), raw(*table), Field::Element),
+            Inst::MakeNullableValue { value, .. }
+            | Inst::VecStrideNilToFalse(value)
+            | Inst::VecStrideFalseToNil(value) => Op::Copy(dest, tracked(*value)?),
+            Inst::CoroSetInner(value) => {
+                Op::Copy((mf.insts.len() + mf.cells.len()) as Local, tracked(*value)?)
+            }
+            Inst::Lambda { entry, params } => Op::Lambda(dest, self.region(*entry, params)),
+            Inst::Call {
+                func,
+                args: operands,
+            } => {
+                let callee = self.resolve(id, *func);
+                match (callee, operands.as_slice()) {
+                    (Callee::Allocate, _) => self.object(dest, None, &[], &[], Field::Position),
+                    (Callee::Identity, [src]) => Op::Copy(dest, tracked(*src)?),
+                    (Callee::Push, [base, src]) => return store(*base, Field::Element, *src),
+                    (Callee::GetIndex, [base, index]) => {
+                        field(*base, self.index(*index, ContainerKind::Map))
+                    }
+                    (Callee::SetIndex, [base, index, src]) => {
+                        return store(*base, self.index(*index, ContainerKind::Map), *src);
+                    }
+                    _ => {
+                        let f = &self.ws.module(func.module).functions[func.func];
+                        let result =
+                            (!f.return_ty.is_some_and(|ty| scalar(self.ws, ty))).then_some(dest);
+                        Op::Call(
+                            Target::Direct(callee),
+                            args(&mut self.locals, operands),
+                            Operands::push(&mut self.locals, result),
+                        )
+                    }
+                }
+            }
+            Inst::CallValue {
+                callee,
+                args: operands,
+            } => Op::Call(
+                Target::Value(raw(*callee)),
+                args(&mut self.locals, operands),
+                Operands::push(&mut self.locals, [dest]),
             ),
-            Inst::MakeStruct { ty: Some(ty), .. } if self.scalar_record(*ty) => return None,
+            Inst::CallMulti {
+                args: operands,
+                dests,
+                ..
+            }
+            | Inst::CallValueMulti {
+                args: operands,
+                dests,
+                ..
+            } => {
+                let target = match mf.insts[id] {
+                    Inst::CallMulti { func, .. } => Target::Direct(self.resolve(id, func)),
+                    Inst::CallValueMulti { callee, .. } => Target::Value(raw(callee)),
+                    _ => unreachable!(),
+                };
+                let offset = mf.insts.len() as Local;
+                Op::Call(
+                    target,
+                    args(&mut self.locals, operands),
+                    Operands::push(
+                        &mut self.locals,
+                        dests.iter().map(|&cell| offset + raw(cell)),
+                    ),
+                )
+            }
+            Inst::MakeStruct { ty: Some(ty), .. }
+                if self.ws.nominals.struct_id(*ty).is_some_and(|s| {
+                    self.ws.module(s.module).structs[s.def]
+                        .fields
+                        .iter()
+                        .all(|f| scalar(self.ws, f.ty))
+                }) =>
+            {
+                return None;
+            }
             Inst::MakeValueStruct { representation, .. }
             | Inst::MaterializeValueStruct { representation, .. }
                 if mf.rep_arena.as_ref().is_some_and(|arena| {
@@ -419,155 +466,82 @@ impl<F: Fn(&MirFunc, Idx<Inst>, FuncRef) -> Callee> Builder<'_, F> {
             {
                 return None;
             }
-            Inst::MakeStruct { fields: fs, .. }
-            | Inst::MakeValueStruct { fields: fs, .. }
-            | Inst::MaterializeValueStruct { fields: fs, .. } => {
-                Op::Object(dest, None, Operands::push(&mut self.fields, fields(mf, fs)))
+            Inst::MakeStruct { fields, .. }
+            | Inst::MakeValueStruct { fields, .. }
+            | Inst::MaterializeValueStruct { fields, .. } => {
+                self.object(dest, None, &[], fields, Field::Position)
+            }
+            Inst::MakeEnv { fn_ref, fields } => {
+                self.object(dest, *fn_ref, &[], fields, Field::Position)
             }
             Inst::MakeEnum {
                 positional, named, ..
             }
             | Inst::MakeEnumDyn {
                 positional, named, ..
-            } => Op::Object(
-                dest,
-                None,
-                Operands::push(
-                    &mut self.fields,
-                    elements(mf, positional, Field::Position).chain(fields(mf, named)),
-                ),
-            ),
-            Inst::MakeTuple(values) => Op::Object(
-                dest,
-                None,
-                Operands::push(&mut self.fields, elements(mf, values, Field::Position)),
-            ),
-            Inst::MakeVec(values) => Op::Object(
-                dest,
-                None,
-                Operands::push(&mut self.fields, elements(mf, values, Field::Position)),
-            ),
-            Inst::MakeFlatVec(ctor) => {
-                let fields = match &ctor.contents {
-                    FlatVecContents::Header(_) => Operands::push(&mut self.fields, []),
-                    FlatVecContents::Rows { values, .. } => {
-                        Operands::push(&mut self.fields, elements(mf, values, |_| Field::Element))
-                    }
-                    FlatVecContents::Columns { columns, .. } => Operands::push(
-                        &mut self.fields,
-                        columns.iter().flat_map(|(f, values)| {
-                            values.iter().map(|&v| (Field::Name(*f), raw(v)))
-                        }),
-                    ),
-                };
-                Op::Object(dest, None, fields)
+            } => self.object(dest, None, positional, named, Field::Position),
+            Inst::MakeTuple(values) | Inst::MakeVec(values) => {
+                self.object(dest, None, values, &[], Field::Position)
             }
-            Inst::Field { base, field, .. } => Op::Field(dest, raw(*base), Field::Name(*field)),
-            Inst::TupleIndex { base, index } => {
-                Op::Field(dest, raw(*base), Field::Position(*index))
-            }
-            Inst::Index { base, index, kind } => {
-                Op::Field(dest, raw(*base), self.index_field(*index, *kind))
-            }
-            Inst::StoreField {
-                base, field, value, ..
-            } => Op::StoreField(raw(*base), Field::Name(*field), tracked(*value)?),
-            Inst::StoreIndex {
-                base,
-                index,
-                value,
-                kind,
-            } => Op::StoreField(
-                raw(*base),
-                self.index_field(*index, *kind),
-                tracked(*value)?,
-            ),
-            Inst::ArrayPush { arr, value, .. } => {
-                Op::StoreField(raw(*arr), Field::Element, tracked(*value)?)
-            }
-            Inst::MapNext {
-                val_cell, table, ..
-            } => Op::Field(self.cell(*val_cell), raw(*table), Field::Element),
-            Inst::MakeNullableValue { value, .. }
-            | Inst::VecStrideNilToFalse(value)
-            | Inst::VecStrideFalseToNil(value) => Op::Copy(dest, tracked(*value)?),
-            Inst::Call { func, args: a } => {
-                let callee = (self.resolve)(mf, iid, *func);
-                match (callee, a.as_slice()) {
-                    (Callee::Allocate, _) => {
-                        Op::Object(dest, None, Operands::push(&mut self.fields, []))
-                    }
-                    (Callee::Identity, [src]) => Op::Copy(dest, tracked(*src)?),
-                    (Callee::Push, [base, src]) => {
-                        Op::StoreField(raw(*base), Field::Element, tracked(*src)?)
-                    }
-                    (Callee::GetIndex, [base, index]) => Op::Field(
-                        dest,
-                        raw(*base),
-                        self.index_field(*index, ContainerKind::Map),
-                    ),
-                    (Callee::SetIndex, [base, index, src]) => Op::StoreField(
-                        raw(*base),
-                        self.index_field(*index, ContainerKind::Map),
-                        tracked(*src)?,
-                    ),
-                    _ => {
-                        let result = result(*func);
-                        Op::Call(
-                            Target::Direct(callee),
-                            args(a, &mut self.locals),
-                            Operands::push(&mut self.locals, (result != SCALAR).then_some(result)),
-                        )
-                    }
+            Inst::MakeFlatVec(ctor) => match &ctor.contents {
+                FlatVecContents::Header(_) => self.object(dest, None, &[], &[], Field::Position),
+                FlatVecContents::Rows { values, .. } => {
+                    self.object(dest, None, values, &[], |_| Field::Element)
                 }
-            }
-            Inst::CallMulti {
-                func,
-                args: a,
-                dests,
-            } => Op::Call(
-                direct(*func),
-                args(a, &mut self.locals),
-                destinations(dests, &mut self.locals),
-            ),
-            Inst::CallValue { callee, args: a } => Op::Call(
-                indirect(*callee),
-                args(a, &mut self.locals),
-                Operands::push(&mut self.locals, [dest]),
-            ),
-            Inst::CallValueMulti {
-                callee,
-                args: a,
-                dests,
-            } => Op::Call(
-                indirect(*callee),
-                args(a, &mut self.locals),
-                destinations(dests, &mut self.locals),
-            ),
-            Inst::Lambda { entry, params } => Op::Lambda(dest, self.region(*entry, params)),
-            Inst::CoroSetInner(value) => Op::SetInner(tracked(*value)?),
+                FlatVecContents::Columns { columns, .. } => {
+                    let fields = columns
+                        .iter()
+                        .flat_map(|(f, values)| values.iter().map(|&v| (Field::Name(*f), raw(v))));
+                    Op::Object(dest, None, Operands::push(&mut self.fields, fields))
+                }
+            },
             _ => return None,
         })
     }
+
+    fn object(
+        &mut self,
+        dest: Local,
+        function: Option<Ustr>,
+        positional: &[Idx<Inst>],
+        named: &[(Ustr, Idx<Inst>)],
+        index: impl Fn(usize) -> Field,
+    ) -> Op {
+        let mf = self.mf;
+        let fields = positional
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| (index(i), v))
+            .chain(named.iter().map(|&(f, v)| (Field::Name(f), v)))
+            .filter_map(|(f, v)| Some((f, value_local(mf, v)?)));
+        Op::Object(dest, function, Operands::push(&mut self.fields, fields))
+    }
 }
 
-#[derive(Clone, Copy)]
-struct Site(BodyId, usize, usize);
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+struct Site(Ustr, usize, usize);
 
 type ContextId = usize;
+type Root = usize;
 
-struct Context {
-    body: BodyId,
-    initializer: bool,
-    locals: Vec<Option<NodeId>>,
-    inner: Option<NodeId>,
+struct Context<'a> {
+    body: &'a Body,
+    locals: Vec<NodeId>,
+    coroutine: Option<Box<CoroutineState>>,
+}
+
+#[derive(Default)]
+struct CoroutineState {
     handle: Option<ObjectId>,
+    actions: FxHashSet<(CallId, Callee)>,
+    resumes: Vec<CallId>,
+    kills: Vec<Root>,
 }
 
 #[derive(Clone, Copy)]
 enum Function {
     Named(Callee, bool),
-    Lambda(ContextId, usize),
+    Closure(ContextId, usize),
     Coroutine(ContextId),
 }
 
@@ -575,26 +549,23 @@ enum Function {
 struct Object {
     function: Option<Function>,
     fields: FxHashMap<Field, NodeId>,
-    all_fields: Option<NodeId>,
-    callbacks: Option<NodeId>,
 }
 
 #[derive(Clone, Copy)]
 enum Use {
     Copy(NodeId),
     Read(Field, NodeId),
-    Write(Field, NodeId, usize, Site),
+    Write(Field, NodeId, Root, Site),
     Call(CallId),
-    ContainCallbacks(NodeId),
+    Collect(NodeId),
     Escape(CallId),
     Coroutine(CallId, Callee),
 }
 
-#[derive(Clone, Copy)]
-enum Source {
-    Copy(NodeId),
-    Field(NodeId, Field),
-    Object(ContextId, Site),
+#[derive(Default)]
+struct RegionState {
+    entered: bool,
+    results: Vec<NodeId>,
 }
 
 #[derive(Default)]
@@ -602,64 +573,54 @@ struct Node {
     values: Vec<ObjectId>,
     membership: Option<FxHashSet<ObjectId>>,
     uses: Vec<Use>,
-    sources: Vec<Source>,
-    demanded: bool,
 }
 
 struct Call {
-    root: usize,
+    root: Root,
     site: Site,
     args: Vec<NodeId>,
     dests: Vec<NodeId>,
-    opaque: Option<NodeId>,
-    unknown_args: Option<NodeId>,
+    escaped: Option<NodeId>,
+    unknown_args: bool,
     once: bool,
 }
 
-// Follow callable and aggregate origins only where invocation, mutation, or
-// an opaque escape demands them. A callee's facts are instantiated per
-// initializer and static call site: unrelated callback arguments stay separate
-// while recursive calls converge on the same activation.
+// Activate a body per initializer and static call site. Each activation adds
+// value-flow edges once. New values propagate only along the registered edges.
+#[derive(Default)]
 struct Analysis<'a> {
-    bodies: Vec<&'a Body>,
-    definitions: FxHashMap<Ustr, BodyId>,
+    bodies: FxHashMap<Ustr, &'a Body>,
     unexamined: FxHashSet<Ustr>,
-    owners: &'a FxHashMap<Ustr, Ustr>,
-    initialized: FxHashSet<Ustr>,
+    owners: FxHashMap<Ustr, Ustr>,
     deps: Vec<FxHashSet<Ustr>>,
     globals: FxHashMap<Ustr, NodeId>,
     functions: FxHashMap<Callee, ObjectId>,
     nodes: Vec<Node>,
     objects: Vec<Object>,
-    contexts: Vec<Context>,
+    contexts: Vec<Context<'a>>,
     calls: Vec<Call>,
     work: Vec<(Use, ObjectId)>,
-    demands: Vec<NodeId>,
-    pending: Vec<(usize, ContextId, usize)>,
-    coroutine_calls: FxHashSet<(ContextId, CallId, Callee)>,
-    resumes: FxHashMap<ContextId, Vec<CallId>>,
-    kills: FxHashMap<ContextId, Vec<usize>>,
-    unknown: Option<(NodeId, ObjectId)>,
-    activations: FxHashMap<(usize, BodyId, usize, usize, BodyId), ContextId>,
-    regions: FxHashSet<(usize, ContextId, usize)>,
-    returns: FxHashMap<(usize, ContextId, usize), Vec<NodeId>>,
+    pending: Vec<(Root, ContextId, usize)>,
+    activations: FxHashMap<(Root, Site, Ustr), ContextId>,
+    regions: FxHashMap<(Root, ContextId, usize), RegionState>,
 }
 
-impl Analysis<'_> {
+const UNKNOWN: ObjectId = 0;
+const UNKNOWN_ARG: NodeId = 1;
+
+impl<'a> Analysis<'a> {
     fn node(&mut self) -> NodeId {
-        let id = self.nodes.len();
         self.nodes.push(Node::default());
-        id
+        self.nodes.len() - 1
     }
 
-    fn add(&mut self, node: NodeId, value: ObjectId) {
-        let node = &mut self.nodes[node];
-        let inserted = if let Some(membership) = &mut node.membership {
-            membership.insert(value)
-        } else {
-            !node.values.contains(&value)
-        };
-        if inserted {
+    fn add(&mut self, dest: NodeId, value: ObjectId) {
+        let node = &mut self.nodes[dest];
+        if node
+            .membership
+            .as_mut()
+            .map_or_else(|| !node.values.contains(&value), |set| set.insert(value))
+        {
             node.values.push(value);
             if node.values.len() == 8 {
                 node.membership = Some(node.values.iter().copied().collect());
@@ -669,82 +630,38 @@ impl Analysis<'_> {
         }
     }
 
-    fn watch(&mut self, id: NodeId, use_: Use) {
-        if id == 0 {
+    fn watch(&mut self, src: NodeId, use_: Use) {
+        if src == 0 {
             return;
         }
-        let node = &mut self.nodes[id];
-        if !std::mem::replace(&mut node.demanded, true) {
-            self.demands.push(id);
-        }
+        let node = &mut self.nodes[src];
         self.work
             .extend(node.values.iter().map(|&value| (use_, value)));
         node.uses.push(use_);
     }
 
-    fn source(&mut self, dest: NodeId, source: Source) {
-        if self.nodes[dest].demanded {
-            self.follow(dest, source);
-        } else {
-            self.nodes[dest].sources.push(source);
+    fn copy(&mut self, src: NodeId, dest: NodeId) {
+        if dest != 0 && src != dest {
+            self.watch(src, Use::Copy(dest));
         }
     }
 
-    fn follow(&mut self, dest: NodeId, source: Source) {
-        match source {
-            Source::Copy(src) => self.watch(src, Use::Copy(dest)),
-            Source::Field(base, field) => self.watch(base, Use::Read(field, dest)),
-            Source::Object(ctx, Site(body_id, region, op)) => {
-                let body = self.bodies[body_id];
-                let Op::Object(_, function, fields) = body.regions[region].ops[op] else {
-                    unreachable!("a recorded object source points to its constructor");
-                };
-                let function = function.map(|name| Function::Named(Callee::Named(name), true));
-                let object = self.object(function);
-                for &(field, src) in fields.get(&body.fields) {
-                    let dest = self.field(object, field);
-                    let src = self.local(ctx, src);
-                    self.copy(src, dest);
-                }
-                self.add(dest, object);
-            }
-        }
-    }
-
-    fn copy(&mut self, from: NodeId, to: NodeId) {
-        if from != 0 && to != 0 && from != to {
-            self.source(to, Source::Copy(from));
-        }
+    fn named(&mut self, callee: Callee) -> ObjectId {
+        *self.functions.entry(callee).or_insert_with(|| {
+            self.objects.push(Object {
+                function: Some(Function::Named(callee, false)),
+                ..Object::default()
+            });
+            self.objects.len() - 1
+        })
     }
 
     fn object(&mut self, function: Option<Function>) -> ObjectId {
-        let id = self.objects.len();
         self.objects.push(Object {
             function,
             ..Object::default()
         });
-        id
-    }
-
-    fn function(&mut self, callee: Callee) -> ObjectId {
-        if let Some(&object) = self.functions.get(&callee) {
-            return object;
-        }
-        let object = self.object(Some(Function::Named(callee, false)));
-        self.functions.insert(callee, object);
-        object
-    }
-
-    fn local(&mut self, ctx: ContextId, local: Local) -> NodeId {
-        if local == SCALAR {
-            return 0;
-        }
-        if let Some(node) = self.contexts[ctx].locals[local as usize] {
-            return node;
-        }
-        let node = self.node();
-        self.contexts[ctx].locals[local as usize] = Some(node);
-        node
+        self.objects.len() - 1
     }
 
     fn field(&mut self, object: ObjectId, field: Field) -> NodeId {
@@ -752,48 +669,58 @@ impl Analysis<'_> {
             return node;
         }
         let node = self.node();
-        if field == Field::Element {
-            let fields: Vec<_> = self.objects[object].fields.values().copied().collect();
-            for field in fields {
-                self.copy(node, field);
+        let fields = &self.objects[object].fields;
+        match field {
+            Field::All => {
+                let members: Vec<_> = fields.values().copied().collect();
+                for member in members {
+                    self.copy(member, node);
+                }
             }
-        } else if let Some(&wildcard) = self.objects[object].fields.get(&Field::Element) {
-            self.copy(wildcard, node);
+            Field::Callbacks => {
+                if self.objects[object].function.is_some() {
+                    self.add(node, object);
+                }
+                let all = self.field(object, Field::All);
+                self.watch(all, Use::Collect(node));
+            }
+            Field::Element => {
+                let members: Vec<_> = fields
+                    .iter()
+                    .filter_map(|(key, &node)| {
+                        (!matches!(key, Field::All | Field::Callbacks)).then_some(node)
+                    })
+                    .collect();
+                for member in members {
+                    self.copy(node, member);
+                }
+            }
+            _ => {
+                if let Some(&wildcard) = fields.get(&Field::Element) {
+                    self.copy(wildcard, node);
+                }
+            }
         }
-        self.objects[object].fields.insert(field, node);
-        if let Some(all) = self.objects[object].all_fields {
+        if !matches!(field, Field::All | Field::Callbacks)
+            && let Some(&all) = self.objects[object].fields.get(&Field::All)
+        {
             self.copy(node, all);
         }
+        self.objects[object].fields.insert(field, node);
         node
     }
 
-    fn all_fields(&mut self, object: ObjectId) -> NodeId {
-        if let Some(node) = self.objects[object].all_fields {
-            return node;
+    fn local(&mut self, ctx: ContextId, local: Local) -> NodeId {
+        if local == SCALAR {
+            return 0;
         }
-        let node = self.node();
-        self.objects[object].all_fields = Some(node);
-        let fields: Vec<_> = self.objects[object].fields.values().copied().collect();
-        for field in fields {
-            self.copy(field, node);
+        let locals = &mut self.contexts[ctx].locals;
+        let node = &mut locals[local as usize];
+        if *node == 0 {
+            *node = self.nodes.len();
+            self.nodes.push(Node::default());
         }
-        node
-    }
-
-    // Many opaque calls see the same aggregate, or overlapping subtrees.
-    // Share each object's set of contained callables across those calls.
-    fn callbacks(&mut self, object: ObjectId) -> NodeId {
-        if let Some(node) = self.objects[object].callbacks {
-            return node;
-        }
-        let node = self.node();
-        self.objects[object].callbacks = Some(node);
-        if self.objects[object].function.is_some() {
-            self.add(node, object);
-        }
-        let fields = self.all_fields(object);
-        self.watch(fields, Use::ContainCallbacks(node));
-        node
+        *node
     }
 
     fn global(&mut self, name: Ustr) -> NodeId {
@@ -805,197 +732,199 @@ impl Analysis<'_> {
         node
     }
 
-    fn dependency(&mut self, root: usize, name: Ustr) {
-        let owner = self.owners.get(&name).copied().unwrap_or(name);
-        if self.initialized.contains(&owner) {
-            self.deps[root].insert(owner);
+    fn result(&mut self, key: (Root, ContextId, usize), lane: usize) -> NodeId {
+        let nodes = &mut self.regions.entry(key).or_default().results;
+        while nodes.len() <= lane {
+            nodes.push(self.nodes.len());
+            self.nodes.push(Node::default());
         }
+        nodes[lane]
     }
 
-    fn context(&mut self, body: BodyId, initializer: bool) -> ContextId {
-        let ctx = self.contexts.len();
+    fn context(&mut self, body: &'a Body) -> ContextId {
         self.contexts.push(Context {
             body,
-            initializer,
-            locals: vec![None; self.bodies[body].slots],
-            inner: None,
-            handle: None,
+            locals: vec![0; body.slots + 1],
+            coroutine: body.coroutine.as_ref().map(|_| Box::default()),
         });
-        ctx
+        self.contexts.len() - 1
     }
 
-    fn activation(&mut self, body: BodyId, call: CallId) -> ContextId {
-        let root = self.calls[call].root;
-        let Site(parent, region, op) = self.calls[call].site;
-        let key = (root, parent, region, op, body);
-        if let Some(&ctx) = self.activations.get(&key) {
-            return ctx;
+    fn run(&mut self, root: Root, ctx: ContextId, region: usize) {
+        let key = (root, ctx, region);
+        if !std::mem::replace(&mut self.regions.entry(key).or_default().entered, true) {
+            self.pending.push(key);
         }
-        let ctx = self.context(body, false);
-        self.activations.insert(key, ctx);
-        ctx
     }
 
-    fn bind(&mut self, ctx: ContextId, region: usize, call: CallId, prefix: Option<ObjectId>) {
-        let body = self.bodies[self.contexts[ctx].body];
-        let params = body.regions[region].params.get(&body.locals);
-        let unknown_args = self.calls[call].unknown_args;
-        let mut params = params.iter().copied();
-        if let Some(object) = prefix
+    fn apply(&mut self, (root, ctx, region): (Root, ContextId, usize), once: bool) {
+        let body = self.contexts[ctx].body;
+        for (i, op) in body.regions[region].ops.iter().enumerate() {
+            let site = Site(body.name, region, i);
+            match *op {
+                Op::Read(SCALAR, name) => self.deps[root].extend(self.owners.get(&name).copied()),
+                Op::Read(dest, name) => {
+                    let dest = self.local(ctx, dest);
+                    if self.bodies.contains_key(&name) {
+                        let object = self.named(Callee::Named(name));
+                        self.add(dest, object);
+                    } else {
+                        assert!(
+                            !self.unexamined.contains(&name),
+                            "initializer value {name} is absent from the concrete dependency closure"
+                        );
+                        if let Some(&owner) = self.owners.get(&name) {
+                            self.deps[root].insert(owner);
+                        } else {
+                            self.add(dest, UNKNOWN);
+                        }
+                        let src = self.global(name);
+                        self.copy(src, dest);
+                    }
+                }
+                Op::Write(name, src) => {
+                    let src = self.local(ctx, src);
+                    let dest = self.global(name);
+                    self.copy(src, dest);
+                }
+                Op::Copy(dest, src) => {
+                    let src = self.local(ctx, src);
+                    let dest = self.local(ctx, dest);
+                    self.copy(src, dest);
+                }
+                Op::Function(dest, callee) => {
+                    let dest = self.local(ctx, dest);
+                    let object = self.named(callee);
+                    self.add(dest, object);
+                }
+                Op::Lambda(dest, region) => {
+                    let dest = self.local(ctx, dest);
+                    let object = self.object(Some(Function::Closure(ctx, region)));
+                    self.add(dest, object);
+                }
+                Op::Object(dest, function, fields) => {
+                    let dest = self.local(ctx, dest);
+                    let object = self
+                        .object(function.map(|name| Function::Named(Callee::Named(name), true)));
+                    for &(field, src) in fields.get(&body.fields) {
+                        let src = self.local(ctx, src);
+                        let dest = self.field(object, field);
+                        self.copy(src, dest);
+                    }
+                    self.add(dest, object);
+                }
+                Op::Field(dest, base, field) => {
+                    let dest = self.local(ctx, dest);
+                    let base = self.local(ctx, base);
+                    self.watch(base, Use::Read(field, dest));
+                }
+                Op::StoreField(base, field, src) => {
+                    let src = self.local(ctx, src);
+                    let base = self.local(ctx, base);
+                    self.watch(base, Use::Write(field, src, root, site));
+                }
+                Op::Return(values) => {
+                    let region = if body.coroutine.is_some() && region == 1 {
+                        0
+                    } else {
+                        region
+                    };
+                    for (lane, &src) in values.get(&body.locals).iter().enumerate() {
+                        let src = self.local(ctx, src);
+                        let dest = self.result((root, ctx, region), lane);
+                        self.copy(src, dest);
+                    }
+                }
+                Op::Call(target, args, dests) => {
+                    let args = args
+                        .get(&body.locals)
+                        .iter()
+                        .map(|&id| self.local(ctx, id))
+                        .collect();
+                    let dests = dests
+                        .get(&body.locals)
+                        .iter()
+                        .map(|&id| self.local(ctx, id))
+                        .collect();
+                    let call = self.push_call(
+                        root,
+                        site,
+                        args,
+                        dests,
+                        once && !body.regions[0].may_repeat,
+                    );
+                    match target {
+                        Target::Direct(callee) => self.call(call, callee, None),
+                        Target::Value(value) => {
+                            let src = self.local(ctx, value);
+                            self.watch(src, Use::Call(call));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn push_call(
+        &mut self,
+        root: Root,
+        site: Site,
+        args: Vec<NodeId>,
+        dests: Vec<NodeId>,
+        once: bool,
+    ) -> CallId {
+        self.calls.push(Call {
+            root,
+            site,
+            args,
+            dests,
+            once,
+            escaped: None,
+            unknown_args: false,
+        });
+        self.calls.len() - 1
+    }
+
+    fn bind(&mut self, call: CallId, ctx: ContextId, region: usize, capture: Option<ObjectId>) {
+        let body = self.contexts[ctx].body;
+        let mut params = body.regions[region]
+            .params
+            .get(&body.locals)
+            .iter()
+            .copied();
+        if let Some(object) = capture
             && let Some(param) = params.next()
         {
             let dest = self.local(ctx, param);
             self.add(dest, object);
         }
         for (index, param) in params.enumerate() {
-            if let Some(src) = self.calls[call].args.get(index).copied().or(unknown_args) {
+            let call = &self.calls[call];
+            if let Some(src) = call
+                .args
+                .get(index)
+                .copied()
+                .or(call.unknown_args.then_some(UNKNOWN_ARG))
+            {
                 let dest = self.local(ctx, param);
                 self.copy(src, dest);
             }
         }
     }
 
-    fn result(&mut self, root: usize, ctx: ContextId, region: usize, lane: usize) -> NodeId {
-        let key = (root, ctx, region);
-        while self.returns.get(&key).map_or(0, Vec::len) <= lane {
-            let node = self.node();
-            self.returns.entry(key).or_default().push(node);
-        }
-        self.returns[&key][lane]
-    }
-
-    fn results(&mut self, ctx: ContextId, region: usize, call: CallId) {
+    fn results(&mut self, call: CallId, ctx: ContextId, region: usize) {
         let root = self.calls[call].root;
         for lane in 0..self.calls[call].dests.len() {
             let dest = self.calls[call].dests[lane];
-            let from = self.result(root, ctx, region, lane);
+            let from = self.result((root, ctx, region), lane);
             self.copy(from, dest);
         }
     }
 
-    fn execute(&mut self, ctx: ContextId, region: usize, root: usize) {
-        if self.regions.insert((root, ctx, region)) {
-            self.pending.push((root, ctx, region));
-        }
-    }
-
-    fn apply(&mut self, ctx: ContextId, root: usize, site: Site, op: &Op) {
-        let body = self.bodies[self.contexts[ctx].body];
-        match *op {
-            Op::Read(SCALAR, name) => self.dependency(root, name),
-            Op::Read(dest, name) => {
-                let dest = self.local(ctx, dest);
-                if self.definitions.contains_key(&name) {
-                    let value = self.function(Callee::Named(name));
-                    self.add(dest, value);
-                } else {
-                    assert!(
-                        !self.unexamined.contains(&name),
-                        "initializer value {name} is absent from the concrete dependency closure"
-                    );
-                    self.dependency(root, name);
-                    let src = self.global(name);
-                    self.copy(src, dest);
-                    // Compiler runtime functions (for example the defer stack)
-                    // have no Rock body. Their arguments can escape.
-                    if !self
-                        .initialized
-                        .contains(&self.owners.get(&name).copied().unwrap_or(name))
-                    {
-                        let (_, unknown) = self.unknown();
-                        self.add(dest, unknown);
-                    }
-                }
-            }
-            Op::Write(name, src) => {
-                let src = self.local(ctx, src);
-                let dest = self.global(name);
-                self.copy(src, dest);
-            }
-            Op::Function(dest, callee) => {
-                let dest = self.local(ctx, dest);
-                let object = self.function(callee);
-                self.add(dest, object);
-            }
-            Op::Copy(dest, src) => {
-                let dest = self.local(ctx, dest);
-                let src = self.local(ctx, src);
-                self.copy(src, dest);
-            }
-            Op::Object(dest, _, _) => {
-                let dest = self.local(ctx, dest);
-                self.source(dest, Source::Object(ctx, site));
-            }
-            Op::Lambda(dest, region) => {
-                let object = self.object(Some(Function::Lambda(ctx, region)));
-                let dest = self.local(ctx, dest);
-                self.add(dest, object);
-            }
-            Op::Field(dest, base, field) => {
-                let dest = self.local(ctx, dest);
-                let base = self.local(ctx, base);
-                self.source(dest, Source::Field(base, field));
-            }
-            Op::StoreField(base, field, src) => {
-                let src = self.local(ctx, src);
-                let base = self.local(ctx, base);
-                self.watch(base, Use::Write(field, src, root, site));
-            }
-            Op::Call(target, args, dests) => {
-                let call = self.calls.len();
-                let args = args
-                    .get(&body.locals)
-                    .iter()
-                    .map(|&arg| self.local(ctx, arg))
-                    .collect();
-                let dests = dests
-                    .get(&body.locals)
-                    .iter()
-                    .map(|&dest| self.local(ctx, dest))
-                    .collect();
-                self.calls.push(Call {
-                    root,
-                    site,
-                    args,
-                    dests,
-                    opaque: None,
-                    unknown_args: None,
-                    once: self.contexts[ctx].initializer
-                        && site.1 == 0
-                        && !body.regions[0].may_repeat,
-                });
-                match target {
-                    Target::Direct(callee) => self.call(callee, call, None),
-                    Target::Value(value) => {
-                        let value = self.local(ctx, value);
-                        self.watch(value, Use::Call(call));
-                    }
-                }
-            }
-            Op::Return(values) => {
-                for (lane, &src) in values.get(&body.locals).iter().enumerate() {
-                    let src = self.local(ctx, src);
-                    let region = if site.1 == 1 && body.coroutine.is_some() {
-                        0
-                    } else {
-                        site.1
-                    };
-                    let dest = self.result(root, ctx, region, lane);
-                    self.copy(src, dest);
-                }
-            }
-            Op::SetInner(src) => {
-                let inner = self.inner(ctx);
-                let src = self.local(ctx, src);
-                self.copy(src, inner);
-            }
-        }
-    }
-
-    fn call(&mut self, callee: Callee, call: CallId, env: Option<ObjectId>) {
+    fn call(&mut self, call: CallId, callee: Callee, capture: Option<ObjectId>) {
         match callee {
             Callee::Named(name) => {
-                let Some(&body) = self.definitions.get(&name) else {
+                let Some(&body) = self.bodies.get(&name) else {
                     assert!(
                         !self.unexamined.contains(&name),
                         "initializer callee {name} is absent from the concrete dependency closure"
@@ -1003,113 +932,103 @@ impl Analysis<'_> {
                     self.opaque(call);
                     return;
                 };
-                let ctx = self.activation(body, call);
-                self.bind(ctx, 0, call, env);
-                if self.bodies[body].coroutine.is_some() {
-                    if let Some(&dest) = self.calls[call].dests.first() {
-                        let object = match self.contexts[ctx].handle {
-                            Some(object) => object,
-                            None => {
-                                let object = self.object(Some(Function::Coroutine(ctx)));
-                                self.contexts[ctx].handle = Some(object);
-                                object
-                            }
-                        };
-                        self.add(dest, object);
-                    }
+                let Call { root, site, .. } = self.calls[call];
+                let key = (root, site, name);
+                let ctx = if let Some(&ctx) = self.activations.get(&key) {
+                    ctx
                 } else {
-                    let root = self.calls[call].root;
-                    self.execute(ctx, 0, root);
-                    self.results(ctx, 0, call);
+                    let ctx = self.context(body);
+                    self.activations.insert(key, ctx);
+                    ctx
+                };
+                self.bind(call, ctx, 0, capture);
+                if body.coroutine.is_none() {
+                    self.run(root, ctx, 0);
+                    self.results(call, ctx, 0);
+                } else if let Some(&dest) = self.calls[call].dests.first() {
+                    let object = if let Some(object) =
+                        self.contexts[ctx].coroutine.as_mut().unwrap().handle
+                    {
+                        object
+                    } else {
+                        let object = self.object(Some(Function::Coroutine(ctx)));
+                        self.contexts[ctx].coroutine.as_mut().unwrap().handle = Some(object);
+                        object
+                    };
+                    self.add(dest, object);
                 }
             }
-            Callee::Opaque
-            | Callee::Allocate
-            | Callee::Identity
-            | Callee::Push
-            | Callee::GetIndex
-            | Callee::SetIndex => self.opaque(call),
             Callee::InspectCoroutine => {}
-            action => {
+            Callee::Resume | Callee::Kill | Callee::HotReload | Callee::CoroutineResult => {
                 if let Some(&receiver) = self.calls[call].args.first() {
-                    self.watch(receiver, Use::Coroutine(call, action));
+                    self.watch(receiver, Use::Coroutine(call, callee));
                 }
             }
+            _ => self.opaque(call),
         }
     }
 
-    fn unknown(&mut self) -> (NodeId, ObjectId) {
-        if let Some(unknown) = self.unknown {
-            return unknown;
-        }
-        let node = self.node();
-        let object = self.object(Some(Function::Named(Callee::Opaque, false)));
-        self.add(node, object);
-        self.unknown = Some((node, object));
-        (node, object)
-    }
-
-    fn opaque(&mut self, call: CallId) {
-        if self.calls[call].opaque.is_some() {
-            return;
-        }
-        self.calls[call].opaque = Some(0);
-        if self.calls[call].args.iter().any(|&arg| arg != 0) {
-            let escaped = self.node();
-            self.calls[call].opaque = Some(escaped);
-            self.watch(escaped, Use::Escape(call));
-            for index in 0..self.calls[call].args.len() {
-                let arg = self.calls[call].args[index];
-                self.watch(arg, Use::ContainCallbacks(escaped));
-            }
-        }
-        // A callable crossing an opaque boundary is charged to the escape.
-        // Reusing its enclosing object's fields as the opaque result would
-        // conflate unrelated objects (even scalar-returning foreign calls).
-        let (_, unknown) = self.unknown();
-        for index in 0..self.calls[call].dests.len() {
-            let dest = self.calls[call].dests[index];
-            self.add(dest, unknown);
-        }
-    }
-
-    fn escape_store(&mut self, src: NodeId, root: usize, site: Site) {
-        let call = self.calls.len();
-        self.calls.push(Call {
-            root,
-            site,
-            args: vec![src],
-            dests: Vec::new(),
-            opaque: None,
-            unknown_args: None,
-            once: false,
-        });
-        self.opaque(call);
-    }
-
-    fn invoke(&mut self, object: ObjectId, call: CallId) {
+    fn invoke(&mut self, call: CallId, object: ObjectId) {
         match self.objects[object].function {
             Some(Function::Named(callee, capture)) => {
-                self.call(callee, call, capture.then_some(object));
+                self.call(call, callee, capture.then_some(object))
             }
-            Some(Function::Lambda(ctx, region)) => {
-                let root = self.calls[call].root;
-                self.bind(ctx, region, call, None);
-                self.execute(ctx, region, root);
-                self.results(ctx, region, call);
+            Some(Function::Closure(ctx, region)) => {
+                self.bind(call, ctx, region, None);
+                self.run(self.calls[call].root, ctx, region);
+                self.results(call, ctx, region);
             }
             Some(Function::Coroutine(ctx)) => self.coroutine(ctx, call, Callee::Resume),
             None => {}
         }
     }
 
+    fn opaque(&mut self, call: CallId) {
+        if self.calls[call].escaped.is_some() {
+            return;
+        }
+        let escaped = if self.calls[call].args.iter().any(|&arg| arg != 0) {
+            let escaped = self.node();
+            self.watch(escaped, Use::Escape(call));
+            for index in 0..self.calls[call].args.len() {
+                self.watch(self.calls[call].args[index], Use::Collect(escaped));
+            }
+            escaped
+        } else {
+            0
+        };
+        self.calls[call].escaped = Some(escaped);
+        // Contained callables cross the escape, not the result. Propagating
+        // their aggregate as an opaque return conflates unrelated objects.
+        for index in 0..self.calls[call].dests.len() {
+            self.add(self.calls[call].dests[index], UNKNOWN);
+        }
+    }
+
+    fn escape(&mut self, call: CallId, object: ObjectId) {
+        match self.objects[object].function {
+            Some(Function::Coroutine(ctx)) => self.coroutine(ctx, call, Callee::Opaque),
+            Some(Function::Named(Callee::Named(name), _)) if !self.bodies.contains_key(&name) => {}
+            Some(Function::Closure(..) | Function::Named(Callee::Named(_), _)) => {
+                let outer = &self.calls[call];
+                let (root, site, escaped) = (outer.root, outer.site, outer.escaped.unwrap());
+                let returned = self.node();
+                self.watch(returned, Use::Collect(escaped));
+                let inner = self.push_call(root, site, Vec::new(), vec![returned], false);
+                self.calls[inner].unknown_args = true;
+                self.invoke(inner, object);
+            }
+            _ => {}
+        }
+    }
+
     fn coroutine(&mut self, ctx: ContextId, call: CallId, action: Callee) {
-        if !self.coroutine_calls.insert((ctx, call, action)) {
+        let state = self.contexts[ctx].coroutine.as_mut().unwrap();
+        if !state.actions.insert((call, action)) {
             return;
         }
         let root = self.calls[call].root;
-        let body = self.contexts[ctx].body;
-        let coroutine = self.bodies[body].coroutine.as_ref().unwrap();
+        let coroutine = self.contexts[ctx].body.coroutine.as_ref().unwrap();
         if matches!(action, Callee::Resume | Callee::Opaque) {
             if let Some(arg) = coroutine.resume_arg
                 && let Some(&src) = self.calls[call].args.get(1)
@@ -1117,11 +1036,12 @@ impl Analysis<'_> {
                 let dest = self.local(ctx, arg);
                 self.copy(src, dest);
             }
-            self.execute(ctx, 0, root);
-            self.results(ctx, 0, call);
-            let calls = self.resumes.entry(ctx).or_default();
+            self.run(root, ctx, 0);
+            self.results(call, ctx, 0);
+            let state = self.contexts[ctx].coroutine.as_mut().unwrap();
+            let calls = &mut state.resumes;
             calls.push(call);
-            let kills = self.kills.get(&ctx).cloned().unwrap_or_default();
+            let kills = state.kills.clone();
             let may_resume_again =
                 calls.len() > 1 || !self.calls[call].once || matches!(action, Callee::Opaque);
             let resume_roots: Vec<_> = if may_resume_again {
@@ -1131,13 +1051,13 @@ impl Analysis<'_> {
             };
             for root in resume_roots {
                 if may_resume_again {
-                    self.execute(ctx, 1, root);
+                    self.run(root, ctx, 1);
                 }
                 for &(region, armed_on_start) in &coroutine.defers {
                     if may_resume_again || armed_on_start {
-                        self.execute(ctx, region, root);
+                        self.run(root, ctx, region);
                         for &kill in &kills {
-                            self.execute(ctx, region, kill);
+                            self.run(kill, ctx, region);
                         }
                     }
                 }
@@ -1150,18 +1070,20 @@ impl Analysis<'_> {
             let roots = self.deps.len();
             for prior in 0..roots {
                 if let Some(&dest) = self.calls[call].dests.first() {
-                    let src = self.result(prior, ctx, 0, 0);
+                    let src = self.result((prior, ctx, 0), 0);
                     self.copy(src, dest);
                 }
             }
         }
         if matches!(action, Callee::Kill) {
-            self.kills.entry(ctx).or_default().push(root);
-            if let Some(calls) = self.resumes.get(&ctx) {
+            let state = self.contexts[ctx].coroutine.as_mut().unwrap();
+            state.kills.push(root);
+            let calls = &state.resumes;
+            if !calls.is_empty() {
                 let may_resume_again = calls.len() > 1 || !self.calls[calls[0]].once;
                 for &(region, armed_on_start) in &coroutine.defers {
                     if may_resume_again || armed_on_start {
-                        self.execute(ctx, region, root);
+                        self.run(root, ctx, region);
                     }
                 }
             }
@@ -1177,54 +1099,35 @@ impl Analysis<'_> {
                         Callee::HotReload
                     )
             ) {
-                self.execute(ctx, region, root);
+                self.run(root, ctx, region);
             }
         }
         if matches!(action, Callee::Kill | Callee::Opaque) {
-            let inner = self.inner(ctx);
+            let inner = self.local(ctx, self.contexts[ctx].body.slots as Local);
             self.watch(inner, Use::Coroutine(call, action));
         }
     }
 
-    fn inner(&mut self, ctx: ContextId) -> NodeId {
-        if let Some(node) = self.contexts[ctx].inner {
-            return node;
-        }
-        let node = self.node();
-        self.contexts[ctx].inner = Some(node);
-        node
-    }
-
-    fn propagate(&mut self) {
+    fn propagate(&mut self, initializer_contexts: usize) {
         loop {
-            while let Some((root, ctx, region)) = self.pending.pop() {
-                let body = self.contexts[ctx].body;
-                for (i, op) in self.bodies[body].regions[region].ops.iter().enumerate() {
-                    self.apply(ctx, root, Site(body, region, i), op);
-                }
-            }
-            while let Some(dest) = self.demands.pop() {
-                for source in std::mem::take(&mut self.nodes[dest].sources) {
-                    self.follow(dest, source);
-                }
+            while let Some(key @ (_, ctx, region)) = self.pending.pop() {
+                self.apply(key, ctx < initializer_contexts && region == 0);
             }
             let Some((use_, object)) = self.work.pop() else {
                 break;
             };
             match use_ {
                 Use::Copy(dest) => self.add(dest, object),
+                Use::Read(_, dest) if object == UNKNOWN => self.add(dest, UNKNOWN),
                 Use::Read(field, dest) => {
-                    if let Some((_, unknown)) = self.unknown
-                        && object == unknown
-                    {
-                        self.add(dest, unknown);
-                        continue;
-                    }
-                    let src = if field == Field::Element {
-                        self.all_fields(object)
-                    } else {
-                        self.field(object, field)
-                    };
+                    let src = self.field(
+                        object,
+                        if field == Field::Element {
+                            Field::All
+                        } else {
+                            field
+                        },
+                    );
                     self.copy(src, dest);
                     if let (Some(Function::Coroutine(_)), Field::Name(name)) =
                         (self.objects[object].function, field)
@@ -1233,54 +1136,26 @@ impl Analysis<'_> {
                         self.add(dest, object);
                     }
                 }
-                Use::Write(field, src, root, site) => {
-                    if self.unknown.is_some_and(|(_, id)| id == object) {
-                        self.escape_store(src, root, site);
-                    } else {
-                        let dest = self.field(object, field);
-                        self.copy(src, dest);
-                    }
+                Use::Write(_, src, root, site) if object == UNKNOWN => {
+                    let call = self.push_call(root, site, vec![src], Vec::new(), false);
+                    self.opaque(call);
                 }
-                Use::Call(call) => self.invoke(object, call),
+                Use::Write(field, src, ..) => {
+                    let dest = self.field(object, field);
+                    self.copy(src, dest);
+                }
+                Use::Call(call) => self.invoke(call, object),
                 Use::Coroutine(call, action) => {
                     if let Some(Function::Coroutine(ctx)) = self.objects[object].function {
                         self.coroutine(ctx, call, action);
                     }
                 }
-                Use::ContainCallbacks(dest) => {
-                    if self.unknown.is_none_or(|(_, id)| id != object) {
-                        let src = self.callbacks(object);
-                        self.copy(src, dest);
-                    }
+                Use::Collect(dest) if object != UNKNOWN => {
+                    let src = self.field(object, Field::Callbacks);
+                    self.copy(src, dest);
                 }
-                Use::Escape(call) => {
-                    let dest = self.calls[call].opaque.unwrap();
-                    if let Some(Function::Coroutine(ctx)) = self.objects[object].function {
-                        self.coroutine(ctx, call, Callee::Opaque);
-                    } else if match self.objects[object].function {
-                        Some(Function::Lambda(..)) => true,
-                        Some(Function::Named(Callee::Named(name), _)) => {
-                            self.definitions.contains_key(&name)
-                        }
-                        _ => false,
-                    } {
-                        let (unknown, _) = self.unknown();
-                        let returned = self.node();
-                        self.watch(returned, Use::ContainCallbacks(dest));
-                        let outer = &self.calls[call];
-                        let inner = self.calls.len();
-                        self.calls.push(Call {
-                            root: outer.root,
-                            site: outer.site,
-                            args: Vec::new(),
-                            dests: vec![returned],
-                            opaque: None,
-                            unknown_args: Some(unknown),
-                            once: false,
-                        });
-                        self.invoke(object, inner);
-                    }
-                }
+                Use::Collect(_) => {}
+                Use::Escape(call) => self.escape(call, object),
             }
         }
     }
@@ -1299,60 +1174,56 @@ pub fn order<'a, T>(
     summaries: impl IntoIterator<Item = &'a InitBodies>,
     unexamined: impl IntoIterator<Item = Ustr>,
 ) -> Result<Vec<T>, CompilerError> {
-    let owners = inits
-        .iter()
-        .flat_map(|init| init.leaves.iter().map(move |&leaf| (leaf, init.name)))
-        .collect();
-    let bodies: Vec<_> = summaries.into_iter().flat_map(|facts| &facts.0).collect();
+    if inits.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut analysis = Analysis {
-        definitions: bodies
-            .iter()
-            .enumerate()
-            .map(|(id, body)| (body.name, id))
+        bodies: summaries
+            .into_iter()
+            .flat_map(|facts| &facts.0)
+            .map(|body| (body.name, body))
             .collect(),
-        bodies,
         unexamined: unexamined.into_iter().collect(),
-        owners: &owners,
-        initialized: inits.iter().map(|init| init.name).collect(),
+        owners: inits
+            .iter()
+            .map(|init| (init.name, init.name))
+            .chain(
+                inits
+                    .iter()
+                    .flat_map(|init| init.leaves.iter().map(|&leaf| (leaf, init.name))),
+            )
+            .collect(),
         deps: vec![FxHashSet::default(); inits.len()],
-        globals: FxHashMap::default(),
-        functions: FxHashMap::default(),
-        nodes: vec![Node::default()],
-        objects: Vec::new(),
-        contexts: Vec::new(),
-        calls: Vec::new(),
-        work: Vec::new(),
-        demands: Vec::new(),
-        pending: Vec::new(),
-        coroutine_calls: FxHashSet::default(),
-        resumes: FxHashMap::default(),
-        kills: FxHashMap::default(),
-        unknown: None,
-        activations: FxHashMap::default(),
-        regions: FxHashSet::default(),
-        returns: FxHashMap::default(),
+        ..Analysis::default()
     };
+    assert_eq!(
+        analysis.object(Some(Function::Named(Callee::Opaque, false))),
+        UNKNOWN
+    );
+    let _ = analysis.node();
+    assert_eq!(analysis.node(), UNKNOWN_ARG);
+    analysis.add(UNKNOWN_ARG, UNKNOWN);
     for (root, init) in inits.iter().enumerate() {
-        let Some(&body) = analysis.definitions.get(&init.body) else {
+        let Some(&body) = analysis.bodies.get(&init.body) else {
             continue;
         };
-        if analysis.bodies[body].regions[0].ops.is_empty() {
+        if body.regions[0].ops.is_empty() {
             continue;
         }
-        let ctx = analysis.context(body, true);
-        analysis.execute(ctx, 0, root);
+        let ctx = analysis.context(body);
+        analysis.run(root, ctx, 0);
         let leaves = if init.leaves.is_empty() {
             std::slice::from_ref(&init.name)
         } else {
-            init.leaves.as_slice()
+            &init.leaves
         };
         for (lane, &name) in leaves.iter().enumerate() {
-            let src = analysis.result(root, ctx, 0, lane);
+            let src = analysis.result((root, ctx, 0), lane);
             let dest = analysis.global(name);
             analysis.copy(src, dest);
         }
     }
-    analysis.propagate();
+    analysis.propagate(analysis.contexts.len());
     order_global_inits(
         inits
             .into_iter()
@@ -1363,7 +1234,7 @@ pub fn order<'a, T>(
                 item: init.item,
             })
             .collect(),
-        &owners,
+        &analysis.owners,
     )
     .map_err(cycle_error)
 }

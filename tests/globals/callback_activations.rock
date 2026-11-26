@@ -1,0 +1,19 @@
+@nomangle fn forward_initializer_callback(read: fn() -> int) -> fn() -> int {
+    return read
+}
+
+@nomangle fn run_initializer_callback(read: fn() -> int) -> int {
+    return forward_initializer_callback(read)()
+}
+
+global first_activation: int = run_initializer_callback(() => activation_seed)
+global second_activation: int = run_initializer_callback(() => first_activation + 1)
+global activation_seed: int = make_activation_seed()
+
+fn make_activation_seed() -> int { return 40 }
+
+@test
+fn shared_call_sites_keep_initializer_arguments_separate() {
+    assert_eq(first_activation, 40)
+    assert_eq(second_activation, 41)
+}

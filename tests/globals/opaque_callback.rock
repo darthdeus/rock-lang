@@ -15,3 +15,19 @@ fn provide_seed() -> int { return 11 }
 fn an_opaque_call_may_invoke_an_argument() {
     assert_eq(result, 11)
 }
+
+inline(lua) fn invoke_returned(factory: fn() -> fn() -> int) -> int = """
+    return factory()()
+"""
+
+inline(js) fn invoke_returned(factory: fn() -> fn() -> int) -> int = """
+    return __rock_call(__rock_call(factory))
+"""
+
+global returned_result: int = invoke_returned(() => (() => returned_seed))
+global returned_seed: int = provide_seed()
+
+@test
+fn an_opaque_call_may_invoke_a_returned_callback() {
+    assert_eq(returned_result, 11)
+}

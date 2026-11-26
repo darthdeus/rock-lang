@@ -9,11 +9,10 @@ pub(super) fn record_init_body(
 ) -> InitBodies {
     let mut facts = InitBodies::default();
     facts.record(ws, mf, key, &|body, iid, func| {
-        let name = match body.spec_bindings.get(&iid) {
+        Some(match body.spec_bindings.get(&iid) {
             Some(instance) => cg.instance_symbol(ws, scx.interner(), instance),
             None => cg.mangled_name(ws, func),
-        };
-        skull_mir::init::callee(ws, func, Some(name))
+        })
     });
     facts
 }

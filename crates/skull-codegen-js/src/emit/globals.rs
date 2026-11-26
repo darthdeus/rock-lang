@@ -444,15 +444,14 @@ pub(super) fn order_global_inits(
     }
     let mut facts = InitBodies::default();
     let resolve = |mf: &MirFunc, iid, func| {
-        let name = if let Inst::Global(surface) = mf.insts[iid] {
+        (if let Inst::Global(surface) = mf.insts[iid] {
             st.gctx.fns.get(&surface)
         } else {
             st.names
                 .instance_for_call(ws, mf, iid, func)
                 .and_then(|instance| st.names.get(&instance))
-        }
-        .map(|name| Ustr::from(name.as_str()));
-        skull_mir::init::callee(ws, func, name)
+        })
+        .map(|name| Ustr::from(name.as_str()))
     };
     for g in &st.ginits {
         facts.record(ws, &g.mf, Ustr::from(g.init_name.as_str()), &resolve);
