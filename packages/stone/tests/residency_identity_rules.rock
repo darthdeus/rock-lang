@@ -88,6 +88,21 @@ fn residency_one_digest_two_filters_keeps_two_handles() {
 }
 
 @test
+fn residency_prefetch_can_switch_unreferenced_filters() {
+    residency_identity_fixture("d", ["soil"], paths => {
+        let near = ResidencyRequest { path: paths[0] }
+        let linear = ResidencyRequest { path: paths[0], sampling: TextureFilter::Linear }
+        let first = residency_prefetch(near)
+        assert(first.0 != 0)
+        assert_eq(residency_prefetch(near), first)
+        let other = residency_prefetch(linear)
+        assert(other.0 != 0 && other != first)
+        assert_eq(residency_prefetch(linear), other)
+        assert_eq(residency_prefetch(near), first)
+    })
+}
+
+@test
 fn residency_hit_on_a_cached_identity_counts_no_miss() {
     residency_identity_fixture("c", ["soil", "trail"], paths => {
     let declared = iv(4, 2)

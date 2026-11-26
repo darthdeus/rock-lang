@@ -9,3 +9,35 @@ fn project_asset_path_preserves_absolute_paths() {
     assert_eq(project_asset_path("C:save.json"), "{GAME_SOURCE_DIR}/C:save.json")
     assert_eq(project_asset_path("@engine/font.ttf"), "{STONE_SOURCE_DIR}/engine/font.ttf")
 }
+
+@test
+fn eat_image_identity_uses_the_first_marker_and_preserves_the_suffix() {
+    let digest = "0123456789aBcDeF".repeat(4)
+    for root in ["", "/", "/assets//", "/prefix.eat/other/", "C:/assets/"] {
+        for name in ["pixel.png", "nested//pixel.png/", "banks2/pixel.png", "outer/.eat/inner"] {
+            assert_eq(eat_object_key("{root}.eat/{digest}/{name}"), "{digest}/{name}")
+        }
+    }
+    for path in [
+        "assets/prefix.eat/{digest}/pixel.png",
+        ".eat",
+        ".eat/{digest}",
+        ".eat/{digest}/",
+        ".eat/{digest}//pixel.png",
+        ".eat/{digest}/banks/pixel.png",
+        ".eat/{digest}/banks",
+        ".eat/{digest}a/pixel.png",
+        ".eat/{digest.substring(1, 64)}/pixel.png",
+        ".eat/g{digest.substring(1, 64)}/pixel.png",
+        ".eat//pixel.png",
+        ".eat/invalid/.eat/{digest}/pixel.png",
+        ".eat/{digest}/banks/.eat/{digest}/pixel.png",
+    ] {
+        assert(eat_object_key(path) == null, "expected a non-object path: {path}")
+    }
+
+    // Rock strings can carry raw filename bytes. Keep the character iterator's
+    // existing handling of malformed input while scanning ASCII digests directly.
+    let raw_digest = string_char(192) + string_char(176) + digest.substring(2, 64)
+    assert_eq(eat_object_key(".eat/{raw_digest}/pixel.png"), "{raw_digest}/pixel.png")
+}

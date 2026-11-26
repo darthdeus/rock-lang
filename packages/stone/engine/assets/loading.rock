@@ -227,41 +227,45 @@ global IMAGE_IDENTITY_PATHS: Map<string, [string]> = map_new()
 
 global IMAGE_PATH_REFS: Map<string, int> = map_new()
 
-fn is_hex_digest(text: string) -> bool {
-    if text.len() != 64 { return false }
-    for c in text.chars() {
-        let digit = c >= 48 && c <= 57
-        let lower = c >= 97 && c <= 102
-        let upper = c >= 65 && c <= 70
-        if !digit && !lower && !upper { return false }
+@inline @pure fn eat_hex_digit(c: int) -> bool {
+    return c >= 48 && c <= 57 || c >= 97 && c <= 102 || c >= 65 && c <= 70
+}
+
+fn eat_hex_digest(resolved: string, first: int, end: int) -> bool {
+    for i in first..end {
+        let c = resolved.unit_at(i)
+        if c >= 128 {
+            // Preserve the character iterator's treatment of raw path bytes.
+            if resolved.find("/", first) != end { return false }
+            for ch in resolved.substring(first, end).chars() {
+                if !eat_hex_digit(ch) { return false }
+            }
+            return true
+        }
+        if !eat_hex_digit(c) { return false }
     }
     return true
 }
 
-// The content digest of an immutable Eat object path
-// (`.../.eat/<sha256>/<name>`), or null. The asset watcher's
-// `immutable_eat_object` and `rock_engine_host::release::object_key_parts`
-// read the same layout: the directory name is the SHA-256 of the file's
-// bytes, so equal digests are equal pixels.
-// An Eat object's content key: its hash directory and the file's path inside
-// it. One directory holds a sheet's channel files, so the name tells them
-// apart; the same key under two overlay roots is one image.
+// The SHA-256 directory and file path inside an immutable Eat object. One
+// directory may hold several sheet channels, so the file path is part of the key.
 fn eat_object_key(resolved: string) -> string? {
-    if !resolved.contains(".eat/") { return null }
-    let parts = resolved.split("/")
-    let i = 0
-    while i < parts.len() {
-        if parts[i] == ".eat" {
-            if i + 2 >= parts.len() || parts[i + 2] == "" || parts[i + 2] == "banks" { return null }
-            let digest = parts[i + 1]
-            if !is_hex_digest(digest) { return null }
-            let key = digest
-            for n in i + 2..parts.len() { key = key + "/" + parts[n] }
-            return key
-        }
-        i = i + 1
+    let marker = resolved.find(".eat/")
+    if marker < 0 { return null }
+    if marker > 0 && resolved.unit_at(marker - 1) != 47 {
+        let boundary = resolved.find("/.eat/", marker)
+        if boundary < 0 { return null }
+        marker = boundary + 1
     }
-    return null
+    let digest = marker + 5
+    let name = digest + 65
+    let end = resolved.len()
+    if name >= end || resolved.unit_at(name - 1) != 47 || resolved.unit_at(name) == 47 { return null }
+    if resolved.find("banks", name) == name && (name + 5 == end || resolved.unit_at(name + 5) == 47) {
+        return null
+    }
+    if !eat_hex_digest(resolved, digest, name - 1) { return null }
+    return resolved.substring(digest, end)
 }
 
 fn image_file_storage_format(path: string, format: ImageAssetFormat) -> ImageAssetFormat {
@@ -454,18 +458,21 @@ pub fn load_image_cached(
     logical_size: IVec2? = null
 ) -> Image {
     let path_key = image_format_path(resolved, format)
-    let key = image_asset_key(resolved, format)
-    if (IMAGE_PATH_REFS.get(path_key) ?? 0) == 0 {
-        key = image_identity(resolved, sampling, format)
+    let recorded_key = IMAGE_RESOLVED_IDENTITY.get(path_key)
+    let key = recorded_key ?? path_key
+    let cached: Image? = null
+    if (IMAGE_PATH_REFS.get(path_key) ?? 0) > 0 {
+        cached = IMAGE_CACHE.get(key)
+    } else if recorded_key != null {
+        // A prefetch can reuse the path's published content key for the same
+        // filter. Without a held reference, another filter can get its own key.
+        if let recorded = IMAGE_CACHE.get(key) {
+            if IMAGE_SAMPLING.get(recorded.0) == sampling { cached = recorded }
+        }
     }
-    let cached = IMAGE_CACHE.get(key)
-    let new_alias = false
     if cached == null {
         key = image_identity(resolved, sampling, format)
-        if key != path_key {
-            cached = IMAGE_CACHE.get(key)
-            new_alias = cached != null
-        }
+        cached = IMAGE_CACHE.get(key)
     }
     if cached != null {
         let img = cached
@@ -479,7 +486,7 @@ pub fn load_image_cached(
         if image_sampling(img) != sampling {
             error("load_image_asset: {canonical} is already loaded as {image_sampling(img)}; a second load cannot redeclare it as {sampling} (pass `sampling:` at the draw instead)")
         }
-        if new_alias || IMAGE_RESOLVED_IDENTITY.get(path_key) != key { image_identity_record(path_key, key) }
+        if recorded_key != key { image_identity_record(path_key, key) }
         residency_touch(key)
         if class == ResidencyClass::Required {
             residency_require_loaded(img, canonical)
