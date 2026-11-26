@@ -585,6 +585,13 @@ unsafe fn owned_attachments_change_only_through_their_owner() {
         child_gen
     );
 
+    // A size the driver cannot hold is refused before storage is touched.
+    assert!(!stone_target_resize(target, 1 << 20, 16));
+    assert_eq!(
+        stone_native_handle_generation(STONE_RESOURCE_TARGET, target),
+        target_gen
+    );
+
     assert!(stone_target_resize(target, 24, 24));
     assert_eq!(target_width(child), 24);
     stone_target_destroy(target);
