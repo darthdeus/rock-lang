@@ -38,6 +38,7 @@ pub struct LiveProject {
     sources: SourceFiles,
     include_tests: bool,
     lint_cache: bone_lints::IncrementalLintCache,
+    cache_needs_full_build: bool,
 }
 
 /// The sources a live project of `dir` compiles and accepts edits to: every
@@ -60,6 +61,7 @@ impl LiveProject {
             sources,
             include_tests,
             lint_cache: Default::default(),
+            cache_needs_full_build: false,
         };
         project.verdict("in initial build")?;
         Ok(project)
@@ -110,6 +112,9 @@ impl LiveProject {
             )
         })?;
         self.session.ws.comptime_inputs = snapshot.comptime_inputs;
+        // Fresh inference has a new generation even for sources that rolled
+        // back to the same text. Existing MIR plans hold the old type tables.
+        self.cache_needs_full_build = true;
         self.verdict("after failed publication rollback")
     }
 
@@ -238,6 +243,10 @@ impl LiveProject {
         &self.dir
     }
 
+    pub(crate) fn cache_rebuilt(&mut self) {
+        self.cache_needs_full_build = false;
+    }
+
     pub fn verdict(&mut self, context: &str) -> Result<()> {
         self.verdict_with_change(context, &bone_lints::LintCacheUpdate::full())
     }
@@ -292,7 +301,7 @@ impl LiveProject {
         let mut reinferred = Vec::new();
         let mut span_edits = Vec::new();
         let mut lint_changed_files = Vec::new();
-        let mut full = false;
+        let mut full = self.cache_needs_full_build;
         let mut changed = false;
         for edit in &edits {
             self.sources.files[edit.index]

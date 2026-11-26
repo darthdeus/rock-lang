@@ -193,6 +193,60 @@ fn live_reload_applies_a_cross_file_macro_to_function_change_atomically() {
     assert_eq!(fx.main_text(), std::fs::read_to_string(fresh).unwrap());
 }
 
+#[test]
+fn live_reload_rebuilds_stale_plans_after_a_compile_error() {
+    let helper = r#"pub mod helper;
+pub fn small(x: int) -> int { x + 4 }
+pub fn call(x: int, f: fn() -> int) -> int { x + f() }
+macro add(x: expr) { x + 1 }
+"#;
+    let caller = r#"pub mod consumer;
+use super::helper::{small, call};
+pub fn observe(x: int) -> int {
+    let a = small(x)
+    let b = call(x, () => x + 7)
+    let d = add(x)
+    return a + b + d
+}
+"#;
+    let mut fx = ProjectFixture::boot_files(&[
+        (
+            "stick.toml",
+            "[package]\nname = \"rollback\"\ntype = \"bin\"\n[language]\nmodules = \"v1\"\n",
+        ),
+        (
+            "main.rock",
+            "use consumer::observe;\nfn main() { print(observe(7)) }\n",
+        ),
+        ("helper.rock", helper),
+        ("consumer.rock", &caller.replace("add(x)", "add(x + 9)")),
+    ]);
+    assert!(matches!(
+        fx.edit_files(&[("consumer.rock", caller)]).unwrap(),
+        super::SkullReload::Incremental { .. }
+    ));
+    let overlay = fx.overlay_text();
+    let broken = caller.replace("a + b + d", "missing_value");
+    let escaping = helper.replace("x + f()", "let callbacks = [f]; x + callbacks[0]()");
+    assert!(fx.edit_files(&[("consumer.rock", &broken)]).is_err());
+    assert!(
+        fx.edit_files(&[("consumer.rock", &broken), ("helper.rock", &escaping)])
+            .is_err()
+    );
+    assert_eq!(fx.overlay_text(), overlay);
+
+    fx.edit_files(&[("consumer.rock", caller), ("helper.rock", &escaping)])
+        .expect("the repaired program must compile after a rejected batch");
+    let fresh = fx.path("fresh.lua");
+    super::IncrementalProject::init(
+        fx.dir.path().to_str().unwrap(),
+        &fresh,
+        &fx.path("fresh-overlay.lua"),
+    )
+    .unwrap();
+    assert_eq!(fx.main_text(), std::fs::read_to_string(fresh).unwrap());
+}
+
 fn session(src: &str) -> bone_incremental::session::Session {
     let mut source = rock_core::source_file_from_path_and_contents(
         "main.rock".to_string(),

@@ -2540,6 +2540,7 @@ impl IncrementalProject {
             let ((lua, emits_main), staged_cache) = lua;
             let bytes = write_full_main(&preamble, &lua, emits_main, main_path, incremental_path)?;
             self.cache = staged_cache;
+            self.project.cache_rebuilt();
             let write_ms = t_write.elapsed().as_secs_f64() * 1000.0;
             Ok(SkullReload::Full {
                 bytes,
@@ -2635,6 +2636,7 @@ impl IncrementalProject {
             crate::stone_runtime::program_preamble(self.project.dir(), ProgramKind::Game)?;
         write_full_main(&preamble, &lua, emits_main, main_path, incremental_path)?;
         self.cache = cache; // resets changed_since_full -- the overlay is now folded in
+        self.project.cache_rebuilt();
         self.shape_hashes = skull::type_shape_hashes(self.project.workspace())
             .map_err(|e| anyhow::anyhow!(e.message))?;
         Ok(())
