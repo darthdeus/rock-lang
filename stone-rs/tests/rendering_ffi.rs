@@ -26,3 +26,24 @@ fn rendering_bindings_are_generated_once() {
         );
     }
 }
+
+#[test]
+fn header_declares_the_native_renderer_table_in_rust_field_order() {
+    let (_, body) = HEADER
+        .split_once("typedef struct StoneNativeRendererApiV1 {")
+        .expect("rendering_ffi.h declares StoneNativeRendererApiV1");
+    let (body, _) = body.split_once("} StoneNativeRendererApiV1;").unwrap();
+    let fields: Vec<&str> = body
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.ends_with(';'))
+        .map(|line| match line.split_once("(*") {
+            Some((_, rest)) => rest.split_once(')').unwrap().0,
+            None => line.trim_end_matches(';').rsplit(' ').next().unwrap(),
+        })
+        .collect();
+    assert_eq!(
+        fields,
+        stone_rs::native_renderer::STONE_NATIVE_RENDERER_API_V1_FIELDS
+    );
+}
