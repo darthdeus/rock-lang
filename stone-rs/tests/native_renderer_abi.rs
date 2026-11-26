@@ -93,6 +93,7 @@ extern "C" {
         fingerprint: u64,
     ) -> bool;
     fn stone_shader_set_texture(h: u64, n: *const c_char, unit: c_int);
+    fn stone_shader_texture_slot_find(handle: u64, name: *const c_char) -> c_int;
     fn stone_set_shader(handle: u64);
     fn stone_create_canvas(width: c_int, height: c_int, format: c_int, with_depth: bool) -> u64;
     fn stone_set_canvas(handle: u64);
@@ -191,7 +192,6 @@ const SECOND_LIB_SRC: &str = r#"
 use std::ffi::{c_char, c_float, c_int, c_void};
 
 const ABI_VERSION: u32 = 1;
-const RES_TARGET: c_int = 1;
 const RES_SHADER: c_int = 2;
 const RES_TEXTURE: c_int = 3;
 const RES_MESH: c_int = 4;
@@ -294,10 +294,7 @@ pub unsafe extern "C" fn probe_render_into_owned_target(
     }
 
     let shader = (api.find_shader)(shader_name);
-    if shader == 0
-        || !(api.handle_valid)(RES_SHADER, shader)
-        || (api.handle_valid)(RES_TARGET, shader)
-    {
+    if shader == 0 || !(api.handle_valid)(RES_SHADER, shader) {
         return 0;
     }
     let white = (api.get_white_image)();
@@ -586,6 +583,52 @@ unsafe fn owned_attachments_change_only_through_their_owner() {
     stone_destroy_canvas(other);
 }
 
+unsafe fn texture_on_unit(gl: &glow::Context, unit: u32) -> i32 {
+    gl.active_texture(glow::TEXTURE0 + unit);
+    let bound = gl.get_parameter_i32(glow::TEXTURE_BINDING_2D);
+    gl.active_texture(glow::TEXTURE0);
+    bound
+}
+
+unsafe fn stage_restores_every_texture_unit_a_shader_samples(gl: &glow::Context) {
+    let src = CString::new(BLIT_SHADER).unwrap();
+    let shader = stone_create_shader_from_combined(src.as_ptr());
+    assert_ne!(shader, 0);
+    stone_shader_set_texture(shader, c"uTexture".as_ptr(), 9);
+    assert_eq!(
+        stone_shader_texture_slot_find(shader, c"uTexture".as_ptr()),
+        9
+    );
+
+    let script_texture = gl.create_texture().unwrap();
+    let native_texture = gl.create_texture().unwrap();
+    gl.active_texture(glow::TEXTURE9);
+    gl.bind_texture(glow::TEXTURE_2D, Some(script_texture));
+    gl.active_texture(glow::TEXTURE0);
+    let entry = texture_on_unit(gl, 9);
+
+    let scope = stone_native_stage_begin();
+    gl.active_texture(glow::TEXTURE9);
+    gl.bind_texture(glow::TEXTURE_2D, Some(native_texture));
+    gl.active_texture(glow::TEXTURE0);
+    assert_ne!(stone_native_stage_end(scope) & STONE_STAGE_RESTORED, 0);
+    assert_eq!(texture_on_unit(gl, 9), entry);
+
+    // Units past the saved range are refused where shaders register them.
+    stone_shader_set_texture(shader, c"uTexture".as_ptr(), 40);
+    assert_eq!(
+        stone_shader_texture_slot_find(shader, c"uTexture".as_ptr()),
+        9
+    );
+
+    gl.active_texture(glow::TEXTURE9);
+    gl.bind_texture(glow::TEXTURE_2D, None);
+    gl.active_texture(glow::TEXTURE0);
+    gl.delete_texture(script_texture);
+    gl.delete_texture(native_texture);
+    stone_destroy_shader(shader);
+}
+
 fn second_native_library_renders_multi_attachment_target_restores_state_and_invalidates_handles() {
     let tmp = tempfile::tempdir().unwrap();
     let plugin_path = compile_second_library(tmp.path());
@@ -610,6 +653,7 @@ fn second_native_library_renders_multi_attachment_target_restores_state_and_inva
         stage_scopes_unwind_reject_stale_tokens_and_clear_at_frame_start(gl);
         only_published_shaders_are_findable_and_a_failed_reload_keeps_the_live_one();
         owned_attachments_change_only_through_their_owner();
+        stage_restores_every_texture_unit_a_shader_samples(gl);
 
         assert!(stone_native_renderer_api(999).is_null());
         let api_ptr = stone_native_renderer_api(STONE_NATIVE_RENDERER_ABI_VERSION);

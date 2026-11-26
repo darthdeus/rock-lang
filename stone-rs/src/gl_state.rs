@@ -178,7 +178,7 @@ pub(crate) struct BlendGlState {
 }
 
 impl BlendGlState {
-    pub(crate) unsafe fn read(gl: &DebugGl) -> Self {
+    unsafe fn read(gl: &DebugGl) -> Self {
         Self {
             enabled: gl.is_enabled(glow::BLEND),
             equation_rgb: gl.get_parameter_i32(glow::BLEND_EQUATION_RGB) as u32,
@@ -190,16 +190,17 @@ impl BlendGlState {
         }
     }
 
-    pub(crate) unsafe fn restore(self, gl: &DebugGl) {
+    unsafe fn restore(self, gl: &DebugGl) {
         gl.set_enabled(glow::BLEND, self.enabled);
         gl.blend_equation_separate(self.equation_rgb, self.equation_alpha);
         gl.blend_func_separate(self.src_rgb, self.dst_rgb, self.src_alpha, self.dst_alpha);
     }
 }
 
-// Pass scopes are LIFO, including nested submissions.
+/// Blend, depth, colour-mask, clear-colour and cull state: what the GL
+/// semantic executor changes, and part of every native stage snapshot.
 #[derive(Clone, Copy)]
-struct PassGlState {
+pub(crate) struct PipelineGlState {
     blend: BlendGlState,
     depth_enabled: bool,
     depth_func: u32,
@@ -209,20 +210,11 @@ struct PassGlState {
     cull_enabled: bool,
 }
 
-thread_local! {
-    static PASS_GL_STATES: RefCell<Vec<PassGlState>> = const { RefCell::new(Vec::new()) };
-}
-
-/// Capture only the ambient pipeline state the GL semantic executor changes.
-/// Target, viewport and target scissor deliberately remain the target binder's
-/// contract (exit to the window), not part of this snapshot.
-/// rock-ffi stone-rendering
-#[no_mangle]
-pub extern "C" fn stone_gl_pass_state_begin() -> u32 {
-    let Some(state) = with_gl(|gl| unsafe {
+impl PipelineGlState {
+    pub(crate) unsafe fn read(gl: &DebugGl) -> Self {
         let mut clear_color = [0.0; 4];
         gl.get_parameter_f32_slice(glow::COLOR_CLEAR_VALUE, &mut clear_color);
-        PassGlState {
+        Self {
             blend: BlendGlState::read(gl),
             depth_enabled: gl.is_enabled(glow::DEPTH_TEST),
             depth_func: gl.get_parameter_i32(glow::DEPTH_FUNC) as u32,
@@ -231,7 +223,33 @@ pub extern "C" fn stone_gl_pass_state_begin() -> u32 {
             clear_color,
             cull_enabled: gl.is_enabled(glow::CULL_FACE),
         }
-    }) else {
+    }
+
+    pub(crate) unsafe fn restore(&self, gl: &DebugGl) {
+        self.blend.restore(gl);
+        gl.set_enabled(glow::DEPTH_TEST, self.depth_enabled);
+        gl.depth_func(self.depth_func);
+        gl.depth_mask(self.depth_write);
+        let [r, g, b, a] = self.color_mask;
+        gl.color_mask(r, g, b, a);
+        let [r, g, b, a] = self.clear_color;
+        gl.clear_color(r, g, b, a);
+        gl.set_enabled(glow::CULL_FACE, self.cull_enabled);
+    }
+}
+
+// Pass scopes are LIFO, including nested submissions.
+thread_local! {
+    static PASS_GL_STATES: RefCell<Vec<PipelineGlState>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Capture only the ambient pipeline state the GL semantic executor changes.
+/// Target, viewport and target scissor deliberately remain the target binder's
+/// contract (exit to the window), not part of this snapshot.
+/// rock-ffi stone-rendering
+#[no_mangle]
+pub extern "C" fn stone_gl_pass_state_begin() -> u32 {
+    let Some(state) = with_gl(|gl| unsafe { PipelineGlState::read(gl) }) else {
         return 0;
     };
     PASS_GL_STATES.with(|states| {
@@ -251,26 +269,7 @@ pub extern "C" fn stone_gl_pass_state_end(scope: u32) -> bool {
             return false;
         }
         let state = states[states.len() - 1];
-        let restored = with_gl(|gl| unsafe {
-            state.blend.restore(gl);
-            gl.set_enabled(glow::DEPTH_TEST, state.depth_enabled);
-            gl.depth_func(state.depth_func);
-            gl.depth_mask(state.depth_write);
-            gl.color_mask(
-                state.color_mask[0],
-                state.color_mask[1],
-                state.color_mask[2],
-                state.color_mask[3],
-            );
-            gl.clear_color(
-                state.clear_color[0],
-                state.clear_color[1],
-                state.clear_color[2],
-                state.clear_color[3],
-            );
-            gl.set_enabled(glow::CULL_FACE, state.cull_enabled);
-        })
-        .is_some();
+        let restored = with_gl(|gl| unsafe { state.restore(gl) }).is_some();
         if restored {
             states.pop();
         }

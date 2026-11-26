@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, CStr};
 
@@ -16,8 +16,18 @@ pub(crate) struct Shader {
     pub texture_slots: Vec<(i32, String)>,
 }
 
+/// Texture units a shader may sample. Native stages save and restore the
+/// units registered shaders use, so the count is bounded here.
+pub(crate) const MAX_TEXTURE_UNITS: usize = 32;
+
 thread_local! {
     static SHADER_BY_NAME: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
+    static TEXTURE_UNITS_IN_USE: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Units any registered shader samples, plus unit 0 that unbound samplers read.
+pub(crate) fn texture_units_in_use() -> u32 {
+    TEXTURE_UNITS_IN_USE.with(Cell::get) | 1
 }
 
 /// Compile, link and register one shader. Every GL object created here is released
@@ -129,6 +139,7 @@ pub(crate) fn destroy_all() {
         stone_destroy_shader(handle);
     }
     SHADER_BY_NAME.with(|by_name| by_name.borrow_mut().clear());
+    TEXTURE_UNITS_IN_USE.with(|units| units.set(0));
 }
 
 /// rock-ffi stone-rendering
@@ -169,9 +180,17 @@ pub extern "C" fn stone_shader_set_texture(h: u64, n: *const c_char, unit: c_int
         return;
     }
     let name = unsafe { CStr::from_ptr(n).to_string_lossy() }.into_owned();
+    if !(0..MAX_TEXTURE_UNITS as c_int).contains(&unit) {
+        ::log::error!(
+            target: "SHADER",
+            "stone_shader_set_texture: unit {unit} for `{name}` is outside 0..{MAX_TEXTURE_UNITS}; refused"
+        );
+        return;
+    }
     let Some(program) = get_shader_program(h) else {
         return;
     };
+    TEXTURE_UNITS_IN_USE.with(|units| units.set(units.get() | 1 << unit));
     SHADERS.with(|s| {
         if let Some(shader) = s.borrow_mut().get_mut(&h) {
             if let Some(slot) = shader
