@@ -190,6 +190,8 @@ enum WarmBase {
 #[derive(Clone, Debug)]
 pub struct Session {
     pub ws: Workspace,
+    editor: bool,
+    invalid_use_targets: bool,
     /// Shared, never edited: a build that must expand them copies them.
     pub warm: Arc<[Ast]>,
     pub warm_mids: FxHashSet<ModuleId>,
@@ -537,7 +539,23 @@ impl Session {
         files: Vec<SessionFile>,
         aliases: &bone_core::modules::NsAliases,
     ) -> Result<Self, CompilerError> {
-        let warm: Arc<[Ast]> = warm.into();
+        Self::new_with_mode(warm.into(), files, aliases, false)
+    }
+
+    pub fn new_for_editor(
+        warm: Arc<[Ast]>,
+        files: Vec<SessionFile>,
+        aliases: &bone_core::modules::NsAliases,
+    ) -> Result<Self, CompilerError> {
+        Self::new_with_mode(warm, files, aliases, true)
+    }
+
+    fn new_with_mode(
+        warm: Arc<[Ast]>,
+        files: Vec<SessionFile>,
+        aliases: &bone_core::modules::NsAliases,
+        editor: bool,
+    ) -> Result<Self, CompilerError> {
         let mut ws = Workspace::default();
 
         let warm_mids: FxHashSet<ModuleId> =
@@ -550,6 +568,8 @@ impl Session {
 
         let mut session = Session {
             ws,
+            editor,
+            invalid_use_targets: false,
             warm,
             warm_mids,
             paths: Vec::new(),
@@ -742,7 +762,7 @@ impl Session {
             })
             .collect();
         files.extend(edits.into_iter().map(|(path, text)| make_file(path, text)));
-        let mut next = Self::new(self.warm.clone(), files, &self.aliases)?;
+        let mut next = Self::new_with_mode(self.warm.clone(), files, &self.aliases, self.editor)?;
         next.ws.comptime_inputs = self.ws.comptime_inputs.clone();
         next.declared_facts = std::mem::take(&mut self.declared_facts);
         *self = next;
@@ -886,16 +906,13 @@ impl Session {
             .iter()
             .chain(&user_contributions)
             .collect();
-        bone_semantic::semantic_passes::assemble_namespaces(
-            &mut ws,
-            &contributions,
-            &self.aliases,
-        )?;
+        let invalid_use_targets = self.assemble_namespaces(&mut ws, &contributions)?;
         let mids = lower_and_infer(&mut ws, &lowered)?;
         // The batch path's whole-program gate: a non-public export type closure must
         // fail in a session too.
         bone_semantic::semantic_passes::pass_validate_api_closure(&ws)?;
         ws.phase_timings.clear();
+        self.invalid_use_targets = invalid_use_targets;
         self.set_cooked_contributions(user_contributions, warm_contributions);
         Ok((ws, mids[first_user..].to_vec()))
     }
@@ -955,17 +972,30 @@ impl Session {
             bone_semantic::stdlib_base::warm_names(&self.warm, &self.warm_contributions);
     }
 
+    fn assemble_namespaces(
+        &self,
+        ws: &mut Workspace,
+        contributions: &[&FragmentContribution],
+    ) -> Result<bool, CompilerError> {
+        use bone_semantic::semantic_passes;
+        if self.editor {
+            semantic_passes::register_namespaces(ws, contributions, &self.aliases)?;
+            Ok(contributions
+                .par_iter()
+                .any(|contribution| semantic_passes::use_target_error(ws, contribution).is_some()))
+        } else {
+            semantic_passes::assemble_namespaces(ws, contributions, &self.aliases)?;
+            Ok(false)
+        }
+    }
+
     fn rebuild_scope(
         &mut self,
         module: Ast,
         changed: &FxHashSet<Ustr>,
     ) -> Result<UpdateResult, CompilerError> {
         let mut next = Workspace::default();
-        bone_semantic::semantic_passes::assemble_namespaces(
-            &mut next,
-            &self.contributions(),
-            &self.aliases,
-        )?;
+        self.invalid_use_targets = self.assemble_namespaces(&mut next, &self.contributions())?;
 
         let delta = ScopeDelta::between(&self.ws, &next);
 
@@ -1181,6 +1211,11 @@ impl Session {
 
     pub fn diagnostics(&self) -> Vec<CompilerError> {
         let mut errs = body_errors(&self.ws);
+        if self.invalid_use_targets {
+            errs.extend(self.contributions().into_iter().filter_map(|contribution| {
+                bone_semantic::semantic_passes::use_target_error(&self.ws, contribution)
+            }));
+        }
         // The interactive path keeps the partial tree and reports its recovered syntax errors.
         errs.extend(
             self.files
@@ -1515,6 +1550,14 @@ impl Session {
         for md in &mut macros {
             item_shift.shift_span(&mut md.span);
         }
+        let mut contribution = old.contribution.clone();
+        if self.editor {
+            for item in &mut contribution.items {
+                if let ScopeItem::Use(decl) = item {
+                    item_shift.shift_span(&mut decl.span);
+                }
+            }
+        }
         let next = UserFile {
             text_hash: new_hash,
             item_prints: build_shifted_prints(old.item_prints.clone(), idx, np, &item_shift),
@@ -1523,7 +1566,7 @@ impl Session {
             package: old.package.clone(),
             global_policy: old.global_policy,
             syntax_errors: Vec::new(),
-            contribution: old.contribution.clone(),
+            contribution,
         };
         self.apply_file(path, Some(next), |s| {
             s.rebuild_body_incremental(path, mini, idx, true, &item_shift)

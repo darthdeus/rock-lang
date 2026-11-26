@@ -223,3 +223,43 @@ fn missing_first_buffer_loads_project_and_keeps_unsaved_edits() {
     assert_eq!(bone.file_text(&missing), Some(text));
     assert!(!std::path::Path::new(&*missing).exists());
 }
+
+#[test]
+fn reexport_cycle_has_the_same_diagnostics_from_disk_and_edits() {
+    let clean_a = "pub mod a;\n";
+    let clean_b = "pub mod b;\n";
+    let cycle_a = "pub mod a;\npub use super::b::back as start;\n";
+    let cycle_b = "pub mod b;\npub use super::a::start as back;\n";
+    let project = Project::new(&[
+        MANIFEST,
+        ("main.rock", "fn main() {}\n"),
+        ("a.rock", clean_a),
+        ("b.rock", clean_b),
+    ]);
+    let (a, b) = (project.path("a.rock"), project.path("b.rock"));
+    let snapshot = |bone: &BoneWorkspace| {
+        [&a, &b].map(|file| {
+            let mut diagnostics = bone.diagnostics_for(file);
+            diagnostics.retain(|d| d.severity == Some(DiagnosticSeverity::ERROR));
+            diagnostics.sort_by_key(|d| (d.range.start, d.message.clone()));
+            diagnostics
+        })
+    };
+    let mut retained = BoneWorkspace::new();
+    retained.load_project(&a);
+    retained.update(&a, cycle_a.into());
+    retained.update(&b, cycle_b.into());
+
+    std::fs::write(&a, cycle_a).unwrap();
+    std::fs::write(&b, cycle_b).unwrap();
+    let mut fresh = BoneWorkspace::new();
+    fresh.load_project(&a);
+    assert_eq!(snapshot(&fresh), snapshot(&retained));
+    assert!(snapshot(&fresh).iter().all(|errors| errors.len() == 1));
+
+    for bone in [&mut retained, &mut fresh] {
+        bone.update(&a, clean_a.into());
+        bone.update(&b, clean_b.into());
+        assert!(snapshot(bone).iter().all(Vec::is_empty));
+    }
+}

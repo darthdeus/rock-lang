@@ -1090,6 +1090,21 @@ pub fn assemble_namespaces(
     contributions: &[&FragmentContribution],
     aliases: &bone_core::modules::NsAliases,
 ) -> Result<(), CompilerError> {
+    register_namespaces(ws, contributions, aliases)?;
+    // Find the first error in module order even when checking in parallel.
+    contributions
+        .par_iter()
+        .find_map_first(|contribution| use_target_error(ws, contribution))
+        .map_or(Ok(()), Err)
+}
+
+/// Install the complete namespace for editor queries even when an import or
+/// re-export cannot resolve. The editor can diagnose those imports separately.
+pub fn register_namespaces(
+    ws: &mut Workspace,
+    contributions: &[&FragmentContribution],
+    aliases: &bone_core::modules::NsAliases,
+) -> Result<(), CompilerError> {
     // Manifest aliases can refer to a package without a lowered fragment.
     for input in &aliases.packages {
         let pkg = ws.ns.packages.entry(input.id).or_insert_with(|| NsPackage {
@@ -1207,7 +1222,7 @@ pub fn assemble_namespaces(
 
         ws.fragment_scopes.insert(file, scope);
     }
-    validate_v1_use_targets(ws, contributions)
+    Ok(())
 }
 
 fn ensure_namespace_node<'a>(
@@ -1249,19 +1264,15 @@ fn set_module_visibility(
 }
 
 /// Resolve imports after registration, from the fragment or exporting module.
-fn validate_v1_use_targets(
+pub fn use_target_error(
     ws: &Workspace,
-    contributions: &[&FragmentContribution],
-) -> Result<(), CompilerError> {
-    // Find the first error in module order even when checking in parallel.
-    let first_error = contributions.par_iter().find_map_first(|contribution| {
-        if is_stdlib_module_file(contribution.file.as_str()) {
-            return None;
-        }
-        let frag = ws.fragment_scopes.get(&contribution.file)?;
-        validate_use_items(ws, frag, &frag.module_path, &contribution.items).err()
-    });
-    first_error.map_or(Ok(()), Err)
+    contribution: &FragmentContribution,
+) -> Option<CompilerError> {
+    if is_stdlib_module_file(contribution.file.as_str()) {
+        return None;
+    }
+    let frag = ws.fragment_scopes.get(&contribution.file)?;
+    validate_use_items(ws, frag, &frag.module_path, &contribution.items).err()
 }
 
 fn validate_use_items(

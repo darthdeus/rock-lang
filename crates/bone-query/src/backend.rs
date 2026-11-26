@@ -472,7 +472,7 @@ impl BoneWorkspace {
             let aliases = rock_host::program_inputs::ns_aliases(graph.as_ref());
             let warm = self.stdlib().clone().map_err(|error| error.message)?;
             // The first file may not parse; update_file below adds it.
-            let session = Session::new(warm, Vec::new(), &aliases)
+            let session = Session::new_for_editor(warm, Vec::new(), &aliases)
                 .map_err(|error| format!("the stdlib does not check: {}", error.message))?;
             let project = BoneProject::new(
                 root,
@@ -596,7 +596,7 @@ impl BoneWorkspace {
             .map(|f| (f.path.clone(), f.text.clone()))
             .collect();
         let aliases = project.sources.ns_aliases.unwrap_or_default();
-        match Session::new(warm, files, &aliases) {
+        match Session::new_for_editor(warm, files, &aliases) {
             Ok(session) => {
                 let mut project = BoneProject::new(
                     &root,
