@@ -58,3 +58,14 @@ fn roots_outside_the_value_class_reject() {
         assert!(e.message.contains(reason), "{src}: {}", e.message);
     }
 }
+
+#[test]
+fn matrix_literal_and_column_reads_emit_glsl() {
+    let (ws, mid) = workspace(include_str!(
+        "../../../tests/intrinsics/mat4_reference.rock"
+    ));
+    let shader = emit_value_test(&ws, mid, "mat4_constants_and_columns", GlslProfile::Core330)
+        .expect("emit a local Mat4 and its column reads");
+    assert_has(&shader.fragment, "mat4(");
+    assert_has(&shader.fragment, "[0]");
+}

@@ -1,0 +1,11 @@
+@test(returns = 44.0)
+fn mat4_constants_and_columns() -> float {
+    let m = Mat4 {
+        c2: v(3.0, 0.0, 31.0, 0.0),
+        c3: v(5.0, 0.0, 0.0, 1.0),
+        c0: v(2.0, 0.0, 0.0, 0.0),
+        c1: v(7.0, 1.0, 0.0, 0.0),
+    }
+    let p = m * v(2.0, 3.0, 4.0, 1.0)
+    return p.x + m.c0.x
+}

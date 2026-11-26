@@ -1,5 +1,15 @@
 use super::*;
 
+fn mat4_column(field: Ustr) -> Option<u8> {
+    match field.as_str() {
+        "c0" => Some(0),
+        "c1" => Some(1),
+        "c2" => Some(2),
+        "c3" => Some(3),
+        _ => None,
+    }
+}
+
 impl FnEmit<'_> {
     pub(crate) fn ty_of(&self, iid: Idx<Inst>) -> Result<GlslTy, CompilerError> {
         Ok(match &self.f.insts[iid] {
@@ -91,6 +101,7 @@ impl FnEmit<'_> {
                     match self.ty_of(*base)? {
                         GlslTy::Bvec3 => GlslTy::Bool,
                         GlslTy::Vec2 | GlslTy::Vec3 | GlslTy::Vec4 => GlslTy::Float,
+                        GlslTy::Mat4 if mat4_column(*field).is_some() => GlslTy::Vec4,
                         other => {
                             return Err(err(
                                 self.span(),
@@ -268,6 +279,10 @@ impl FnEmit<'_> {
             Inst::Field { base, field, .. } => {
                 if self.is_uniform_base(*base) {
                     field.as_str().to_string() // uniform global, not a struct member
+                } else if let Some(column) = mat4_column(*field)
+                    && self.ty_of(*base)? == GlslTy::Mat4
+                {
+                    format!("{}[{column}]", self.render_val(*base)?)
                 } else {
                     format!("{}.{}", self.render_val(*base)?, field)
                 }
@@ -281,6 +296,7 @@ impl FnEmit<'_> {
                 let (ctor, comp_ty) = match nominal_glsl_ty(name.as_str()) {
                     Some(t @ (GlslTy::Vec2 | GlslTy::Vec3 | GlslTy::Vec4)) => (t.name(), GlslTy::Float),
                     Some(GlslTy::Bvec3) => ("bvec3", GlslTy::Bool),
+                    Some(GlslTy::Mat4) => ("mat4", GlslTy::Vec4),
                     _ => return Err(err(self.span(), format!("shader profile: value struct `{name}` is not tier 0"))),
                 };
                 let args: Result<Vec<String>, CompilerError> =
