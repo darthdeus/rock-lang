@@ -475,7 +475,10 @@ impl LspServer {
             .open_files
             .remove(&bone_query::canonicalize_lenient(&path));
         match std::fs::read_to_string(&path) {
-            Ok(text) => bone_reload_and_publish(out, &path, text, &mut self.workspace)?,
+            Ok(text) => {
+                let per_file = self.workspace.bone.close_buffer(&path, &text);
+                publish_update(out, &path, per_file, &mut self.workspace)?;
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 // Remove through the normal edit path so dependents get fresh diagnostics.
                 bone_reload_and_publish(out, &path, String::new(), &mut self.workspace)?;
@@ -522,6 +525,15 @@ fn bone_reload_and_publish(
     workspace: &mut LspWorkspace,
 ) -> Result<()> {
     let per_file = workspace.bone.update(file_path, contents);
+    publish_update(out, file_path, per_file, workspace)
+}
+
+fn publish_update(
+    out: &mut Vec<Message>,
+    file_path: &str,
+    per_file: Vec<(String, Vec<lsp_types::Diagnostic>)>,
+    workspace: &mut LspWorkspace,
+) -> Result<()> {
     let mut open_files = Vec::new();
     for (path, diagnostics) in per_file {
         if let Some(base) = workspace.open_files.get_mut(&path) {

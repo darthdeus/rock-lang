@@ -473,6 +473,79 @@ const USES_FOO: &str = "fn use_it() -> Foo { Foo { x: 1 } }\n";
 const DECLARES_FOO: &str = "struct Foo { x: int }\n";
 
 #[test]
+fn dependency_buffer_edits_refresh_the_loaded_consumer() {
+    let (_tmp, dir) = package_dir("workspace");
+    let app = dir.join("app");
+    let dep = dir.join("dep");
+    std::fs::create_dir(&app).unwrap();
+    std::fs::create_dir(&dep).unwrap();
+    std::fs::write(
+        app.join("stick.toml"),
+        "[package]\nname = \"app\"\ntype = \"bin\"\n[dependencies]\ndep = { path = \"../dep\" }\n[language]\nmodules = \"v1\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dep.join("stick.toml"),
+        "[package]\nname = \"dep\"\ntype = \"lib\"\n[language]\nmodules = \"v1\"\n",
+    )
+    .unwrap();
+    let caller = app.join("main.rock");
+    let callee = dep.join("values.rock");
+    let consumer = "use dep::values::give;\nfn main() -> int { give() }\n";
+    let initial = "pub mod values;\npub fn give() -> int { 1 }\n";
+    let edited = "pub mod values;\npub fn give() -> string { \"one\" }\n";
+    std::fs::write(&caller, consumer).unwrap();
+    std::fs::write(&callee, initial).unwrap();
+
+    let mut warm = LspServer::new();
+    roundtrip(&mut warm, did_open(&uri_of(&caller), consumer));
+    roundtrip(&mut warm, did_open(&uri_of(&callee), initial));
+    let messages = roundtrip(&mut warm, did_change(&uri_of(&callee), edited));
+
+    let mut late_consumer = LspServer::new();
+    roundtrip(&mut late_consumer, did_open(&uri_of(&callee), initial));
+    roundtrip(&mut late_consumer, did_change(&uri_of(&callee), edited));
+    let late_messages = roundtrip(&mut late_consumer, did_open(&uri_of(&caller), consumer));
+
+    let closed = roundtrip(&mut late_consumer, did_close(&callee));
+    assert!(
+        closed.iter().any(|message| {
+            matches!(message, Message::Notification(note)
+            if note.method == "textDocument/publishDiagnostics"
+                && note.params["uri"] == uri_of(&caller)
+                && note.params["diagnostics"] == json!([]))
+        }),
+        "{closed:?}"
+    );
+
+    assert_eq!(std::fs::read_to_string(&callee).unwrap(), initial);
+    std::fs::write(&callee, edited).unwrap();
+    let mut fresh = LspServer::new();
+    let expected = roundtrip(&mut fresh, did_open(&uri_of(&caller), consumer));
+    let expected = diagnostics_for(&expected, &uri_of(&caller));
+    assert!(!expected.is_empty());
+    assert_eq!(diagnostics_for(&messages, &uri_of(&caller)), expected);
+    assert_eq!(diagnostics_for(&late_messages, &uri_of(&caller)), expected);
+    for (id, method) in [(91, "textDocument/hover"), (92, "textDocument/completion")] {
+        let msg = || {
+            req(
+                id,
+                method,
+                json!({
+                    "textDocument": {"uri": uri_of(&caller)},
+                    "position": {"line": 1, "character": 20},
+                }),
+            )
+        };
+        assert_eq!(
+            response(&roundtrip(&mut warm, msg())).result,
+            response(&roundtrip(&mut fresh, msg())).result,
+            "{method}",
+        );
+    }
+}
+
+#[test]
 fn closing_buffer_restores_disk_symbols_for_other_open_files() {
     let (_tmp, dir) = package_dir("close_buffers");
     let a = dir.join("a.rock");

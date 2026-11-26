@@ -294,6 +294,8 @@ pub struct ModuleRecency {
 pub struct BoneWorkspace {
     lint_options: bone_lints::LintOptions,
     projects: HashMap<PathBuf, BoneProject>,
+    /// Shared inputs for projects that load an already-open dependency.
+    editor_buffers: HashMap<String, String>,
     /// Roots already bulk-loaded from disk; reloading would clobber unsaved buffers.
     loaded_roots: std::collections::HashSet<PathBuf>,
     /// Failed roots stay retryable so fixing the manifest can recover.
@@ -583,6 +585,9 @@ impl BoneWorkspace {
             .map(|source| {
                 let mut file = SessionFile::from_source(&source.borrow());
                 file.path = canonicalize_lenient(&file.path);
+                if let Some(text) = self.editor_buffers.get(&file.path) {
+                    file.text.clone_from(text);
+                }
                 file
             })
             .collect();
@@ -613,7 +618,7 @@ impl BoneWorkspace {
                     root.display()
                 );
                 for (p, src) in file_texts {
-                    for (file, diagnostics) in self.update(&p, src) {
+                    for (file, diagnostics) in self.update_buffer(&p, &src) {
                         let errors: Vec<_> = diagnostics
                             .iter()
                             .filter(|d| d.severity == Some(DiagnosticSeverity::ERROR))
@@ -645,6 +650,20 @@ impl BoneWorkspace {
     /// Apply an editor edit for `path`. Returns diagnostics for every tracked file
     /// in the session, so cross-file changes and newly clean files republish.
     pub fn update(&mut self, path: &str, text: String) -> Vec<(String, Vec<Diagnostic>)> {
+        let diagnostics = self.update_buffer(path, &text);
+        let path = self.canon_cached(path);
+        self.editor_buffers.insert(path, text);
+        diagnostics
+    }
+
+    /// Restore a closed editor buffer to its on-disk text.
+    pub fn close_buffer(&mut self, path: &str, text: &str) -> Vec<(String, Vec<Diagnostic>)> {
+        let canonical = self.canon_cached(path);
+        self.editor_buffers.remove(&canonical);
+        self.update_buffer(path, text)
+    }
+
+    fn update_buffer(&mut self, path: &str, text: &str) -> Vec<(String, Vec<Diagnostic>)> {
         // The editor's spelling must match discovery's canonical keys, or the file
         // lands under two keys.
         let path_c = self.canon_cached(path);
@@ -681,20 +700,56 @@ impl BoneWorkspace {
                 return vec![(on_disk.into_owned(), vec![load_error_diagnostic(message)])];
             }
         };
+        let primary = Self::update_project(proj, path, text, &graph_path);
+        let mut consumers: Vec<_> = self
+            .projects
+            .iter_mut()
+            .filter(|(other_root, other)| {
+                **other_root != root
+                    && (other.texts.contains_key(path)
+                        || other.graph.as_ref().is_some_and(|graph| {
+                            graph
+                                .package_of_file(&graph_path)
+                                .is_some_and(|owner| graph.includes_file(owner, &graph_path))
+                        }))
+            })
+            .collect();
+        if consumers.is_empty() {
+            return primary;
+        }
+        consumers.sort_unstable_by_key(|(root, _)| *root);
+        let mut diagnostics: HashMap<_, _> = primary.into_iter().collect();
+        for (_, consumer) in consumers {
+            for (file, diags) in Self::update_project(consumer, path, text, &graph_path) {
+                diagnostics.entry(file).or_insert(diags);
+            }
+        }
+        diagnostics.into_iter().collect()
+    }
+
+    fn update_project(
+        proj: &mut BoneProject,
+        path: &str,
+        text: &str,
+        graph_path: &Path,
+    ) -> Vec<(String, Vec<Diagnostic>)> {
         if let Err(message) = proj.refresh_lint_policy() {
-            return vec![(on_disk.into_owned(), vec![load_error_diagnostic(message)])];
+            return vec![(
+                editor_path(path).into_owned(),
+                vec![load_error_diagnostic(message)],
+            )];
         }
         if proj.graph.as_ref().is_some_and(|graph| {
             graph
-                .package_of_file(&graph_path)
-                .is_some_and(|owner| !graph.includes_file(owner, &graph_path))
+                .package_of_file(graph_path)
+                .is_some_and(|owner| !graph.includes_file(owner, graph_path))
         }) {
             return vec![(editor_path(path).into_owned(), Vec::new())];
         }
-        if proj.texts.get(path) != Some(&text) {
+        if proj.texts.get(path).map(String::as_str) != Some(text) {
             proj.fallbacks.clear();
         }
-        proj.texts.insert(path.to_string(), text.clone());
+        proj.texts.insert(path.to_string(), text.to_string());
 
         let mut this_file_parse_err: Option<CompilerError> = None;
         let mut changed: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -705,7 +760,7 @@ impl BoneWorkspace {
             let node = proj
                 .graph
                 .as_ref()
-                .and_then(|g| rock_host::compilation_units::source_package(g, &graph_path));
+                .and_then(|g| rock_host::compilation_units::source_package(g, graph_path));
             let (package, global_policy) = match node {
                 Some(node) => (Some(node.tag()), node.global_policy),
                 None => (None, skull_parser::GlobalPolicy::Any),
@@ -717,7 +772,7 @@ impl BoneWorkspace {
                 log::error!("bone LSP: {}", e.message);
             }
         }
-        match proj.session.update_file(path, &text) {
+        match proj.session.update_file(path, text) {
             Ok(upd) => {
                 proj.rejected_updates.remove(path);
                 if !matches!(upd.tier, UpdateTier::BodyOnly | UpdateTier::NoChange) {
@@ -872,8 +927,12 @@ impl BoneWorkspace {
     pub fn remove(&mut self, path: &str) {
         let path_c = self.canon_cached(path);
         let path = path_c.as_str();
-        let root = Self::root_for(path);
-        if let Some(proj) = self.projects.get_mut(&root) {
+        self.editor_buffers.remove(path);
+        for proj in self
+            .projects
+            .values_mut()
+            .filter(|proj| proj.texts.contains_key(path))
+        {
             proj.fallbacks.clear();
             proj.texts.remove(path);
             proj.rejected_updates.remove(path);
