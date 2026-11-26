@@ -333,6 +333,26 @@ pub(crate) fn image_generation(handle: u64) -> u64 {
     with_image(handle, |img| img.generation).unwrap_or(0)
 }
 
+/// Point `path` at the newest live image loaded from it, or drop it. Runs
+/// only when an image leaves a path, so the scan stays off the draw path.
+fn remap_image_path(path: &str) {
+    let newest = IMAGES.with(|images| {
+        images
+            .borrow()
+            .iter()
+            .filter(|(_, img)| img.asset_path.as_deref() == Some(path))
+            .map(|(&handle, _)| handle)
+            .max()
+    });
+    IMAGE_BY_PATH.with(|by_path| {
+        let mut by_path = by_path.borrow_mut();
+        match newest {
+            Some(handle) => by_path.insert(path.to_string(), handle),
+            None => by_path.remove(path),
+        };
+    });
+}
+
 pub(crate) fn find_image_by_path(path: &str) -> u64 {
     let Some(handle) = IMAGE_BY_PATH.with(|by_path| by_path.borrow().get(path).copied()) else {
         return 0;
@@ -1351,12 +1371,7 @@ pub extern "C" fn stone_unload_image(handle: u64) {
     let removed = IMAGES.with(|images| images.borrow_mut().remove(&handle));
     if let Some(img) = removed {
         if let Some(path) = img.asset_path.as_deref() {
-            IMAGE_BY_PATH.with(|by_path| {
-                let mut by_path = by_path.borrow_mut();
-                if by_path.get(path) == Some(&handle) {
-                    by_path.remove(path);
-                }
-            });
+            remap_image_path(path);
         }
         crate::handles::retire(Class::Image, handle);
         with_gl(|gl| unsafe {
@@ -1425,6 +1440,12 @@ pub extern "C" fn stone_reload_image(handle: u64, path: *const c_char) -> bool {
         }
         img.decode_failed = false;
     });
+    let previous =
+        with_image_mut(handle, |img| img.asset_path.replace(path_str.to_string())).flatten();
+    if let Some(previous) = previous.filter(|previous| previous != path_str) {
+        remap_image_path(&previous);
+    }
+    remap_image_path(path_str);
     true
 }
 
