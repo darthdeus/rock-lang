@@ -1,0 +1,23 @@
+value DeepCopyPoint { x: int, y: int }
+nobox value DeepCopyRow { x: int, y: int, a: int, b: int, refs: [int] }
+
+@test
+fn deep_copy_preserves_columns_and_recursively_copies_strided_rows() {
+    let points = [DeepCopyPoint { x: 1, y: 2 }]
+    let copy = deepcopy(points)
+    let stored = points.clone_into(points.storage)
+    points[0].x = 7
+    copy[0].y = 9
+    assert_eq(copy[0].x, 1)
+    assert_eq(points[0].y, 2)
+    assert_eq(stored[0].x, 1)
+
+    let rows = [DeepCopyRow { x: 1, y: 2, a: 3, b: 4, refs: [8] }]
+    let copied_rows = deepcopy(rows)
+    rows[0].x = 7
+    copied_rows[0].y = 9
+    rows[0].refs[0] = 11
+    assert_eq(copied_rows[0].x, 1)
+    assert_eq(rows[0].y, 2)
+    assert_eq(copied_rows[0].refs[0], 8)
+}

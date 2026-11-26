@@ -127,28 +127,24 @@ impl<'a> Builder<'a> {
     fn param_slot_hazard_mono(
         &self,
         mono: &crate::monoty::MonoTy,
-        leaf_views_rebuilt: bool,
     ) -> Result<Option<(String, &'static str)>, CompilerError> {
         match mono {
-            crate::monoty::MonoTy::Nullable(inner) => {
-                self.param_slot_hazard_mono(inner, leaf_views_rebuilt)
-            }
+            crate::monoty::MonoTy::Nullable(inner) => self.param_slot_hazard_mono(inner),
             crate::monoty::MonoTy::Tuple(elems) => {
                 for elem in elems {
-                    if let Some(hazard) = self.param_slot_hazard_mono(elem, leaf_views_rebuilt)? {
+                    if let Some(hazard) = self.param_slot_hazard_mono(elem)? {
                         return Ok(Some(hazard));
                     }
                 }
                 Ok(None)
             }
-            _ => self.slot_hazard_mono(mono, leaf_views_rebuilt),
+            _ => self.slot_hazard_mono(mono),
         }
     }
 
     fn slot_hazard_mono(
         &self,
         mono: &crate::monoty::MonoTy,
-        leaf_views_rebuilt: bool,
     ) -> Result<Option<(String, &'static str)>, CompilerError> {
         let Some((family, _)) = ContainerFamily::of(mono) else {
             return Ok(None);
@@ -178,7 +174,7 @@ impl<'a> Builder<'a> {
                 Ok(Some((rendered, physical)))
             }
             ContainerStorage::LeafAddressed { .. }
-                if self.scx.target == bone_core::hir::FnBackend::Js && !leaf_views_rebuilt =>
+                if self.scx.target == bone_core::hir::FnBackend::Js =>
             {
                 let elem = plan
                     .ffi_element_name(arena)
@@ -203,25 +199,28 @@ impl<'a> Builder<'a> {
         func: FuncRef,
         signature: &crate::concrete::ConcreteSignature,
     ) -> Result<(), CompilerError> {
-        let callee = &self.ws.module(func.module).functions[func.func];
+        let module = self.ws.module(func.module);
+        let callee = &module.functions[func.func];
         if callee.inline_body.is_none() && !callee.is_extern {
+            return Ok(());
+        }
+        // These runtime copiers walk the physical descriptor, including the
+        // backing columns and any views over copied native buffers.
+        if bone_core::modules::is_stdlib_module_file(module.file.as_str())
+            && matches!(callee.name.as_str(), "deepcopy" | "clone_into")
+            && crate::intrinsics::is_intrinsic(callee)
+        {
             return Ok(());
         }
         if callee.param_decls.len() != signature.params.len() {
             return Err(self.gap_here("concrete callee signature has the wrong parameter count"));
         }
-        // The JS `deepcopy` runtime rebuilds every TypedArray over one copy of its
-        // buffer, so a leaf-addressed container comes back with views over its own storage.
-        let leaf_views_rebuilt =
-            callee.name == "deepcopy" && crate::intrinsics::is_intrinsic(callee);
         for (i, id) in signature.params.iter().enumerate() {
             if self.param_is_repr_opaque(func, i) {
                 continue;
             }
             let mono = self.concrete_mono(*id);
-            if let Some((rendered, physical)) =
-                self.param_slot_hazard_mono(mono, leaf_views_rebuilt)?
-            {
+            if let Some((rendered, physical)) = self.param_slot_hazard_mono(mono)? {
                 return Err(CompilerError::new_with_label(
                     self.body.expr_spans[e],
                     format!(
@@ -238,7 +237,7 @@ impl<'a> Builder<'a> {
             return Ok(());
         };
         let mono = self.concrete_mono(id);
-        let Some((rendered, physical)) = self.slot_hazard_mono(mono, leaf_views_rebuilt)? else {
+        let Some((rendered, physical)) = self.slot_hazard_mono(mono)? else {
             return Ok(());
         };
         Err(CompilerError::new_with_label(
