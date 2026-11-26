@@ -10,7 +10,9 @@
 //! [`EXPRESSION_LEVEL_BUDGET`] operands; the Lua emitter bounds its folds by the
 //! same budget.
 
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
+
+use crate::display::{DisplayPart, DisplayRead};
 
 /// `LJ_MAX_XLEVEL` (`lj_def.h`), checked by `synlevel_begin` in `lj_parse.c`.
 pub(crate) const LJ_MAX_XLEVEL: u32 = 200;
@@ -22,93 +24,61 @@ const DISPLAY_CONCAT_RUN: usize = EXPRESSION_LEVEL_BUDGET as usize;
 
 const ACCUMULATOR: &str = "__rock_text";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LuaDisplayPart {
-    /// A Lua expression evaluating to a string.
-    Expr(String),
-    /// `"nil"` when the Lua expression `value` is nil, otherwise `parts`.
-    UnlessNil {
-        value: String,
-        parts: Vec<LuaDisplayPart>,
-    },
-    /// The scalar read `value` as text; `lua` prints a zero that arithmetic
-    /// left at -0 as `0`.
-    Leaf { value: String, lua: String },
-    /// The enum `name` rebuilt from the leaves under `v["<prefix>.<leaf>"]`;
-    /// `lua` is its Lua spelling.
-    Enum {
-        name: ustr::Ustr,
-        prefix: String,
-        lua: String,
-    },
-}
+struct LuaRead<'a>(&'a DisplayRead);
 
-impl LuaDisplayPart {
-    /// `text` is spelled verbatim between quotes.
-    pub fn literal(text: &str) -> Self {
-        LuaDisplayPart::Expr(format!("\"{text}\""))
-    }
-
-    pub fn leaf(value: &str) -> Self {
-        LuaDisplayPart::Leaf {
-            value: value.to_string(),
-            lua: format!(
-                "((type({value}) == \"number\" and {value} == 0) and \"0\" or tostring({value}))"
-            ),
+impl fmt::Display for LuaRead<'_> {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            DisplayRead::Member(key) => write!(out, "v.{key}"),
+            DisplayRead::Key(key) => write!(out, "v[\"{key}\"]"),
+            DisplayRead::Index(index) => write!(out, "v[{index}]"),
         }
     }
 }
 
-/// `<open>` `<label_0>` `value_0` `", "` `<label_1>` `value_1` .. `<close>`.
-pub fn display_record(
-    open: &str,
-    fields: impl IntoIterator<Item = (String, Vec<LuaDisplayPart>)>,
-    close: &str,
-) -> Vec<LuaDisplayPart> {
-    let mut parts = vec![LuaDisplayPart::literal(open)];
-    for (i, (label, value)) in fields.into_iter().enumerate() {
-        if i > 0 {
-            parts.push(LuaDisplayPart::literal(", "));
-        }
-        parts.push(LuaDisplayPart::literal(&label));
-        parts.extend(value);
-    }
-    parts.push(LuaDisplayPart::literal(close));
-    parts
-}
-
-fn operand_count(parts: &[LuaDisplayPart]) -> usize {
+fn operand_count(parts: &[DisplayPart]) -> usize {
     parts
         .iter()
         .map(|p| match p {
-            LuaDisplayPart::Expr(_) | LuaDisplayPart::Leaf { .. } | LuaDisplayPart::Enum { .. } => {
-                1
-            }
-            LuaDisplayPart::UnlessNil { parts, .. } => 1 + operand_count(parts),
+            DisplayPart::UnlessNil { parts, .. } => 1 + operand_count(parts),
+            _ => 1,
         })
         .sum()
 }
 
-fn write_expr(out: &mut String, parts: &[LuaDisplayPart]) {
-    for (i, part) in parts.iter().enumerate() {
-        if i > 0 {
-            out.push_str(" .. ");
+fn write_operand(out: &mut String, part: &DisplayPart) {
+    match part {
+        DisplayPart::LuaExpr(e) | DisplayPart::Enum { lua: e, .. } => out.push_str(e),
+        DisplayPart::Leaf(read) => {
+            let value = LuaRead(read);
+            let _ = write!(
+                out,
+                "((type({value}) == \"number\" and {value} == 0) and \"0\" or tostring({value}))"
+            );
         }
-        match part {
-            LuaDisplayPart::Expr(e)
-            | LuaDisplayPart::Leaf { lua: e, .. }
-            | LuaDisplayPart::Enum { lua: e, .. } => out.push_str(e),
-            LuaDisplayPart::UnlessNil { value, parts } => {
-                let _ = write!(out, "({value} == nil and \"nil\" or (");
-                write_expr(out, parts);
-                out.push_str("))");
-            }
+        DisplayPart::Literal(text) => {
+            let _ = write!(out, "\"{text}\"");
+        }
+        DisplayPart::UnlessNil { value, parts } => {
+            let value = LuaRead(value);
+            let _ = write!(out, "({value} == nil and \"nil\" or (");
+            write_expr(out, parts);
+            out.push_str("))");
         }
     }
 }
 
+fn write_expr<'a>(out: &mut String, parts: impl IntoIterator<Item = &'a DisplayPart>) {
+    for (i, part) in parts.into_iter().enumerate() {
+        if i > 0 {
+            out.push_str(" .. ");
+        }
+        write_operand(out, part);
+    }
+}
+
 /// `None` when the result does not fit in one concat run.
-pub fn display_expr(parts: &[LuaDisplayPart]) -> Option<String> {
+pub fn display_expr(parts: &[DisplayPart]) -> Option<String> {
     if operand_count(parts) > DISPLAY_CONCAT_RUN {
         return None;
     }
@@ -117,7 +87,7 @@ pub fn display_expr(parts: &[LuaDisplayPart]) -> Option<String> {
     Some(out)
 }
 
-pub fn display_return(parts: &[LuaDisplayPart], indent: &str) -> String {
+pub fn display_return(parts: &[DisplayPart], indent: &str) -> String {
     if let Some(expr) = display_expr(parts) {
         return format!("{indent}return {expr}\n");
     }
@@ -134,26 +104,18 @@ pub fn display_return(parts: &[LuaDisplayPart], indent: &str) -> String {
 
 struct Appender<'a> {
     out: String,
-    run: Vec<&'a str>,
+    run: Vec<&'a DisplayPart>,
     declared: bool,
 }
 
 impl<'a> Appender<'a> {
-    fn append(&mut self, parts: &'a [LuaDisplayPart], indent: &str) {
+    fn append(&mut self, parts: &'a [DisplayPart], indent: &str) {
         for part in parts {
             match part {
-                LuaDisplayPart::Expr(e)
-                | LuaDisplayPart::Leaf { lua: e, .. }
-                | LuaDisplayPart::Enum { lua: e, .. } => {
-                    if self.run.len() == DISPLAY_CONCAT_RUN {
-                        self.flush(indent);
-                    }
-                    self.run.push(e);
-                }
-                LuaDisplayPart::UnlessNil { value, parts } => {
+                DisplayPart::UnlessNil { value, parts } => {
                     // Declares the accumulator outside the branches.
                     self.flush(indent);
-                    let _ = writeln!(self.out, "{indent}if {value} == nil then");
+                    let _ = writeln!(self.out, "{indent}if {} == nil then", LuaRead(value));
                     let _ = writeln!(
                         self.out,
                         "{indent}  {ACCUMULATOR} = {ACCUMULATOR} .. \"nil\""
@@ -164,6 +126,12 @@ impl<'a> Appender<'a> {
                     self.flush(&inner);
                     let _ = writeln!(self.out, "{indent}end");
                 }
+                _ => {
+                    if self.run.len() == DISPLAY_CONCAT_RUN {
+                        self.flush(indent);
+                    }
+                    self.run.push(part);
+                }
             }
         }
     }
@@ -172,18 +140,17 @@ impl<'a> Appender<'a> {
         if self.run.is_empty() && self.declared {
             return;
         }
-        let run = if self.run.is_empty() {
-            "\"\"".to_string()
-        } else {
-            self.run.join(" .. ")
-        };
-        self.run.clear();
         if self.declared {
-            let _ = writeln!(self.out, "{indent}{ACCUMULATOR} = {ACCUMULATOR} .. {run}");
+            let _ = write!(self.out, "{indent}{ACCUMULATOR} = {ACCUMULATOR} .. ");
         } else {
-            let _ = writeln!(self.out, "{indent}local {ACCUMULATOR} = {run}");
+            let _ = write!(self.out, "{indent}local {ACCUMULATOR} = ");
             self.declared = true;
         }
+        if self.run.is_empty() {
+            self.out.push_str("\"\"");
+        }
+        write_expr(&mut self.out, self.run.drain(..));
+        self.out.push('\n');
     }
 }
 
@@ -191,23 +158,23 @@ impl<'a> Appender<'a> {
 mod tests {
     use super::*;
 
-    fn exprs(n: usize) -> Vec<LuaDisplayPart> {
+    fn exprs(n: usize) -> Vec<DisplayPart> {
         (0..n)
-            .map(|i| LuaDisplayPart::Expr(format!("e{i}")))
+            .map(|i| DisplayPart::LuaExpr(format!("e{i}")))
             .collect()
     }
 
     #[test]
     fn a_nullable_group_branches_outside_the_runs() {
         let mut parts = exprs(DISPLAY_CONCAT_RUN);
-        parts.push(LuaDisplayPart::UnlessNil {
-            value: "v.m".to_string(),
+        parts.push(DisplayPart::UnlessNil {
+            value: DisplayRead::Member("m".into()),
             parts: exprs(2),
         });
         let body = display_return(&parts, "");
         assert!(body.contains("\nif v.m == nil then\n  __rock_text = __rock_text .. \"nil\"\nelse\n  __rock_text = __rock_text .. e0 .. e1\nend\nreturn __rock_text\n"), "{body}");
-        let short = vec![LuaDisplayPart::UnlessNil {
-            value: "v.m".to_string(),
+        let short = vec![DisplayPart::UnlessNil {
+            value: DisplayRead::Member("m".into()),
             parts: exprs(2),
         }];
         assert_eq!(

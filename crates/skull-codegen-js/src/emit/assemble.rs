@@ -240,7 +240,7 @@ pub(super) fn check_bodies(
     tables.push_str(&emit_vt_eq(ws, registry)?);
     tables.push_str(&emit_tostring_ty(ws, registry)?);
     tables.push_str(&emit_inspect_ty(ws, registry)?);
-    tables.push_str(&emit_inspect_cdata_enums(ws));
+    tables.push_str(&emit_inspect_cdata_enums(ws)?);
     tables.push_str(&emit_col_mat(ws, registry)?);
     Ok((hoisted, tables))
 }

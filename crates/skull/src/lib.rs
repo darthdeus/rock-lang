@@ -15,7 +15,10 @@ pub mod pipeline;
 use bone_core::modules::display_name;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
-use skull_mir::lua_nesting::{LuaDisplayPart, display_expr, display_record, display_return};
+use skull_mir::display::{
+    DisplayPart, DisplayRead, EnumDisplaySlot, display_record, enum_display_parts,
+};
+use skull_mir::lua_nesting::{display_expr, display_return};
 use skull_parser::CompilerError;
 
 /// Per-nominal-type layout hash, keyed by type name (unique workspace-wide).
@@ -1163,7 +1166,7 @@ fn value_struct_gc_defs(
                 .nominal_value_display_fields_required(ws, bone_semantic::hir::FnBackend::Lua, n)
                 .map_err(|e| CompilerError::new_no_location(e.message))?;
             let parts = if fields.is_empty() {
-                vec![LuaDisplayPart::literal(&format!("{shown} {{ }}"))]
+                vec![DisplayPart::literal(&format!("{shown} {{ }}"))]
             } else {
                 display_record(&format!("{shown} {{ "), fields, " }")
             };
@@ -1355,8 +1358,8 @@ fn enum_cdata_metatypes(ws: &Workspace, syms: &mut Vec<String>) -> String {
             name,
             |i, _| format!("t == {i}"),
             |slot| match slot {
-                EnumSlot::Tuple(j) => format!("v._{j}"),
-                EnumSlot::Field(f) => format!("v._{f}"),
+                EnumDisplaySlot::Tuple(j) => DisplayRead::Member(format!("_{j}")),
+                EnumDisplaySlot::Field(f) => DisplayRead::Member(format!("_{f}")),
             },
         ));
         ts.push_str("    return \"?\"\n  end,\n}\n");
@@ -1366,20 +1369,14 @@ fn enum_cdata_metatypes(ws: &Workspace, syms: &mut Vec<String>) -> String {
     out
 }
 
-enum EnumSlot<'a> {
-    Tuple(usize),
-    Field(&'a str),
-}
-
 /// One `if <cond> then return <display> end` per variant of `name`; `slot`
 /// spells how a payload slot is read from `v` (cdata `_0`, box `[1]`).
 fn enum_variant_display(
     ws: &Workspace,
     name: ustr::Ustr,
     cond: impl Fn(usize, &str) -> String,
-    slot: impl Fn(EnumSlot) -> String,
+    slot: impl Fn(EnumDisplaySlot) -> DisplayRead,
 ) -> String {
-    use bone_semantic::hir::VariantPayload;
     let mut ts = String::new();
     let name = skull_mir::layout_instance::decl_name(name);
     let Some(eid) = ws.nominals.enum_id(name) else {
@@ -1387,29 +1384,9 @@ fn enum_variant_display(
     };
     let ed = &ws.modules[eid.module.index()].enums[eid.def];
     for (i, var) in ed.variants.iter().enumerate() {
-        let vn = var.name;
         let shown = display_name(name.as_str());
-        let open = format!("{shown}::{vn} {{ ");
-        let read = |s: EnumSlot| vec![LuaDisplayPart::leaf(&slot(s))];
-        let parts = match &var.payload {
-            VariantPayload::Tuple(tys) if !tys.is_empty() => display_record(
-                &open,
-                (0..tys.len()).map(|j| (format!("[{}] = ", j + 1), read(EnumSlot::Tuple(j)))),
-                " }",
-            ),
-            VariantPayload::Record(fields) if !fields.is_empty() => {
-                let mut fns: Vec<ustr::Ustr> = fields.iter().map(|f| f.name).collect();
-                fns.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-                display_record(
-                    &open,
-                    fns.iter()
-                        .map(|f| (format!("{f} = "), read(EnumSlot::Field(f.as_str())))),
-                    " }",
-                )
-            }
-            _ => vec![LuaDisplayPart::literal(&format!("{shown}::{vn}"))], // unit (or empty tuple/record)
-        };
-        let cond = cond(i, vn.as_str());
+        let parts = enum_display_parts(shown, var.name, &var.payload, &slot);
+        let cond = cond(i, var.name.as_str());
         match display_expr(&parts) {
             Some(render) => ts.push_str(&format!("    if {cond} then return {render} end\n")),
             None => {
@@ -1497,7 +1474,7 @@ fn value_struct_metatypes(
                     s.fields.iter().map(|f| {
                         (
                             format!("{}: ", f.name),
-                            vec![LuaDisplayPart::leaf(&format!("v.{}", f.name))],
+                            vec![DisplayPart::Leaf(DisplayRead::Member(f.name.to_string()))],
                         )
                     }),
                     " }",
@@ -1650,8 +1627,10 @@ fn enum_tostring_def(ws: &Workspace, name: ustr::Ustr) -> String {
             name,
             |_, var| format!("t == \"{var}\""),
             |slot| match slot {
-                EnumSlot::Tuple(j) => format!("v[{}]", j + 1),
-                EnumSlot::Field(f) => lua_key_read("v", f),
+                EnumDisplaySlot::Tuple(j) => DisplayRead::Index(j + 1),
+                EnumDisplaySlot::Field(f) if f.as_str().contains('.') =>
+                    DisplayRead::Key(f.to_string()),
+                EnumDisplaySlot::Field(f) => DisplayRead::Member(f.to_string()),
             },
         ),
     )
@@ -1705,7 +1684,7 @@ fn c_struct_inspect_defs(
                     fields.iter().map(|f| {
                         (
                             format!("{} = ", f.name),
-                            vec![LuaDisplayPart::Expr(format!(
+                            vec![DisplayPart::LuaExpr(format!(
                                 "__rock_inspect_value(v.{0}, indent, path .. \".{0}\", visited, precision)",
                                 f.name
                             ))],
@@ -1716,21 +1695,21 @@ fn c_struct_inspect_defs(
                 out.push_str(&display_return(&parts, "  "));
             } else {
                 out.push_str("  local child_indent = indent .. \"  \"\n");
-                let mut parts = vec![LuaDisplayPart::literal(&format!("{n} {{\\n"))];
+                let mut parts = vec![DisplayPart::literal(&format!("{n} {{\\n"))];
                 for (i, f) in fields.iter().enumerate() {
                     if i > 0 {
-                        parts.push(LuaDisplayPart::literal(",\\n"));
+                        parts.push(DisplayPart::literal(",\\n"));
                     }
-                    parts.push(LuaDisplayPart::Expr("indent".to_string()));
-                    parts.push(LuaDisplayPart::literal(&format!("  {} = ", f.name)));
-                    parts.push(LuaDisplayPart::Expr(format!(
+                    parts.push(DisplayPart::LuaExpr("indent".to_string()));
+                    parts.push(DisplayPart::literal(&format!("  {} = ", f.name)));
+                    parts.push(DisplayPart::LuaExpr(format!(
                         "__rock_inspect_value(v.{0}, child_indent, path .. \".{0}\", visited, precision)",
                         f.name
                     )));
                 }
-                parts.push(LuaDisplayPart::literal("\\n"));
-                parts.push(LuaDisplayPart::Expr("indent".to_string()));
-                parts.push(LuaDisplayPart::literal("}"));
+                parts.push(DisplayPart::literal("\\n"));
+                parts.push(DisplayPart::LuaExpr("indent".to_string()));
+                parts.push(DisplayPart::literal("}"));
                 out.push_str(&display_return(&parts, "  "));
             }
             let copy_args: Vec<String> = s.fields.iter().map(|f| format!("v.{}", f.name)).collect();

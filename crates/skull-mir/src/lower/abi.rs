@@ -1007,7 +1007,7 @@ impl RepArena {
         ws: &Workspace,
         target: FnBackend,
         name: Ustr,
-    ) -> Result<Vec<(String, Vec<crate::lua_nesting::LuaDisplayPart>)>, RepError> {
+    ) -> Result<Vec<(String, Vec<crate::display::DisplayPart>)>, RepError> {
         let id = self.plan_nominal_value(ws, target, name)?;
         let shape = self.value_shape(id).ok_or_else(|| RepError {
             span: None,

@@ -8,7 +8,7 @@ use ustr::Ustr;
 
 use super::shape::{GcFieldEq, PayloadTy, declared_value_storage, static_ty};
 use super::{EnumFlatShape, EnumPlan, RepArena, RepError, RepId, ValueShape, ValueStorage};
-use crate::lua_nesting::{LuaDisplayPart, display_record};
+use crate::display::{DisplayPart, DisplayRead, display_record};
 use crate::mir::{Inst, MirFunc};
 
 /// One physical answer for one logical field: inline/nobox fields and flat
@@ -424,9 +424,11 @@ impl GcTableField {
     }
 
     /// An inline child renders as its own box would.
-    pub fn lua_display_parts(&self, ws: &Workspace) -> Vec<LuaDisplayPart> {
+    pub fn lua_display_parts(&self, ws: &Workspace) -> Vec<DisplayPart> {
         match &self.inline {
-            None => vec![LuaDisplayPart::leaf(&format!("v.{}", self.name))],
+            None => vec![DisplayPart::Leaf(DisplayRead::Member(
+                self.name.to_string(),
+            ))],
             Some(sub) => lua_display_inline(ws, sub, self.name.as_str()),
         }
     }
@@ -469,16 +471,14 @@ pub(super) fn lua_display_fields(
     ws: &Workspace,
     shape: &ValueShape,
     prefix: &str,
-) -> Vec<(String, Vec<LuaDisplayPart>)> {
+) -> Vec<(String, Vec<DisplayPart>)> {
     shape
         .fields
         .iter()
         .map(|(fname, fs)| {
             let key = format!("{prefix}{fname}");
             let value = match fs {
-                super::FieldShape::Prim => {
-                    vec![LuaDisplayPart::leaf(&format!("v[\"{key}\"]"))]
-                }
+                super::FieldShape::Prim => vec![DisplayPart::Leaf(DisplayRead::Key(key))],
                 super::FieldShape::Nested(sub) => lua_display_inline(ws, sub, &key),
             };
             (format!("{fname}: "), value)
@@ -486,7 +486,7 @@ pub(super) fn lua_display_fields(
         .collect()
 }
 
-fn lua_display_inline(ws: &Workspace, shape: &ValueShape, prefix: &str) -> Vec<LuaDisplayPart> {
+fn lua_display_inline(ws: &Workspace, shape: &ValueShape, prefix: &str) -> Vec<DisplayPart> {
     if let Some(plan) = EnumPlan::for_name(ws, shape.name) {
         let leaf = |l: &str| format!("v[\"{prefix}.{l}\"]");
         let symbol = crate::mangle::type_symbol(ws, shape.name);
@@ -511,7 +511,7 @@ fn lua_display_inline(ws: &Workspace, shape: &ValueShape, prefix: &str) -> Vec<L
                 fields.join(", ")
             )
         };
-        return vec![LuaDisplayPart::Enum {
+        return vec![DisplayPart::Enum {
             name: shape.name,
             prefix: prefix.to_string(),
             lua,
@@ -520,13 +520,13 @@ fn lua_display_inline(ws: &Workspace, shape: &ValueShape, prefix: &str) -> Vec<L
     let name = crate::layout_instance::display_name(shape.name);
     let fields = lua_display_fields(ws, shape, &format!("{prefix}."));
     let body = if fields.is_empty() {
-        vec![LuaDisplayPart::literal(&format!("{} {{ }}", name))]
+        vec![DisplayPart::literal(&format!("{} {{ }}", name))]
     } else {
         display_record(&format!("{} {{ ", name), fields, " }")
     };
     if shape.nullable {
-        vec![LuaDisplayPart::UnlessNil {
-            value: format!("v[\"{prefix}\"]"),
+        vec![DisplayPart::UnlessNil {
+            value: DisplayRead::Key(prefix.to_string()),
             parts: body,
         }]
     } else {

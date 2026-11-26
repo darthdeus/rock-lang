@@ -1,4 +1,7 @@
 use super::*;
+use skull_mir::display::{
+    DisplayPart, DisplayRead, EnumDisplaySlot, display_record, enum_display_parts,
+};
 
 pub(super) fn emit_enum_singletons(
     gctx: &GlobalCtx,
@@ -45,13 +48,12 @@ pub(super) fn emit_tostring_ty(
     registry: Option<&skull_mir::lower::StructRegistryPlan>,
 ) -> Result<String, CompilerError> {
     use skull_mir::lower::ValueStorage;
-    use skull_mir::lua_nesting::{LuaDisplayPart, display_record};
 
     let Some(registry) = registry else {
         return Ok(String::new());
     };
     let arena = registry.arena();
-    let leaf = |key: &str| vec![LuaDisplayPart::leaf(&format!("v[\"{key}\"]"))];
+    let leaf = |key: &str| vec![DisplayPart::Leaf(DisplayRead::Key(key.to_string()))];
     let mut out = String::new();
     for (&name, &representation) in registry.value_plans() {
         let plan = arena.try_get(representation).ok_or_else(|| {
@@ -64,7 +66,7 @@ pub(super) fn emit_tostring_ty(
         };
         let display_name = skull_mir::layout_instance::display_name(name);
         let open = format!("{display_name} {{ ");
-        let fields: Vec<(String, Vec<LuaDisplayPart>)> = match storage {
+        let fields: Vec<(String, Vec<DisplayPart>)> = match storage {
             ValueStorage::CData => {
                 let sid = ws.nominals.struct_id(name).ok_or_else(|| {
                     err(format!(
@@ -89,7 +91,7 @@ pub(super) fn emit_tostring_ty(
             }
         };
         let parts = if fields.is_empty() {
-            vec![LuaDisplayPart::literal(&format!("{display_name} {{ }}"))]
+            vec![DisplayPart::literal(&format!("{display_name} {{ }}"))]
         } else {
             display_record(&open, fields, " }")
         };
@@ -101,52 +103,41 @@ pub(super) fn emit_tostring_ty(
             js_string_lit(
                 skull_mir::mangle::type_symbol(ws, ustr::Ustr::from(name.as_str())).as_str()
             ),
-            js_display_expr(ws, &parts)?
+            js_display_expr(ws, &parts, "v")?
         ));
     }
     Ok(out)
 }
 
-/// The JS spelling of a display body shared with the luajit `__tostring` emitter; anything but
-/// string literals and box reads is rejected.
 fn js_display_expr(
     ws: &Workspace,
-    parts: &[skull_mir::lua_nesting::LuaDisplayPart],
+    parts: &[DisplayPart],
+    base: &str,
 ) -> Result<String, CompilerError> {
-    use skull_mir::lua_nesting::LuaDisplayPart;
-
+    let read = |value: &DisplayRead| match value {
+        DisplayRead::Member(key) => js_member(base, key),
+        DisplayRead::Key(key) => format!("{base}[{}]", js_string_lit(key)),
+        DisplayRead::Index(index) => format!("{base}[{index}]"),
+    };
     let mut terms = Vec::with_capacity(parts.len());
     for part in parts {
         terms.push(match part {
-            LuaDisplayPart::Expr(e)
-                if e.len() >= 2
-                    && e.starts_with('"')
-                    && e.ends_with('"')
-                    && !e[1..e.len() - 1].contains(['"', '\\']) =>
-            {
-                e.clone()
+            DisplayPart::Literal(text) => js_string_lit(text),
+            DisplayPart::LuaExpr(expr) => {
+                return Err(err(format!("JS display cannot emit Lua operand `{expr}`")));
             }
-            // `-0 === 0`, so the read prints as `0`.
-            LuaDisplayPart::Leaf { value, .. } if is_js_box_read(value) => {
+            DisplayPart::Leaf(value) => {
+                let value = read(value);
                 format!("lua_tostring({value} === 0 ? 0 : {value})")
             }
-            LuaDisplayPart::Expr(e) | LuaDisplayPart::Leaf { value: e, .. } => {
-                return Err(err(format!(
-                    "JS subset: display operand `{e}` has no JS spelling"
-                )));
-            }
-            LuaDisplayPart::UnlessNil { value, parts } if is_js_box_read(value) => format!(
-                "({value} == null ? \"nil\" : ({}))",
-                js_display_expr(ws, parts)?
+            DisplayPart::UnlessNil { value, parts } => format!(
+                "({} == null ? \"nil\" : ({}))",
+                read(value),
+                js_display_expr(ws, parts, base)?
             ),
-            LuaDisplayPart::UnlessNil { value, .. } => {
-                return Err(err(format!(
-                    "JS subset: display presence read `{value}` has no JS spelling"
-                )));
-            }
-            LuaDisplayPart::Enum { name, prefix, .. } => {
-                let view = enum_leaf_view(ws, *name, |l| {
-                    format!("v[{}]", js_string_lit(&format!("{prefix}.{l}")))
+            DisplayPart::Enum { name, prefix, .. } => {
+                let view = enum_leaf_view(ws, *name, |leaf| {
+                    format!("{base}[{}]", js_string_lit(&format!("{prefix}.{leaf}")))
                 })
                 .ok_or_else(|| err(format!("JS subset: display enum `{name}` has no leaf view")))?;
                 format!("lua_tostring({view})")
@@ -154,15 +145,6 @@ fn js_display_expr(
         });
     }
     Ok(terms.join(" + "))
-}
-
-fn is_js_box_read(e: &str) -> bool {
-    if let Some(key) = e.strip_prefix("v.") {
-        return !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-    }
-    e.strip_prefix("v[\"")
-        .and_then(|rest| rest.strip_suffix("\"]"))
-        .is_some_and(|key| !key.contains(['"', '\\']))
 }
 
 pub(super) fn emit_inspect_ty(
@@ -183,7 +165,7 @@ pub(super) fn emit_inspect_ty(
 /// Per-enum `__rock_inspect_ty` renderers for scalar-tag-box enums, which carry no variant
 /// name, so it is baked per tag to match luajit's cdata `__tostring`; and `__rock_tostring_ty`
 /// renderers for payload enums boxed with a variant name, matching the box `__tostring`.
-pub(super) fn emit_inspect_cdata_enums(ws: &Workspace) -> String {
+pub(super) fn emit_inspect_cdata_enums(ws: &Workspace) -> Result<String, CompilerError> {
     use bone_core::hir::VariantPayload;
 
     let mut names: Vec<ustr::Ustr> = ws.nominals.enum_names().collect();
@@ -214,51 +196,15 @@ pub(super) fn emit_inspect_cdata_enums(ws: &Workspace) -> String {
         }
         let mut body = format!("var g = t.{}; ", if cdata { "__tag" } else { "__variant" });
         for (tag, variant) in ed.variants.iter().enumerate() {
-            let display_name = bone_core::modules::display_name(name.as_str());
-            let head = format!("{display_name}::{}", variant.name);
-            let slots: Vec<(String, String)> = match &variant.payload {
-                VariantPayload::Tuple(types) => (0..types.len())
-                    .map(|j| {
-                        let slot = if cdata {
-                            format!("_{j}")
-                        } else {
-                            j.to_string()
-                        };
-                        (format!("[{}]", j + 1), slot)
-                    })
-                    .collect(),
-                VariantPayload::Record(fields) => {
-                    let mut names: Vec<ustr::Ustr> = fields.iter().map(|f| f.name).collect();
-                    names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-                    names
-                        .iter()
-                        .map(|f| {
-                            (
-                                f.to_string(),
-                                if cdata {
-                                    format!("_{f}")
-                                } else {
-                                    f.to_string()
-                                },
-                            )
-                        })
-                        .collect()
-                }
-                _ => Vec::new(),
-            };
-            let render = if slots.is_empty() {
-                js_string_lit(&head)
-            } else {
-                let mut parts = vec![js_string_lit(&format!("{head} {{ "))];
-                for (i, (label, slot)) in slots.iter().enumerate() {
-                    let sep = if i == 0 { "" } else { ", " };
-                    parts.push(js_string_lit(&format!("{sep}{label} = ")));
-                    let read = format!("t[{}]", js_string_lit(slot));
-                    parts.push(format!("lua_tostring({read} === 0 ? 0 : {read})"));
-                }
-                parts.push(js_string_lit(" }"));
-                parts.join(" + ")
-            };
+            let shown = bone_core::modules::display_name(name.as_str());
+            let parts = enum_display_parts(shown, variant.name, &variant.payload, |slot| {
+                let slot = match slot {
+                    EnumDisplaySlot::Tuple(i) => i.to_string(),
+                    EnumDisplaySlot::Field(field) => field.to_string(),
+                };
+                DisplayRead::Key(if cdata { format!("_{slot}") } else { slot })
+            });
+            let render = js_display_expr(ws, &parts, "t")?;
             let want = if cdata {
                 tag.to_string()
             } else {
@@ -281,7 +227,7 @@ pub(super) fn emit_inspect_cdata_enums(ws: &Workspace) -> String {
             ));
         }
     }
-    out
+    Ok(out)
 }
 
 /// Descriptors for flat enum tuple payloads with a direct record-field walk, emitted from
