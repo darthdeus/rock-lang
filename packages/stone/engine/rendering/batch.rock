@@ -200,11 +200,11 @@ fn apply_depth_mode(mode: DepthMode) {
     }
 }
 
-fn restore_after_custom_draw(target: int, depth: DepthMode, blend: BlendMode) {
-    stone_restore_after_custom_draw()
-    set_canvas_handle(target)
-    apply_depth_mode(depth)
-    set_blend_mode(blend)
+fn restore_after_custom_draw(stage: int, target: int, blend: BlendMode, shader: string?) {
+    let _ = stone_native_stage_end(stage)
+    CURRENT_CANVAS_HANDLE = target
+    CURRENT_BLEND = blend
+    WATCHER.current_shader_name = shader
 }
 
 // Choose the final geometric capacity first, then allocate, copy the old
@@ -1665,13 +1665,15 @@ macro flush_batch_keys(Pool: expr, Keys: expr, World: expr, Ui: expr, AfterScene
                 if active_shader != sprite_batch_shader {
                     set_shader(sprite_batch_shader)
                     setup_ui_pass_shader(sprite_batch_shader, Extent, Convention)
+                    active_shader = sprite_batch_shader
                 }
             }
             let target = CURRENT_CANVAS_HANDLE
+            let saved_blend = CURRENT_BLEND
+            let saved_shader = WATCHER.current_shader_name
+            let stage = stone_native_stage_begin()
             if Ui { batch.custom_draw.unwrap()() } else { custom_draw() }
-            restore_after_custom_draw(target, if Ui { DepthMode::Off } else { batch.depth }, batch.blend)
-            if World && mrt_id_attached { write_id_set = false }
-            active_shader = ""
+            restore_after_custom_draw(stage, target, saved_blend, saved_shader)
             if Ui && UI_SUBMISSION_PROBE_ON {
                 stone_ui_probe_custom_consumed()
                 stone_ui_probe_end_operation()

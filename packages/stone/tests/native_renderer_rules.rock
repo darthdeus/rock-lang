@@ -1,0 +1,179 @@
+// Native renderer interface contracts in Rock:
+// - `queue_custom_draw` opens a render-thread frame scope and saves/restores
+//   cached GL state without redundant canvas/shader switches when untouched.
+// - Registered Rock shaders expose uniform-block layouts and texture slots
+//   through the native C ABI.
+// - A native-owned multi-attachment target can be rendered into, drawn by
+//   script with Rock sprites on top, resized with generation invalidation,
+//   and destroyed atomically with its attachments.
+
+@test
+fn native_renderer_custom_draw_restore_and_native_target_draw() {
+    gpu_test_host()
+    let white = WHITE_PIXEL ?? create_white_pixel_image()
+    let prev_white = WHITE_PIXEL
+    WHITE_PIXEL = white
+
+    let target_formats = native_buffer_int(3)
+    target_formats[0] = STONE_CANVAS_RGBA8
+    target_formats[1] = STONE_CANVAS_R32I
+    target_formats[2] = STONE_CANVAS_RGBA8
+
+    let native_target = stone_target_create(32, 32, target_formats.ptr, 3, true)
+    assert(native_target != 0, "stone_target_create must allocate a 3-attachment target")
+    let att_id = stone_target_attachment(native_target, 1)
+    let att_aux = stone_target_attachment(native_target, 2)
+    assert(att_id != 0 && att_aux != 0, "secondary attachments must resolve to live handles")
+    assert_eq(stone_target_attachment(native_target, 0), native_target)
+
+    let output = new_canvas_with_depth(64.0, 64.0, "rgba8")
+    let entry_canvas = CURRENT_CANVAS_HANDLE
+    let entry_blend = CURRENT_BLEND
+    let entry_shader = WATCHER.current_shader_name
+    let scope = stone_gl_pass_state_begin()
+    assert(scope != 0)
+
+    world_fixture_with_cleanup(() => {
+        // 1) Registered Rock shader reflection via C ABI.
+        let shader_handle = get_shader_handle(sprite_batch_shader)
+        assert(shader_handle != 0, "sprite_batch_shader must be registered")
+        assert_eq(stone_native_find_shader(sprite_batch_shader), shader_handle,
+            "stone_native_find_shader resolves registered Rock shader by name")
+        assert(stone_native_handle_valid(STONE_RESOURCE_SHADER, shader_handle))
+        let eng_idx = stone_shader_uniform_block_find_by_binding(shader_handle, 0)
+        assert(eng_idx >= 0, "sprite_batch_shader must expose EngineU at binding 0")
+        assert_eq(stone_shader_uniform_block_fingerprint(shader_handle, eng_idx),
+            engine_block_fingerprint(),
+            "EngineU fingerprint from native reflection matches compiler fingerprint")
+        assert_eq(stone_shader_uniform_block_member_offset(shader_handle, eng_idx, "uProjection"), 0)
+        assert_eq(stone_shader_uniform_block_member_offset(shader_handle, eng_idx, "uView"), 64)
+        assert_eq(stone_shader_texture_slot_find(shader_handle, "uTexture"), 0)
+
+        // 2) No-op custom draw pays 0 extra canvas switches and 0 extra shader switches.
+        let noop_dl = draw_list_new(canvas: output, space: DrawSpace::Target, name: "native_noop")
+        let saw_active = false
+        let saw_target = 0
+        let size_w = native_buffer_int(1)
+        let size_h = native_buffer_int(1)
+        let saw_size = false
+        queue_custom_draw_into(noop_dl.batches, () => {
+            saw_active = stone_native_frame_active()
+            saw_target = stone_native_frame_target()
+            saw_size = stone_native_frame_size(size_w.ptr, size_h.ptr)
+        }, z_layer: 1, depth: DepthMode::Off)
+        let before = stone_get_graphics_stats()
+        draw_list_flush(noop_dl)
+        let after = stone_get_graphics_stats()
+        draw_list_clear(noop_dl)
+        draw_list_destroy(noop_dl)
+
+        assert(saw_active, "frame scope must be active inside custom draw")
+        assert_eq(saw_target, output.handle.0, "frame scope reports the currently bound target")
+        assert(saw_size && size_w[0] == 64 && size_h[0] == 64, "frame scope reports target size")
+        assert(!stone_native_frame_active(), "frame scope must close after custom draw")
+        // draw_list_flush binds `output` once and restores `prior` once = 2 switches;
+        // set_shader(sprite_batch_shader) + end_shader() = 2 shader switches.
+        // An untouched custom draw must add ZERO canvas or shader switches.
+        assert_eq(after.canvas_switches - before.canvas_switches, 2,
+            "untouched custom draw must not pay an extra target re-bind")
+        assert_eq(after.shader_switches - before.shader_switches, 2,
+            "untouched custom draw must not pay an extra shader switch")
+
+        // 3) Custom draw renders into native-owned multi-attachment target and leaves GL state dirty;
+        //    then script draws the native target texture with a Rock sprite drawn above it.
+        let stage_dl = draw_list_new(canvas: output, space: DrawSpace::Target, name: "native_stage")
+        queue_custom_draw_into(stage_dl.batches, () => {
+            stone_set_canvas(native_target)
+            stone_set_draw_buffer_mask(0b001)
+            stone_clear_canvas(0.2, 0.8, 0.4, 1.0)
+            stone_set_draw_buffer_mask(0b100)
+            stone_clear_canvas(0.9, 0.1, 0.7, 1.0)
+            stone_set_draw_buffer_mask(0b111)
+            stone_clear_canvas_int(1, 7777)
+            stone_clear_depth(1.0)
+            // Leave dirty color mask, blend, scissor, and target bound.
+            stone_set_color_mask(false, false, false, false)
+            stone_set_blend_mode_i(blend_mode_to_int(BlendMode::Multiply))
+            stone_set_scissor(true, 0, 0, 4, 4)
+        }, z_layer: 1, order: 1, depth: DepthMode::Off)
+
+        let borrowed = native_target_canvas(native_target, 0).unwrap()
+        // Put the native-target quad into stage_dl's pool so it draws right after the custom draw.
+        with_draw_pool(stage_dl.batches, () => {
+            let b_bg = ensure_batch_of(
+                sampled_canvas(borrowed),
+                z_layer: 1,
+                blend: BlendMode::Replace,
+                pixel_snap: false,
+                depth: DepthMode::Off,
+                order: 2,
+            )
+            ui_push_sprite_topleft(b_bg, sampled_canvas(borrowed), v(0.0, 0.0),
+                irect(0, 0, 32, 32), v(64.0, 64.0), WHITE)
+
+            let b_top = ensure_batch_of(
+                sampled_image(white),
+                z_layer: 1,
+                blend: BlendMode::Replace,
+                pixel_snap: false,
+                depth: DepthMode::Off,
+                order: 3,
+            )
+            ui_push_sprite_topleft(b_top, sampled_image(white), v(24.0, 24.0),
+                irect(0, 0, 1, 1), v(16.0, 16.0), Color { r: 0.9, g: 0.1, b: 0.2, a: 1.0 })
+        })
+        draw_list_flush(stage_dl)
+        draw_list_clear(stage_dl)
+        draw_list_destroy(stage_dl)
+
+        // Verify multi-attachment contents of native-owned target.
+        let id_canvas = native_target_canvas(native_target, 1).unwrap()
+        let aux_canvas = native_target_canvas(native_target, 2).unwrap()
+        let ids = canvas_read_region_i32(id_canvas, 8, 8, 1, 1)
+        assert_eq(canvas_id_at(ids, 8, 8), 7777, "native target R32I attachment preserved exact integer ID")
+        let aux_px = canvas_read_region(aux_canvas, 8, 8, 1, 1)
+        assert(abs(canvas_pixel_channel(aux_px, 8, 8, 0) - 0.9) < 0.02, "native target aux attachment R")
+        assert(abs(canvas_pixel_channel(aux_px, 8, 8, 2) - 0.7) < 0.02, "native target aux attachment B")
+
+        // Verify script-drawn output: native target colour in corner (8,8), Rock sprite on top at (32,32).
+        let out_px = canvas_read_pixels(output)
+        assert(abs(canvas_pixel_channel(out_px, 8, 8, 0) - 0.2) < 0.02, "script drew native target colour R")
+        assert(abs(canvas_pixel_channel(out_px, 8, 8, 1) - 0.8) < 0.02, "script drew native target colour G")
+        assert(abs(canvas_pixel_channel(out_px, 8, 8, 2) - 0.4) < 0.02, "script drew native target colour B")
+        assert(abs(canvas_pixel_channel(out_px, 32, 32, 0) - 0.9) < 0.02, "Rock sprite drew on top R")
+        assert(abs(canvas_pixel_channel(out_px, 32, 32, 1) - 0.1) < 0.02, "Rock sprite drew on top G")
+        assert(abs(canvas_pixel_channel(out_px, 32, 32, 2) - 0.2) < 0.02, "Rock sprite drew on top B")
+
+        // 4) Resize invalidates generations of primary target and secondary attachments.
+        let gen_primary_0 = stone_native_handle_generation(STONE_RESOURCE_TARGET, native_target)
+        let gen_id_0 = stone_native_handle_generation(STONE_RESOURCE_TARGET, att_id)
+        let gen_aux_0 = stone_native_handle_generation(STONE_RESOURCE_TARGET, att_aux)
+        assert(gen_primary_0 != 0 && gen_id_0 != 0 && gen_aux_0 != 0)
+        assert(stone_target_resize(native_target, 48, 40))
+        assert(stone_native_handle_generation(STONE_RESOURCE_TARGET, native_target) != gen_primary_0)
+        assert(stone_native_handle_generation(STONE_RESOURCE_TARGET, att_id) != gen_id_0)
+        assert(stone_native_handle_generation(STONE_RESOURCE_TARGET, att_aux) != gen_aux_0)
+        let resized = native_target_canvas(native_target, 0).unwrap()
+        assert_eq(int(resized.width), 48)
+        assert_eq(int(resized.height), 40)
+
+        // 5) Destroy invalidates target and all owned attachments atomically.
+        stone_target_destroy(native_target)
+        assert(!stone_native_handle_valid(STONE_RESOURCE_TARGET, native_target))
+        assert(!stone_native_handle_valid(STONE_RESOURCE_TARGET, att_id))
+        assert(!stone_native_handle_valid(STONE_RESOURCE_TARGET, att_aux))
+        assert(native_target_canvas(native_target, 0) == null)
+    }, () => {
+        if stone_native_handle_valid(STONE_RESOURCE_TARGET, native_target) {
+            stone_target_destroy(native_target)
+        }
+        unset_canvas()
+        destroy_canvas(output)
+        set_canvas_handle(entry_canvas)
+        if entry_shader != null { set_shader(entry_shader) } else { unset_shader() }
+        WATCHER.current_shader_name = entry_shader
+        CURRENT_BLEND = entry_blend
+        WHITE_PIXEL = prev_white
+        assert(stone_gl_pass_state_end(scope))
+    }, world_fixture_traceback)
+}

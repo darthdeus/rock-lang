@@ -124,8 +124,23 @@ extern(ffi, "stone") fn stone_mesh_draw(handle: int, texture: int, count: int) -
 extern(ffi, "stone") fn stone_mesh_free(handle: int)
 extern(ffi, "stone") fn stone_mesh_set_instances(handle: int, data: Ptr<float>, count: int, stride_floats: int, attr_sizes: Ptr<int>, attr_count: int) -> int
 extern(ffi, "stone") fn stone_mesh_update_instances(handle: int, data: Ptr<float>, count: int) -> int
+pub extern(ffi, "stone") fn stone_native_context_generation() -> int
 pub extern(ffi, "stone") fn stone_native_destroy(class: string, handle: int) -> bool
+pub extern(ffi, "stone") fn stone_native_find_shader(name: string) -> int
+pub extern(ffi, "stone") fn stone_native_find_texture(path: string) -> int
+pub extern(ffi, "stone") fn stone_native_frame_active() -> bool
+pub extern(ffi, "stone") fn stone_native_frame_size(width: Ptr<int>, height: Ptr<int>) -> bool
+pub extern(ffi, "stone") fn stone_native_frame_target() -> int
+pub extern(ffi, "stone") fn stone_native_handle_generation(kind: int, handle: int) -> int
 pub extern(ffi, "stone") fn stone_native_handle_state(class: string, handle: int) -> int
+pub extern(ffi, "stone") fn stone_native_handle_valid(kind: int, handle: int) -> bool
+pub extern(ffi, "stone") fn stone_native_mesh_info(handle: int, vert_count: Ptr<int>, attr_count: Ptr<int>, inst_count: Ptr<int>) -> int
+pub extern(ffi, "stone") fn stone_native_renderer_api(abi_version: int) -> PtrU8
+pub extern(ffi, "stone") fn stone_native_shader_info(handle: int, block_count: Ptr<int>, texture_slot_count: Ptr<int>) -> int
+pub extern(ffi, "stone") fn stone_native_stage_begin() -> int
+pub extern(ffi, "stone") fn stone_native_stage_end(scope: int) -> int
+pub extern(ffi, "stone") fn stone_native_target_info(handle: int, width: Ptr<int>, height: Ptr<int>, format: Ptr<int>, color_attachments: Ptr<int>, has_depth: Ptr<bool>) -> int
+pub extern(ffi, "stone") fn stone_native_texture_info(handle: int, width: Ptr<int>, height: Ptr<int>, format: Ptr<int>, ready: Ptr<bool>) -> int
 extern(ffi, "stone") fn stone_pad_connected() -> bool
 extern(ffi, "stone") fn stone_pixel_readback_answer_x(id: int) -> int
 extern(ffi, "stone") fn stone_pixel_readback_answer_y(id: int) -> int
@@ -145,7 +160,6 @@ pub extern(ffi, "stone") fn stone_read_canvas_pixel_channel(handle: int, x: int,
 extern(ffi, "stone") fn stone_read_depth_pixel(handle: int, x: int, y: int) -> float
 extern(ffi, "stone") fn stone_read_window_rect(x: int, y: int, w: int, h: int, out: PtrU8)
 extern(ffi, "stone") fn stone_reset_cursor()
-extern(ffi, "stone") fn stone_restore_after_custom_draw()
 pub extern(ffi, "stone") fn stone_sampler_bound(unit: int) -> bool
 pub extern(ffi, "stone") fn stone_save_screenshot(filepath: string, width: int, height: int, max_size: int) -> bool
 extern(ffi, "stone") fn stone_save_screenshot_sized(filepath: string, width: int, height: int, max_size: int, out_w: Ptr<int>, out_h: Ptr<int>) -> bool
@@ -167,11 +181,28 @@ pub extern(ffi, "stone") fn stone_set_viewport_rect(x: int, y: int, w: int, h: i
 pub extern(ffi, "stone") fn stone_shader_bind_uniform_block(handle: int, shader_key: string, block_name: string, binding: int, size: int, fingerprint: int) -> bool
 extern(ffi, "stone") fn stone_shader_check_uniform_block_layout(handle: int, block_name: string, names: string, names_len: int, offsets: Ptr<int>, count: int, plan_size: int) -> bool
 pub extern(ffi, "stone") fn stone_shader_read_uniform_block(handle: int, block_name: string, dst: PtrU8, size: int) -> bool
+extern(ffi, "stone") fn stone_shader_register_block_member(handle: int, binding: int, name: string, offset: int, kind: int, capacity: int, stride: int) -> bool
+extern(ffi, "stone") fn stone_shader_register_name(handle: int, name: string) -> bool
 extern(ffi, "stone") fn stone_shader_set_texture(handle: int, name: string, texture_unit: int)
 pub extern(ffi, "stone") fn stone_shader_snapshot_uniform_block(handle: int, block_name: string, dst: PtrU8, size: int) -> bool
+pub extern(ffi, "stone") fn stone_shader_texture_slot_count(handle: int) -> int
+pub extern(ffi, "stone") fn stone_shader_texture_slot_find(handle: int, name: string) -> int
+pub extern(ffi, "stone") fn stone_shader_texture_slot_info(handle: int, index: int, unit_out: Ptr<int>, name_out: PtrU8, name_cap: int) -> int
+pub extern(ffi, "stone") fn stone_shader_uniform_block_count(handle: int) -> int
+pub extern(ffi, "stone") fn stone_shader_uniform_block_find_by_binding(handle: int, binding: int) -> int
+pub extern(ffi, "stone") fn stone_shader_uniform_block_find_by_name(handle: int, name: string) -> int
+pub extern(ffi, "stone") fn stone_shader_uniform_block_fingerprint(handle: int, index: int) -> int
+pub extern(ffi, "stone") fn stone_shader_uniform_block_info(handle: int, index: int, binding_out: Ptr<int>, size_out: Ptr<int>, member_count_out: Ptr<int>, name_out: PtrU8, name_cap: int) -> bool
+pub extern(ffi, "stone") fn stone_shader_uniform_block_member_info(handle: int, block_index: int, member_index: int, offset_out: Ptr<int>, kind_out: Ptr<int>, capacity_out: Ptr<int>, stride_out: Ptr<int>) -> bool
+pub extern(ffi, "stone") fn stone_shader_uniform_block_member_name(handle: int, block_index: int, member_index: int, name_out: PtrU8, name_cap: int) -> int
+pub extern(ffi, "stone") fn stone_shader_uniform_block_member_offset(handle: int, block_index: int, member_name: string) -> int
 pub extern(ffi, "stone") fn stone_shader_upload_uniform_block(handle: int, data: PtrU8, size: int, fingerprint: int) -> bool
 pub extern(ffi, "stone") fn stone_show_cursor(show: bool)
 extern(ffi, "stone") fn stone_sprite_init() -> bool
+pub extern(ffi, "stone") fn stone_target_attachment(handle: int, slot: int) -> int
+pub extern(ffi, "stone") fn stone_target_create(width: int, height: int, attachment_formats: Ptr<int>, attachment_count: int, with_depth: bool) -> int
+pub extern(ffi, "stone") fn stone_target_destroy(handle: int)
+pub extern(ffi, "stone") fn stone_target_resize(handle: int, width: int, height: int) -> bool
 pub extern(ffi, "stone") fn stone_test_virtual_pad_attach() -> int
 pub extern(ffi, "stone") fn stone_test_virtual_pad_axis(index: int, token: string, value: int) -> bool
 pub extern(ffi, "stone") fn stone_test_virtual_pad_button(index: int, token: string, down: bool) -> bool

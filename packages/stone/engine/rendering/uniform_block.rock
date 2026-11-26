@@ -272,6 +272,25 @@ fn build_uniform_blocks(key: string, sid: ShaderId, decls: [UniformBlockDecl]) -
     return live
 }
 
+// Record std140 member metadata in stone-rs so native libraries can query
+// block layouts without duplicating compiler layout tables.
+fn register_native_uniform_block_members(sid: ShaderId, live: [ShaderUniformBlock]) {
+    let handle = transmute(sid.0)
+    for b in live {
+        for i in 0..b.members.len() {
+            let _ = stone_shader_register_block_member(
+                handle,
+                b.binding,
+                b.members[i],
+                b.offsets[i],
+                b.kinds[i],
+                b.capacities[i],
+                b.strides[i],
+            )
+        }
+    }
+}
+
 // Empty reloads must also discard previously registered blocks.
 fn publish_uniform_blocks(key: string, live: [ShaderUniformBlock]) {
     SHADER_UNIFORM_BLOCKS.remove(key)

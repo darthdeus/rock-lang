@@ -468,3 +468,88 @@ effect field (outline, shadow per span) until one route has complete
 semantics, transport, bounds and ordering. Author-written markup, when it
 arrives, is parsed at compile time into the same `[TextSpan]` the typed API
 accepts; dynamic game data builds typed spans directly, never markup.
+
+## Native renderer interface
+
+A host application that links its own native library alongside `stone-rs` must
+never link a second copy of `stone-rs` (its GL context and handle registries
+live in thread-local storage). Instead, it reaches the process-resident engine
+through a single versioned C function-pointer table:
+
+- `stone_native_renderer_api(uint32_t abi_version) -> const void*` returns a
+  pointer to the static `StoneNativeRendererApiV1` table when `abi_version == 1`
+  (null otherwise). Callers validate `abi_version == 1` and
+  `struct_size >= sizeof(StoneNativeRendererApiV1)` before dereferencing fields.
+  The pointer stays valid for the lifetime of the loaded Stone shared library.
+- Every entry in `StoneNativeRendererApiV1` is also exported directly in
+  `packages/stone/engine/rendering_ffi.h` and `rendering_ffi.rock` via
+  `stone-rs/build.rs`.
+
+### Stage scope and GL state save/restore
+
+- `stone_native_stage_begin() -> uint32_t` opens a LIFO render-thread frame
+  scope and snapshots the GL and engine-cached state: bound draw/read
+  framebuffers and target cache, draw-buffer mask, viewport, scissor, active
+  shader program, indexed uniform-buffer bindings (`0..8`) and generic UBO
+  binding, active texture and texture/sampler bindings (`0..8`), vertex array,
+  blend state, depth state, color mask, clear color/depth, and rasterizer
+  toggles (`CULL_FACE`, `STENCIL_TEST`, `POLYGON_OFFSET_FILL`,
+  `SAMPLE_ALPHA_TO_COVERAGE`, `RASTERIZER_DISCARD`). Returns `0` if called
+  without a live GL context on the calling thread.
+- `stone_native_stage_end(uint32_t scope) -> uint32_t` validates LIFO scope
+  nesting, restores saved state (re-binding the framebuffer or shader program
+  only when the stage changed them), closes the frame scope, and returns a
+  `STONE_STAGE_*` bitmask (`RESTORED = 1`, `TARGET_CHANGED = 2`,
+  `SHADER_CHANGED = 4`, `DRAW_BUFFERS_CHANGED = 8`), or `0` on mismatch.
+- `queue_custom_draw` in `packages/stone/engine/rendering/batch.rock` brackets
+  every custom draw with `stone_native_stage_begin` / `stone_native_stage_end`.
+- `stone_native_frame_active()`, `stone_native_frame_target()`, and
+  `stone_native_frame_size(&w, &h)` are valid only on the render thread while a
+  stage scope is open; off-thread or outside a stage they report inactive.
+
+### Handle validity, lookup and invalidation
+
+Resource kinds are typed (`STONE_RESOURCE_TARGET = 1`, `SHADER = 2`,
+`TEXTURE = 3`, `MESH = 4`):
+
+- `stone_native_context_generation()` returns the live GL context epoch (`0`
+  after teardown or before window creation).
+- `stone_native_handle_valid(kind, handle)` and
+  `stone_native_handle_generation(kind, handle)` report liveness and a
+  monotonic non-zero generation (`0` when dead, wrong kind, or after context
+  loss). Generations advance on target resize, active-rect change, attachment
+  change, texture reload/update, and shader reload.
+- `stone_native_find_shader(name)` and `stone_native_find_texture(path)` resolve
+  registered shaders and loaded images by name/path; `stone_native_target_info`,
+  `stone_native_shader_info`, `stone_native_texture_info`, and
+  `stone_native_mesh_info` read current metadata and generation together.
+
+### Native-owned multi-attachment render targets
+
+- `stone_target_create(w, h, formats, count, with_depth)` allocates a render
+  target with `1..=8` colour attachments (`STONE_CANVAS_RGBA8 = 0`,
+  `RGBA16F = 1`, `RGBA32F = 2`, `R32I = 3`) and optional depth.
+- `stone_target_resize(handle, w, h)` resizes the primary target and all owned
+  attachments atomically, advancing their handle generations;
+  `stone_target_destroy(handle)` releases all of them together.
+- `stone_target_attachment(handle, slot)` returns the canvas handle for colour
+  attachment `slot` (`0` = primary target, `1..7` = secondary attachments).
+- Script-side Rock code borrows a native-owned target (or attachment) for
+  drawing with `native_target_canvas(handle, slot)` and `sampled_canvas(...)`;
+  ownership remains with the native library.
+
+### Shader uniform-block and texture-slot reflection
+
+Registered shaders record their uniform-block layouts and `@textures` slot
+assignments in `stone-rs` at publication time:
+
+- Blocks: `stone_shader_uniform_block_count`,
+  `stone_shader_uniform_block_find_by_binding`,
+  `stone_shader_uniform_block_find_by_name`,
+  `stone_shader_uniform_block_info`,
+  `stone_shader_uniform_block_fingerprint`,
+  `stone_shader_uniform_block_member_info`,
+  `stone_shader_uniform_block_member_name`, and
+  `stone_shader_uniform_block_member_offset`.
+- Texture slots: `stone_shader_texture_slot_count`,
+  `stone_shader_texture_slot_find`, and `stone_shader_texture_slot_info`.

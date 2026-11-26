@@ -94,3 +94,7 @@ gamelibs = { workspace = true }
 [[test]]
 name = "graphics_capture"
 harness = false
+
+[[test]]
+name = "native_renderer_abi"
+harness = false

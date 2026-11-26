@@ -540,6 +540,8 @@ fn publish_shader_registration(key: string, sid: ShaderId, registration: ShaderR
         stone_destroy_shader(transmute(existing.shader.0))
     }
     gpu_label_shader(transmute(sid.0), key)
+    let _ = stone_shader_register_name(transmute(sid.0), key)
+    register_native_uniform_block_members(sid, live)
     REGISTERED_SHADER_HASHES.insert(key, registration.hash)
     let texture_slots = registration.texture_slots
     let slots_by_name: Map<string, int> = map_new()

@@ -346,6 +346,7 @@ mod handles;
 mod mesh;
 mod mesh_capture;
 mod native_ledger;
+pub mod native_renderer;
 mod pixel_readback;
 mod shader;
 mod sprite;
@@ -1167,6 +1168,8 @@ pub extern "C" fn stone_teardown() -> bool {
     with_gl(stream_buffer::release_all);
     shader::destroy_all();
     canvas::destroy_all();
+    canvas::reset_current_canvas_handle();
+    native_renderer::reset_on_teardown();
     image_texture::unload_all();
     gl_state::forget_samplers();
     mesh::clear_all();
@@ -1257,6 +1260,8 @@ pub extern "C" fn stone_create_window_ex(
     let Some(window) = create_window(title_str, requested, resizable, fullscreen) else {
         return ptr::null_mut();
     };
+    handles::bump_context_generation();
+    canvas::reset_current_canvas_handle();
     WINDOW.with(|slot| slot.borrow_mut().insert(Box::new(window)).as_mut() as *mut StoneWindow)
 }
 

@@ -589,6 +589,35 @@ fn canvas_format_code(format: string) -> int {
     return STONE_CANVAS_RGBA8
 }
 
+pub const STONE_NATIVE_RENDERER_ABI_VERSION: int = 1
+pub const STONE_RESOURCE_TARGET: int = 1
+pub const STONE_RESOURCE_SHADER: int = 2
+pub const STONE_RESOURCE_TEXTURE: int = 3
+pub const STONE_RESOURCE_MESH: int = 4
+pub const STONE_STAGE_RESTORED: int = 1
+pub const STONE_STAGE_TARGET_CHANGED: int = 2
+pub const STONE_STAGE_SHADER_CHANGED: int = 4
+pub const STONE_STAGE_DRAW_BUFFERS_CHANGED: int = 8
+
+// Borrow a live native-owned render target (or attachment) as a Canvas value
+// for script-side drawing. Ownership stays with the native library.
+pub fn canvas_from_native_handle(handle: int) -> Canvas? {
+    if handle == 0 || !stone_canvas_exists(handle) { return null }
+    let w = stone_canvas_active_w(handle)
+    let h = stone_canvas_active_h(handle)
+    if w <= 0 || h <= 0 { return null }
+    return Canvas {
+        handle: CanvasId(handle),
+        width: float(w),
+        height: float(h),
+    }
+}
+
+pub fn native_target_canvas(handle: int, slot: int = 0) -> Canvas? {
+    let attachment = if slot == 0 { handle } else { stone_target_attachment(handle, slot) }
+    return canvas_from_native_handle(attachment)
+}
+
 pub fn new_canvas(width: float, height: float, format: string) -> Canvas {
     let code = canvas_format_code(format)
     let handle = stone_create_canvas(transmute(width), transmute(height), code, false)

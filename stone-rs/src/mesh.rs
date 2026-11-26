@@ -23,6 +23,7 @@ struct RetainedMesh {
     inst_layout: Option<ValidatedLayout>,
     vbo_bytes: u64,
     inst_vbo_bytes: u64,
+    generation: u64,
 }
 
 thread_local! {
@@ -207,6 +208,7 @@ pub extern "C" fn stone_mesh_create(
                     inst_layout: None,
                     vbo_bytes: byte_len as u64,
                     inst_vbo_bytes: 0,
+                    generation: crate::handles::next_generation(),
                 },
             )
         });
@@ -514,6 +516,29 @@ pub(crate) fn live_mesh_ids() -> Vec<u64> {
     MESHES.with(|m| m.borrow().keys().copied().collect())
 }
 
+pub(crate) fn mesh_generation(handle: u64) -> u64 {
+    if handle == 0 {
+        return 0;
+    }
+    MESHES.with(|m| m.borrow().get(&handle).map_or(0, |mesh| mesh.generation))
+}
+
+pub(crate) fn mesh_info(handle: u64) -> Option<(u64, i32, i32, i32)> {
+    if handle == 0 {
+        return None;
+    }
+    MESHES.with(|m| {
+        m.borrow().get(&handle).map(|mesh| {
+            (
+                mesh.generation,
+                mesh.vert_count,
+                mesh.attr_count,
+                mesh.inst_count,
+            )
+        })
+    })
+}
+
 /// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_get_live_mesh_count() -> c_int {
@@ -608,6 +633,7 @@ mod layout_tests {
                     inst_layout: None,
                     vbo_bytes: 24,
                     inst_vbo_bytes: 0,
+                    generation: 1,
                 },
             );
         });

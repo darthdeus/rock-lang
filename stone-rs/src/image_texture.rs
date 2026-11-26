@@ -260,6 +260,8 @@ pub(crate) struct LoadedImage {
     exact_texels: bool,
     mipmapped: bool,
     decode_failed: bool,
+    generation: u64,
+    asset_path: Option<String>,
 }
 
 impl LoadedImage {
@@ -276,6 +278,7 @@ impl LoadedImage {
 
 thread_local! {
     pub(crate) static IMAGES: RefCell<HashMap<u64, LoadedImage>> = RefCell::new(HashMap::new());
+    static IMAGE_BY_PATH: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
     pub(crate) static WHITE_IMAGE: RefCell<Option<u64>> = const { RefCell::new(None) };
     /// Cumulative failed deferred decodes, for the residency counters.
     static FAILED_DECODE_COUNT: RefCell<u64> = const { RefCell::new(0) };
@@ -311,8 +314,50 @@ pub(crate) fn insert_image(
         exact_texels: false,
         mipmapped,
         decode_failed: false,
+        generation: crate::handles::next_generation(),
+        asset_path: None,
     };
     IMAGES.with(|images| images.borrow_mut().insert(id, image));
+}
+
+pub(crate) fn bump_image_generation(handle: u64) {
+    with_image_mut(handle, |img| {
+        img.generation = crate::handles::next_generation();
+    });
+}
+
+pub(crate) fn image_generation(handle: u64) -> u64 {
+    if handle == 0 {
+        return 0;
+    }
+    with_image(handle, |img| img.generation).unwrap_or(0)
+}
+
+pub(crate) fn find_image_by_path(path: &str) -> u64 {
+    let Some(handle) = IMAGE_BY_PATH.with(|by_path| by_path.borrow().get(path).copied()) else {
+        return 0;
+    };
+    if image_exists(handle) {
+        handle
+    } else {
+        0
+    }
+}
+
+pub(crate) fn image_info(handle: u64) -> Option<(u64, i32, i32, i32, bool)> {
+    if handle == 0 {
+        return None;
+    }
+    let ready = crate::image_publication::stone_image_ready(handle) && !image_decode_failed(handle);
+    with_image(handle, |img| {
+        (
+            img.generation,
+            img.width as i32,
+            img.height as i32,
+            img.format.report_code(),
+            ready,
+        )
+    })
 }
 
 /// Whether `handle`'s deferred decode failed. False for unknown handles.
@@ -917,6 +962,12 @@ fn load_image(
         filter_mode == 2,
         stubbed.then_some(path_str),
     );
+    if !path_str.is_empty() {
+        with_image_mut(id, |img| img.asset_path = Some(path_str.to_string()));
+        IMAGE_BY_PATH.with(|by_path| {
+            by_path.borrow_mut().insert(path_str.to_string(), id);
+        });
+    }
     if let LoadPixels::Decode(source) = pixels {
         crate::image_publication::submit(id, width, height, class);
         image_decode::submit(id, path_str.to_string(), source, exact_texels, format);
@@ -1068,6 +1119,7 @@ fn publish_image_pixels(
         return None;
     }
     refresh_image_mipmaps(id, target);
+    bump_image_generation(id);
     Some(fresh)
 }
 
@@ -1298,6 +1350,14 @@ pub extern "C" fn stone_unload_image(handle: u64) {
     crate::image_publication::retire(handle);
     let removed = IMAGES.with(|images| images.borrow_mut().remove(&handle));
     if let Some(img) = removed {
+        if let Some(path) = img.asset_path.as_deref() {
+            IMAGE_BY_PATH.with(|by_path| {
+                let mut by_path = by_path.borrow_mut();
+                if by_path.get(path) == Some(&handle) {
+                    by_path.remove(path);
+                }
+            });
+        }
         crate::handles::retire(Class::Image, handle);
         with_gl(|gl| unsafe {
             gl.delete_texture(img.texture);
@@ -1310,6 +1370,7 @@ pub(crate) fn unload_all() {
     for handle in handles {
         stone_unload_image(handle);
     }
+    IMAGE_BY_PATH.with(|by_path| by_path.borrow_mut().clear());
     WHITE_IMAGE.with(|white| *white.borrow_mut() = None);
 }
 
