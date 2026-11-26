@@ -139,17 +139,31 @@ fn open(path: &Path) -> Result<File> {
         .with_context(|| format!("open sim admission {}", path.display()))
 }
 
-pub(super) fn publish_pid(root: &Path, slot: &mut File, pid: u32) -> Result<()> {
+pub(super) fn publish_pid(root: &Path, slot: &mut File, pid: u32, estimate_mib: u64) -> Result<()> {
     let admission = open(&root.join("admission.lock"))?;
     admission.lock()?;
-    write_pid(slot, pid)
+    write_lease(slot, pid, estimate_mib)
 }
 
-fn write_pid(slot: &mut File, pid: u32) -> Result<()> {
+fn write_lease(slot: &mut File, pid: u32, estimate_mib: u64) -> Result<()> {
     slot.rewind()?;
     slot.set_len(0)?;
-    write!(slot, "{pid}")?;
+    write!(slot, "{pid} {estimate_mib}")?;
     Ok(())
+}
+
+// Legacy lock files hold only `{pid}` and fall back to the full-asset estimate.
+fn parse_lease(text: &str) -> (Option<u32>, u64) {
+    let mut parts = text.split_whitespace();
+    let pid = parts
+        .next()
+        .and_then(|raw| raw.parse::<u32>().ok())
+        .filter(|&pid| pid != 0);
+    let estimate = parts
+        .next()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(SIM_LANE_VRAM_MIB);
+    (pid, estimate)
 }
 
 #[derive(Debug)]
@@ -162,6 +176,7 @@ pub(super) fn try_acquire(
     root: &Path,
     slots: usize,
     reserve_mib: u64,
+    estimate_mib: u64,
     probe: impl FnOnce() -> Probe,
 ) -> Result<Admission> {
     std::fs::create_dir_all(root)?;
@@ -196,7 +211,7 @@ pub(super) fn try_acquire(
             Err(std::fs::TryLockError::WouldBlock) => {
                 let mut text = String::new();
                 file.read_to_string(&mut text)?;
-                active.push(text.parse::<u32>().ok());
+                active.push(parse_lease(&text));
             }
             Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
         }
@@ -210,23 +225,23 @@ pub(super) fn try_acquire(
         Ok(Some(gpu)) => {
             let pending: u64 = active
                 .iter()
-                .map(|pid| {
+                .map(|&(pid, active_estimate)| {
                     let used = pid
                         .and_then(|pid| gpu.processes.get(&pid))
                         .copied()
                         .unwrap_or(0);
-                    SIM_LANE_VRAM_MIB.saturating_sub(used)
+                    active_estimate.saturating_sub(used)
                 })
                 .sum();
             // Preserve the existing one-worker progress floor, now host-wide.
-            (!active.is_empty() && gpu.free < reserve_mib + pending + SIM_LANE_VRAM_MIB)
+            (!active.is_empty() && gpu.free < reserve_mib + pending + estimate_mib)
                 .then_some("gpu_headroom")
         }
     };
     if let Some(reason) = denied {
         return Ok(Admission::Denied(reason));
     }
-    write_pid(&mut slot, 0)?;
+    write_lease(&mut slot, 0, estimate_mib)?;
     Ok(Admission::Granted(slot))
 }
 
@@ -283,15 +298,21 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut concurrent = None;
         denied("gpu_headroom", || {
-            try_acquire(root.path(), 2, RESERVE, || {
+            try_acquire(root.path(), 2, RESERVE, SIM_LANE_VRAM_MIB, || {
                 if concurrent.is_none() {
                     let lock = open(&root.path().join("admission.lock")).unwrap();
                     lock.try_lock()
                         .expect("GPU telemetry must not hold the host admission lock");
                     drop(lock);
-                    let mut slot =
-                        granted(try_acquire(root.path(), 2, RESERVE, || gpu(8192, &[]))).unwrap();
-                    publish_pid(root.path(), &mut slot, 42).unwrap();
+                    let mut slot = granted(try_acquire(
+                        root.path(),
+                        2,
+                        RESERVE,
+                        SIM_LANE_VRAM_MIB,
+                        || gpu(8192, &[]),
+                    ))
+                    .unwrap();
+                    publish_pid(root.path(), &mut slot, 42, SIM_LANE_VRAM_MIB).unwrap();
                     concurrent = Some(slot);
                 }
                 // This snapshot predates the concurrently admitted worker.
@@ -299,22 +320,54 @@ mod tests {
             })
         });
         drop(concurrent);
-        acquired(|| try_acquire(root.path(), 2, RESERVE, || gpu(8192, &[])));
+        acquired(|| {
+            try_acquire(root.path(), 2, RESERVE, SIM_LANE_VRAM_MIB, || {
+                gpu(8192, &[])
+            })
+        });
     }
     #[test]
     fn a_lower_reserve_admits_a_worker_the_default_denies() {
         let root = tempfile::tempdir().unwrap();
-        let _first = acquired(|| try_acquire(root.path(), 3, RESERVE, || gpu(8192, &[])));
-        denied("gpu_headroom", || {
-            try_acquire(root.path(), 3, RESERVE, || gpu(8192, &[]))
+        let _first = acquired(|| {
+            try_acquire(root.path(), 3, RESERVE, SIM_LANE_VRAM_MIB, || {
+                gpu(8192, &[])
+            })
         });
-        acquired(|| try_acquire(root.path(), 3, 2048, || gpu(8192, &[])));
+        denied("gpu_headroom", || {
+            try_acquire(root.path(), 3, RESERVE, SIM_LANE_VRAM_MIB, || {
+                gpu(8192, &[])
+            })
+        });
+        acquired(|| try_acquire(root.path(), 3, 2048, SIM_LANE_VRAM_MIB, || gpu(8192, &[])));
+    }
+    #[test]
+    fn per_worker_vram_estimates_admit_light_workers_and_respect_legacy_leases() {
+        let root = tempfile::tempdir().unwrap();
+        // With 8192 MiB free and 6144 MiB reserve, 2048 MiB is available:
+        // two 256 MiB workers fit (512 <= 2048), while a 2048 MiB worker does not.
+        let mut first = acquired(|| try_acquire(root.path(), 4, RESERVE, 256, || gpu(8192, &[])));
+        publish_pid(root.path(), &mut first, 101, 256).unwrap();
+        let _second =
+            acquired(|| try_acquire(root.path(), 4, RESERVE, 256, || gpu(8152, &[(101, 40)])));
+        denied("gpu_headroom", || {
+            try_acquire(root.path(), 4, RESERVE, SIM_LANE_VRAM_MIB, || {
+                gpu(8152, &[(101, 40)])
+            })
+        });
+        assert_eq!(parse_lease("42"), (Some(42), SIM_LANE_VRAM_MIB));
+        assert_eq!(parse_lease("0 256"), (None, 256));
+        assert_eq!(parse_lease("42 1024"), (Some(42), 1024));
     }
     #[test]
     fn failures_and_missing_tooling_preserve_admission_contracts() {
         let root = tempfile::tempdir().unwrap();
-        let failed = || try_acquire(root.path(), 2, RESERVE, || Err("probe failed".into()));
-        let missing = || try_acquire(root.path(), 2, RESERVE, || Ok(None));
+        let failed = || {
+            try_acquire(root.path(), 2, RESERVE, SIM_LANE_VRAM_MIB, || {
+                Err("probe failed".into())
+            })
+        };
+        let missing = || try_acquire(root.path(), 2, RESERVE, SIM_LANE_VRAM_MIB, || Ok(None));
         let first = acquired(failed);
         denied("gpu_probe_failed", failed);
         let second = acquired(missing);

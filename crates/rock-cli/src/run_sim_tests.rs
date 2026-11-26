@@ -430,6 +430,63 @@ fn entry_full_assets_needs_real_assets_and_no_image_cap() {
 }
 
 #[test]
+fn entry_vram_estimate_distinguishes_no_draw_capped_draw_and_full_asset() {
+    const STUB_OFF: (&str, &str) = ("STONE_ASSET_STUB", "0");
+    const UNCAPPED: (&str, &str) = ("STONE_IMAGE_MAX_SIDE", "0");
+    let cases: &[(&[(&str, &str)], &str, u64, &str)] = &[
+        (
+            &[],
+            "1",
+            SIM_NO_DRAW_VRAM_MIB,
+            "baseline defaults to SIM_DRAW=none",
+        ),
+        (
+            &[STUB_OFF],
+            "1",
+            SIM_NO_DRAW_VRAM_MIB,
+            "capped SIM_DRAW=none stays light",
+        ),
+        (
+            &[("SIM_DRAW", "commands")],
+            "1",
+            SIM_CAPPED_DRAW_VRAM_MIB,
+            "command submission allocates capped draw state",
+        ),
+        (
+            &[("SIM_DRAW", "on_demand")],
+            "1",
+            SIM_CAPPED_DRAW_VRAM_MIB,
+            "capped on_demand drawing uses the capped draw estimate",
+        ),
+        (
+            &[STUB_OFF, ("SIM_DRAW", "every_frame")],
+            "1",
+            SIM_CAPPED_DRAW_VRAM_MIB,
+            "capped every_frame drawing uses the capped draw estimate",
+        ),
+        (
+            &[STUB_OFF, UNCAPPED],
+            "1",
+            SIM_LANE_VRAM_MIB,
+            "full-asset sims reserve the full estimate even without SIM_DRAW",
+        ),
+        (
+            &[("SIM_DRAW", "every_frame"), ("SIM_DRAW", "none")],
+            "1",
+            SIM_NO_DRAW_VRAM_MIB,
+            "last SIM_DRAW declaration wins",
+        ),
+    ];
+    for (declared, inherited, expected, why) in cases {
+        assert_eq!(
+            entry_vram_estimate_mib(&env(declared), inherited),
+            *expected,
+            "{why}"
+        );
+    }
+}
+
+#[test]
 fn the_classed_pool_caps_live_capped_tasks_and_runs_everything_once() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let renders: Vec<bool> = (0..40).map(|i| i % 3 == 0).collect();
