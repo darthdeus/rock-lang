@@ -4,7 +4,7 @@ value Row { x: float, generation: int }
     rows.swap_remove(i)
 }
 
-@test(backends = "lua")
+@test
 fn swap_remove_moves_the_last_live_row() {
     let rows: FlatVec<Row> = flat_vec_new(4)
     rows.push(Row { x: 1.0, generation: 1 })

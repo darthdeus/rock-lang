@@ -2,7 +2,7 @@
     return (isnan(x), isinf(x), is_null(value))
 }
 
-@test(backends = "lua")
+@test
 fn predicates_preserve_nan_infinity_and_null() {
     let (nan, inf, empty) = predicates(0.0 / 0.0, null)
     assert(nan && !inf && empty)

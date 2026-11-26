@@ -19,7 +19,7 @@ fn mob_id() -> actor_identity::MobId {
     return actor_identity::MobId { scene_id: 11, arena_id: 23, slot: 4, generation: 7 }
 }
 
-@test(backends = "lua")
+@test
 fn packaged_types_print_their_paths() {
     assert_eq("{MobKind::Skeleton}", "pkgenum::MobKind::Skeleton")
     assert_eq("{status::PoisonLevel::Rotting}", "pkgenum::status::PoisonLevel::Rotting")

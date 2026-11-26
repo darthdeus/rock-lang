@@ -92,7 +92,7 @@ fn raw_global_directory_preserves_live_named_access() {
 struct PrivateRecord { first: int?, second: int, third: int? }
 struct PrivateOwner { child: PrivateRecord? }
 
-@test(backends = "lua", output = "PrivateRecord {{\n  first = nil,\n  second = 8,\n  third = 9\n}}")
+@test(output = "PrivateRecord {{\n  first = nil,\n  second = 8,\n  third = 9\n}}")
 fn private_record_keeps_logical_fields() {
     let row = PrivateRecord { third: null, second: 8, first: null }
     row.third = 9

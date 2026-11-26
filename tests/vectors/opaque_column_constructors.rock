@@ -1,6 +1,6 @@
 value G { x: float, y: float }
 
-@test(backends = "lua", output = "135")
+@test(output = "135")
 fn normal_constructors_keep_their_typed_elements() {
     let a: [G] = vec_new()
     a.push(G { x: 1.0, y: 2.0 })

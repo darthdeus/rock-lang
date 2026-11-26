@@ -208,7 +208,12 @@ fn vec_reads_of_false_and_null_slots() {
     return tostring(err)
 """
 
-@test(output = "true\ntrue", backends = "lua")
+inline(js) fn error_of(f: fn()) -> string = """
+    try { __rock_call(f); return ""; }
+    catch (error) { return String(error); }
+"""
+
+@test(output = "true\ntrue")
 fn vec_index_out_of_bounds_raises() {
     print(error_of(() => { let _ = at([4, 5, 6], id(3)) }).contains("Vec index out of bounds"))
     print(error_of(() => { let _ = at([4, 5, 6], id(-1)) }).contains("Vec index out of bounds"))

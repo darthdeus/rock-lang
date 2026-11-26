@@ -16,7 +16,7 @@ fn mark() -> int { marks += 1; return 1 }
     }
     return n
 }
-@test(backends = "lua", output = "5 7 2")
+@test(output = "5 7 2")
 fn copied_layer_keeps_its_name_after_call() {
     let step = Step { layers: [
         Layer { volume: 1.0, speed: 2.0, offset: 3.0, name: "ab" },

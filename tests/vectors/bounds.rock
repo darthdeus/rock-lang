@@ -170,7 +170,7 @@ fn arena_walks_skip_removed_slots() {
 value Coordinates { x: int, y: int }
 value BoundedRow { point: Coordinates, a: int, b: int, c: int, d: int }
 
-@test(backends = "lua")
+@test
 fn native_writes_invalidate_nested_index_bounds() {
     let values = [1, 2]
     let point = Coordinates { x: 0, y: 1 }

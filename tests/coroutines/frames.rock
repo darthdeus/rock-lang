@@ -114,7 +114,7 @@ inline(js) fn yield_slot_keys(c: Coroutine<Signal>) -> string = """
     return found.length === 0 ? "none" : found.join(",");
 """
 
-@test(output = "none", backends = "lua")
+@test(output = "none")
 fn a_fresh_frame_exposes_no_yield_slots() {
     print(yield_slot_keys(pulse()))
 }

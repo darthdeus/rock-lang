@@ -70,7 +70,7 @@ inline(lua) fn raw_slot(row: any) -> int = "return row.handle._slot"
     assert_eq(prev_handle._slot, 3)
 }
 
-@test(backends = "lua") fn inspect_recovers_wide_nested_record_fields() {
+@test fn inspect_recovers_wide_nested_record_fields() {
     let text = inspect(Rows { items: [row(3)] })
     assert(text.contains("WideRow"))
     assert(text.contains("flags = 8"))

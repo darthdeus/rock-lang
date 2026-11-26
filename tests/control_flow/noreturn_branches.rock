@@ -35,7 +35,12 @@ inline(lua) fn traps_after_guard() -> bool = """
     return not ok and string.find(tostring(message), 'negative', 1, true) ~= nil
 """
 
-@test(backends = "lua")
+inline(js) fn traps_after_guard() -> bool = """
+    try { check_0(-1); return false; }
+    catch (error) { return String(error).includes("negative"); }
+"""
+
+@test
 fn negative_guard_traps_before_the_following_statement() {
     assert(traps_after_guard())
 }

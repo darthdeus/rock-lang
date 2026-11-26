@@ -31,7 +31,7 @@ fn make_owner() -> Owner {
     return read_across_call(membership)
 }
 
-@test(backends = "lua")
+@test
 fn nullable_child_is_reused_across_calls() {
     let owner = make_owner()
     assert(compare_membership(owner))

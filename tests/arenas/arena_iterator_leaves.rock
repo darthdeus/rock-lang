@@ -55,7 +55,7 @@ fn pair_sum(pair: (Entity<Row>, Row)) -> int { return pair.0._generation + pair.
     for pair in a { values.push(() => pair.1.x) }
     assert(values[0]() == 1 && values[1]() == 3)
 }
-@test(backends = "lua")
+@test
 fn check_walks() {
     let a: Arena<Row> = arena_new()
     a.insert(Row { x: 1 })

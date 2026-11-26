@@ -15,7 +15,7 @@ nobox value Column { x: int, y: int }
     for (k, unused) in m { count += 1 }
     return count
 }
-@test(backends = "lua")
+@test
 fn mutation_and_lengths() {
     let m: Map<int, Row> = map_new()
     let c: Map<int, Column> = map_new()
