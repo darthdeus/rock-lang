@@ -565,7 +565,9 @@ Resource kinds are typed (`STONE_RESOURCE_TARGET = 1`, `SHADER = 2`,
   another canvas at its slot) is refused with a logged error.
 - Script-side Rock code borrows a native-owned target (or attachment) for
   drawing with `native_target_canvas(handle, slot)` and `sampled_canvas(...)`;
-  ownership remains with the native library.
+  ownership remains with the native library. The borrowed `Canvas` copies the
+  target's size when borrowed and is not told about a later resize or
+  destroy, so borrow it again every frame instead of keeping it.
 
 ### Shader uniform-block and texture-slot reflection
 
