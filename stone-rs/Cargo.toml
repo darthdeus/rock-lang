@@ -98,3 +98,7 @@ harness = false
 [[test]]
 name = "native_renderer_abi"
 harness = false
+
+[[bench]]
+name = "custom_draw_restore"
+harness = false
