@@ -1923,6 +1923,8 @@ fn resolve_jobs_with(
     Ok(jobs.clamp(1, cores.max(1)))
 }
 
+const SIM_NO_DRAW_VRAM_MIB: u64 = 256;
+const SIM_CAPPED_DRAW_VRAM_MIB: u64 = 1024;
 const SIM_LANE_VRAM_MIB: u64 = 2048;
 
 const DEFAULT_SIM_VRAM_RESERVE_MIB: u64 = 6 * 1024;
@@ -2084,15 +2086,32 @@ fn entry_renders(env: &[(String, String)]) -> bool {
     sim_env_value(env, "SIM_DRAW").is_some_and(|v| matches!(v, "on_demand" | "every_frame"))
 }
 
+fn baseline_env_value(key: &str) -> &'static str {
+    RUNNER_BASELINE_ENV
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, v)| *v)
+        .expect("the runner baseline declares the key")
+}
+
 fn entry_full_assets(env: &[(String, String)], default_stub: &str) -> bool {
     let stub = sim_env_value(env, "STONE_ASSET_STUB").unwrap_or(default_stub);
-    let cap_default = RUNNER_BASELINE_ENV
-        .iter()
-        .find(|(k, _)| *k == "STONE_IMAGE_MAX_SIDE")
-        .map(|(_, v)| *v)
-        .expect("the runner baseline declares the image cap");
-    let cap = sim_env_value(env, "STONE_IMAGE_MAX_SIDE").unwrap_or(cap_default);
+    let cap = sim_env_value(env, "STONE_IMAGE_MAX_SIDE")
+        .unwrap_or(baseline_env_value("STONE_IMAGE_MAX_SIDE"));
     stub == "0" && cap == "0"
+}
+
+/// Conservative per-child GPU memory reservation (MiB) for host admission.
+/// One-shot children without full-size assets use far less VRAM than full-asset
+/// children, especially when `SIM_DRAW=none` (the baseline).
+fn entry_vram_estimate_mib(env: &[(String, String)], default_stub: &str) -> u64 {
+    if entry_full_assets(env, default_stub) {
+        SIM_LANE_VRAM_MIB
+    } else if sim_env_value(env, "SIM_DRAW").unwrap_or(baseline_env_value("SIM_DRAW")) == "none" {
+        SIM_NO_DRAW_VRAM_MIB
+    } else {
+        SIM_CAPPED_DRAW_VRAM_MIB
+    }
 }
 
 fn workload_env(env: &[(String, String)]) -> Vec<(String, String)> {
@@ -2324,6 +2343,7 @@ fn sim_worker_slot_directory() -> PathBuf {
 
 fn acquire_worker_slot(
     label: &str,
+    estimate_mib: u64,
 ) -> Result<(std::fs::File, u64, u64, BTreeMap<&'static str, u64>)> {
     let slots = sim_job_budget().ram;
     let root = sim_worker_slot_directory();
@@ -2337,6 +2357,7 @@ fn acquire_worker_slot(
             &root,
             slots,
             sim_vram_reserve_mib(),
+            estimate_mib,
             worker_admission::gpu_memory,
         )?;
         checks += checking.elapsed();
@@ -2804,7 +2825,9 @@ fn run_child(mut config: ChildConfig<'_>) -> Result<SimSummary> {
 
     let (mut cmd, lua_file) = child_command(part, output, quiet);
 
-    let (mut worker_slot, admission_ms, checks_ms, waits) = acquire_worker_slot(&part.name)?;
+    let vram_estimate_mib = entry_vram_estimate_mib(&part.env, asset_stub_value());
+    let (mut worker_slot, admission_ms, checks_ms, waits) =
+        acquire_worker_slot(&part.name, vram_estimate_mib)?;
     let worker_attempt = recorder
         .map(|recorder| {
             recorder.worker_spawn(part.occurrence_id, &part.name, &workload_env(&part.env))
@@ -2825,7 +2848,12 @@ fn run_child(mut config: ChildConfig<'_>) -> Result<SimSummary> {
     };
     // Until the PID is published the admission lease reserves the full estimate.
     // Keep the child bound if publishing fails, so it is reaped before the lease drops.
-    worker_admission::publish_pid(&sim_worker_slot_directory(), &mut worker_slot, child.id())?;
+    worker_admission::publish_pid(
+        &sim_worker_slot_directory(),
+        &mut worker_slot,
+        child.id(),
+        vram_estimate_mib,
+    )?;
     // Declared after the leases, so the bound child is reaped before capacity
     // and the admission phase are released, including on early return.
     let mut child = child;
