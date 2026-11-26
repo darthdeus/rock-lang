@@ -26,10 +26,15 @@ pub value LifecycleSystem {
 
 extern(lua) fn __rock_lifecycle_take_wire(key: string) -> bool
 
-pub inline(lua) fn lifecycle_systems(phase: string) -> [LifecycleSystem] = """
-    return (_G.__ROCK_LIFECYCLE_PLAN or {})[phase] or setmetatable({[0]=0}, __rock_box_mts.Vec)
-"""
-inline(lua) fn lifecycle_phase_has_scene(phase: string) -> bool = "local p = (_G.__ROCK_LIFECYCLE_PLAN or {})[phase]; return p ~= nil and (p.scene_owned or 0) > 0"
+inline(lua) fn lifecycle_phase_systems(phase: string) -> [LifecycleSystem]? =
+    "local plan = _G.__ROCK_LIFECYCLE_PLAN; return plan and plan[phase]"
+
+pub fn lifecycle_systems(phase: string) -> [LifecycleSystem] {
+    return lifecycle_phase_systems(phase) ?? vec_new()
+}
+
+inline(lua) fn lifecycle_phase_has_scene(phase: string) -> bool =
+    "local plan = _G.__ROCK_LIFECYCLE_PLAN; local p = plan and plan[phase]; return p ~= nil and (p.scene_owned or 0) > 0"
 
 @inline
 fn run_process_system_timed(system: LifecycleSystem, phase: string) {
@@ -147,7 +152,7 @@ fn run_wire_systems() {
 
 /// Call a per-frame phase's systems in stage order.
 fn run_frame_phase(phase: string) {
-    let systems = lifecycle_systems(phase)
+    let systems = lifecycle_phase_systems(phase) ?? return
     if systems.len() == 0 { return }
     let scene = lifecycle_phase_has_scene(phase)
     if scene { __scene_begin_update_phase() }
