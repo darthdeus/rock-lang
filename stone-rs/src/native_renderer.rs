@@ -856,6 +856,81 @@ pub struct StoneNativeRendererApiV1 {
     pub mesh_free: extern "C" fn(u64),
 }
 
+// Version 1 only appends: each entry keeps its index, so its offset never moves.
+macro_rules! api_v1_layout {
+    ($($field:ident = $index:expr,)*) => {
+        const _: () = {
+            const PTR: usize = std::mem::size_of::<usize>();
+            assert!(std::mem::offset_of!(StoneNativeRendererApiV1, abi_version) == 0);
+            assert!(std::mem::offset_of!(StoneNativeRendererApiV1, struct_size) == 4);
+            $(assert!(std::mem::offset_of!(StoneNativeRendererApiV1, $field) == 8 + $index * PTR);)*
+            assert!(std::mem::size_of::<StoneNativeRendererApiV1>() == 8 + [$($index),*].len() * PTR);
+        };
+
+        /// Field names of `StoneNativeRendererApiV1` in declaration order.
+        pub const STONE_NATIVE_RENDERER_API_V1_FIELDS: &[&str] =
+            &["abi_version", "struct_size", $(stringify!($field)),*];
+    };
+}
+
+api_v1_layout! {
+    stage_begin = 0,
+    stage_end = 1,
+    frame_active = 2,
+    frame_target = 3,
+    frame_size = 4,
+    context_generation = 5,
+    handle_valid = 6,
+    handle_generation = 7,
+    find_shader = 8,
+    find_texture = 9,
+    target_info = 10,
+    shader_info = 11,
+    texture_info = 12,
+    mesh_info = 13,
+    target_create = 14,
+    target_resize = 15,
+    target_destroy = 16,
+    target_attachment = 17,
+    set_canvas = 18,
+    set_canvas_active = 19,
+    clear_canvas = 20,
+    clear_canvas_int = 21,
+    clear_depth = 22,
+    shader_uniform_block_count = 23,
+    shader_uniform_block_find_by_binding = 24,
+    shader_uniform_block_find_by_name = 25,
+    shader_uniform_block_info = 26,
+    shader_uniform_block_fingerprint = 27,
+    shader_uniform_block_member_info = 28,
+    shader_uniform_block_member_name = 29,
+    shader_uniform_block_member_offset = 30,
+    shader_texture_slot_count = 31,
+    shader_texture_slot_find = 32,
+    shader_texture_slot_info = 33,
+    set_shader = 34,
+    upload_uniform_block = 35,
+    get_white_image = 36,
+    bind_image_texture_to_unit = 37,
+    bind_canvas_texture_to_unit = 38,
+    bind_canvas_depth_to_unit = 39,
+    bind_sampler = 40,
+    set_depth_mode = 41,
+    set_blend_mode_i = 42,
+    set_draw_buffer_mask = 43,
+    set_color_mask = 44,
+    set_scissor = 45,
+    set_gl_viewport = 46,
+    draw_mesh = 47,
+    draw_fullscreen_quad = 48,
+    draw_fullscreen_rect = 49,
+    mesh_create = 50,
+    mesh_set_instances = 51,
+    mesh_update_instances = 52,
+    mesh_draw = 53,
+    mesh_free = 54,
+}
+
 static STONE_NATIVE_RENDERER_API_V1: StoneNativeRendererApiV1 = StoneNativeRendererApiV1 {
     abi_version: STONE_NATIVE_RENDERER_ABI_VERSION,
     struct_size: std::mem::size_of::<StoneNativeRendererApiV1>() as u32,
