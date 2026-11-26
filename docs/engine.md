@@ -540,10 +540,9 @@ Resource kinds are typed (`STONE_RESOURCE_TARGET = 1`, `SHADER = 2`,
   kind. Generations advance on target resize (including a failed resize that
   re-specified storage), active-rect change, attachment change, texture
   reload/update, and shader reload.
-- Context loss means teardown: `stone_teardown` destroys every target, shader,
-  texture and mesh, so every handle from before reports invalid. Stone does
-  not detect a GL context lost any other way (such as a driver reset); handles
-  stay valid then.
+- `stone_teardown` releases every target, shader, texture and mesh. Their
+  handles report invalid even after a new context is created. A driver reset
+  or other loss outside Stone's teardown has no handle-invalidation guarantee.
 - `stone_native_find_shader(name)` resolves the published program registered
   under `name`; `stone_native_find_texture(path)` resolves the newest live
   image loaded or reloaded from `path`; `stone_native_target_info`,

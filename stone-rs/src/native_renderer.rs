@@ -451,8 +451,9 @@ pub extern "C" fn stone_native_context_generation() -> u64 {
 }
 
 /// Typed handle generation for targets (1), shaders (2), textures (3) and meshes (4).
-/// Returns 0 when invalid, wrong kind, destroyed, or after context loss. Changes on
-/// target resize, active-rect change, attachment change, texture reload, or shader reload.
+/// Returns 0 for invalid, wrong-kind, or destroyed resources, including those
+/// released by Stone teardown. Changes on target resize, active-rect change,
+/// attachment change, texture reload, or shader reload.
 /// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_native_handle_generation(kind: c_int, handle: u64) -> u64 {

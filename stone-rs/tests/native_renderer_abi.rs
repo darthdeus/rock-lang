@@ -760,9 +760,6 @@ fn second_native_library_renders_multi_attachment_target_restores_state_and_inva
     );
     let probe_fn: ProbeFn = unsafe { std::mem::transmute(sym) };
 
-    let mut target_after_teardown = 0u64;
-    let mut shader_after_teardown = 0u64;
-
     with_host(|gl| unsafe {
         stage_scopes_unwind_reject_stale_tokens_and_clear_at_frame_start(gl);
         only_published_shaders_are_findable_and_a_failed_reload_keeps_the_live_one();
@@ -1057,28 +1054,48 @@ fn second_native_library_renders_multi_attachment_target_restores_state_and_inva
         assert!(!stone_native_handle_valid(STONE_RESOURCE_TARGET, att_id));
         assert!(!stone_native_handle_valid(STONE_RESOURCE_TARGET, att_aux));
 
-        // Keep host_canvas and reloaded_shader live across teardown to verify context-loss invalidation.
-        let _ = stone_get_white_image();
-        target_after_teardown = host_canvas;
-        shader_after_teardown = reloaded_shader;
         stone_destroy_shader(blit);
+        teardown_invalidates_handles_in_the_next_context(host_canvas, reloaded_shader);
     });
 
-    // After with_host teardown, context generation is 0 and handles are invalid.
-    unsafe {
-        assert_eq!(stone_native_context_generation(), 0);
-        assert!(!stone_native_handle_valid(
-            STONE_RESOURCE_TARGET,
-            target_after_teardown
-        ));
-        assert!(!stone_native_handle_valid(
-            STONE_RESOURCE_SHADER,
-            shader_after_teardown
-        ));
-        assert_eq!(
-            stone_native_handle_generation(STONE_RESOURCE_TARGET, target_after_teardown),
-            0
-        );
-        libc::dlclose(lib);
+    unsafe { libc::dlclose(lib) };
+}
+
+unsafe fn teardown_invalidates_handles_in_the_next_context(target: u64, shader: u64) {
+    let make_mesh = || {
+        let verts = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        stone_mesh_create(1, verts.as_ptr(), 3, 2, &2, 1)
+    };
+    let previous_context = stone_native_context_generation();
+    assert_ne!(previous_context, 0);
+    let previous_resources = [
+        (STONE_RESOURCE_TARGET, target),
+        (STONE_RESOURCE_SHADER, shader),
+        (STONE_RESOURCE_TEXTURE, stone_get_white_image()),
+        (STONE_RESOURCE_MESH, make_mesh()),
+    ];
+    for (kind, handle) in previous_resources {
+        assert!(stone_native_handle_valid(kind, handle));
+    }
+    assert!(stone_rs::stone_teardown());
+    assert_eq!(stone_native_context_generation(), 0);
+
+    // The shared test host deliberately refuses to reopen after teardown.
+    assert!(stone_rs::stone_init());
+    assert!(
+        !stone_rs::stone_create_window_ex(c"Stone".as_ptr(), 0, 0, 320, 240, 0, false, 0).is_null()
+    );
+    assert!(stone_native_context_generation() > previous_context);
+    let src = CString::new(BLIT_SHADER).unwrap();
+    let new_resources = [
+        stone_create_canvas(8, 8, STONE_CANVAS_RGBA8, false),
+        stone_create_shader_from_combined(src.as_ptr()),
+        stone_get_white_image(),
+        make_mesh(),
+    ];
+    for ((kind, stale), live) in previous_resources.into_iter().zip(new_resources) {
+        assert!(stone_native_handle_valid(kind, live));
+        assert!(!stone_native_handle_valid(kind, stale));
+        assert_eq!(stone_native_handle_generation(kind, stale), 0);
     }
 }
