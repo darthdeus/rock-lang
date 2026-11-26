@@ -9,12 +9,13 @@ pub value ResidencyRequest {
 }
 
 struct ResidencyCached {
-    previous: string?, next: string?, bytes: int, touch: int,
+    previous: string? = null, next: string? = null, bytes: int = 0, touch: int = 0,
 }
 struct ResidencyCache {
     entries: Map<string, ResidencyCached>,
     touches: Map<string, int>,
     first: string? = null, last: string? = null, bytes: int = 0, touch: int = 0,
+    spare: ResidencyCached? = null,
 }
 fn residency_cache_new() -> ResidencyCache {
     return ResidencyCache { entries: map_new(), touches: map_new() }
@@ -53,8 +54,8 @@ nobox value ResidencyCounters {
 global RESIDENCY_FRAME_COUNTERS: ResidencyCounters = ResidencyCounters {}
 global RESIDENCY_PROFILE_COUNTERS: ResidencyCounters = ResidencyCounters {}
 
-fn residency_cache_remove(identity: string) {
-    let entry = RESIDENCY_CACHE.entries.remove(identity) ?? return
+fn residency_cache_remove(identity: string) -> ResidencyCached? {
+    let entry = RESIDENCY_CACHE.entries.remove(identity) ?? return null
     if let previous = entry.previous {
         RESIDENCY_CACHE.entries[previous].next = entry.next
     } else { RESIDENCY_CACHE.first = entry.next }
@@ -62,10 +63,15 @@ fn residency_cache_remove(identity: string) {
         RESIDENCY_CACHE.entries[next].previous = entry.previous
     } else { RESIDENCY_CACHE.last = entry.previous }
     RESIDENCY_CACHE.bytes -= entry.bytes
+    return entry
 }
 
 fn residency_touch(identity: string) {
-    residency_cache_remove(identity)
+    if let entry = residency_cache_remove(identity) {
+        entry.previous = null
+        entry.next = null
+        RESIDENCY_CACHE.spare = entry
+    }
     RESIDENCY_CACHE.touch += 1
     RESIDENCY_CACHE.touches.insert(identity, RESIDENCY_CACHE.touch)
 }
@@ -74,8 +80,13 @@ fn residency_touch(identity: string) {
     if (IMAGE_ASSET_REFS.get(identity) ?? 0) > 0 { return }
     let image = IMAGE_CACHE.get(identity) ?? return
     residency_touch(identity)
-    let entry = ResidencyCached { previous: RESIDENCY_CACHE.last, next: null,
-        bytes: residency_live_bytes(image), touch: RESIDENCY_CACHE.touch }
+    // A cached prefetch touches and then relinks its entry. Keep one detached
+    // entry so this refresh needs no new record.
+    let entry = RESIDENCY_CACHE.spare ?? ResidencyCached {}
+    RESIDENCY_CACHE.spare = null
+    entry.previous = RESIDENCY_CACHE.last
+    entry.bytes = residency_live_bytes(image)
+    entry.touch = RESIDENCY_CACHE.touch
     if let last = RESIDENCY_CACHE.last { RESIDENCY_CACHE.entries[last].next = identity }
     else { RESIDENCY_CACHE.first = identity }
     RESIDENCY_CACHE.last = identity
@@ -180,7 +191,7 @@ pub fn residency_evict_unused(path: string, format: ImageAssetFormat = ImageAsse
 }
 
 fn residency_evict_cached(key: string, entry: ResidencyCached) -> bool {
-    residency_cache_remove(key)
+    let _ = residency_cache_remove(key)
     let image = IMAGE_CACHE.get(key) ?? return false
     let _ = RESIDENCY_CACHE.touches.remove(key)
     image_asset_evict(key, image.0)
