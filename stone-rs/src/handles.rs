@@ -1,6 +1,6 @@
 //! Each class counts from 1; 0 is never minted (callers use 0 as "no handle").
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// One variant per `native_ledger::CLASSES` entry, in order; the discriminant is the index.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -57,6 +57,18 @@ pub(crate) fn bump_context_generation() -> u64 {
 
 pub(crate) fn context_generation() -> u64 {
     CONTEXT_GENERATION.load(Ordering::SeqCst)
+}
+
+// Some thread owns a live GL context; a thread without one is then off the
+// render thread rather than early or late.
+static CONTEXT_LIVE: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn set_context_live(live: bool) {
+    CONTEXT_LIVE.store(live, Ordering::Relaxed);
+}
+
+pub(crate) fn context_live() -> bool {
+    CONTEXT_LIVE.load(Ordering::Relaxed)
 }
 
 pub(crate) fn mint(class: Class) -> u64 {
