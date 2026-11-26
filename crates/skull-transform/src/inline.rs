@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use bone_core::prelude::{BoundTree, CompilerError};
 use bone_core::workspace::Workspace;
-use comfy_la_arena::{ArenaMap, Idx};
+use comfy_la_arena::{ArenaMap, Idx, IdxRange};
 use skull_mir::concrete::ConcretePlans;
 use skull_mir::instance::Instance;
 use skull_mir::lower::{BackendFnAbiPlanHandle, ScalarCtx};
@@ -198,144 +198,43 @@ pub struct InlineCache {
 
 #[derive(Clone, Default)]
 struct InlineScratch {
-    inst_map: HashMap<Idx<Inst>, Idx<Inst>>,
+    bound_inst_map: HashMap<Idx<Inst>, Idx<Inst>>,
     cell_map: ArenaMap<Idx<Cell>, Idx<Cell>>,
     block_map: ArenaMap<Idx<Block>, Idx<Block>>,
     overrides: HashMap<Idx<Cell>, Idx<Cell>>,
     coalesced: Vec<bool>,
-    inst_ids: Vec<Idx<Inst>>,
+    inst_ids: IdxRange<Inst>,
     added_blocks: Vec<Idx<Block>>,
     replacement: Vec<Idx<Inst>>,
+    predecessors: Option<Predecessors>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum UseSite {
-    Inst(Idx<Inst>),
-    Term(Idx<Block>),
-}
+type Predecessors = Vec<SmallVec<[Idx<Block>; 2]>>;
 
-/// Index uses so a splice can bind its result without scanning the caller.
+// Resolve operands as sites are visited, then fix up surviving users once.
 #[derive(Default)]
-struct UseIndex {
-    users: Vec<SmallVec<[UseSite; 2]>>,
+struct ResultAliases {
+    values: ArenaMap<Idx<Inst>, Idx<Inst>>,
 }
 
-#[cfg(test)]
-thread_local! {
-    /// The last inlined caller's maintained index, diffed against a fresh
-    /// build: `(missing, stale)` value-use pairs, as debug strings.
-    static USE_INDEX_DRIFT: std::cell::RefCell<(Vec<String>, Vec<String>)> =
-        Default::default();
-}
-
-impl UseIndex {
-    #[cfg(test)]
-    fn record_drift(&self, func: &MirFunc) {
-        let pairs = |index: &UseIndex| -> HashSet<(Idx<Inst>, UseSite)> {
-            index
-                .users
-                .iter()
-                .enumerate()
-                .flat_map(|(value, sites)| {
-                    let value =
-                        Idx::<Inst>::from_raw(comfy_la_arena::RawIdx::from_u32(value as u32));
-                    sites.iter().map(move |site| (value, *site))
-                })
-                .collect()
-        };
-        let describe = |(value, site): &(Idx<Inst>, UseSite)| match site {
-            UseSite::Inst(iid) => format!("{value:?} used by {iid:?} {:?}", func.insts[*iid]),
-            UseSite::Term(bid) => format!("{value:?} used by term of {bid:?}"),
-        };
-        let fresh = pairs(&UseIndex::build(func));
-        let kept = pairs(self);
-        let mut missing: Vec<String> = fresh.difference(&kept).map(describe).collect();
-        let mut stale: Vec<String> = kept.difference(&fresh).map(describe).collect();
-        missing.sort();
-        stale.sort();
-        USE_INDEX_DRIFT.with(|drift| *drift.borrow_mut() = (missing, stale));
-    }
-
-    fn build(func: &MirFunc) -> Self {
-        let mut index = Self::default();
-        for (bid, block) in func.blocks.iter() {
-            for &iid in &block.insts {
-                index.add_inst(func, iid);
-            }
-            index.add_term(func, bid);
+impl ResultAliases {
+    fn resolve(&self, mut value: Idx<Inst>) -> Idx<Inst> {
+        while let Some(&other) = self.values.get(value) {
+            value = other;
         }
-        index
+        value
     }
 
-    fn slot(&mut self, value: Idx<Inst>) -> &mut SmallVec<[UseSite; 2]> {
-        let at = crate::visit::raw(value);
-        if self.users.len() <= at {
-            self.users.resize_with(at + 1, SmallVec::new);
-        }
-        &mut self.users[at]
-    }
-
-    fn add_use(&mut self, value: Idx<Inst>, site: UseSite) {
-        let users = self.slot(value);
-        if !users.contains(&site) {
-            users.push(site);
-        }
-    }
-
-    fn remove_use(&mut self, value: Idx<Inst>, site: UseSite) {
-        if let Some(users) = self.users.get_mut(crate::visit::raw(value)) {
-            users.retain(|user| *user != site);
-        }
-    }
-
-    fn add_inst(&mut self, func: &MirFunc, iid: Idx<Inst>) {
-        func.insts[iid].uses_each(&mut |value| {
-            self.add_use(value, UseSite::Inst(iid));
-        });
-    }
-
-    fn add_insts_from(&mut self, func: &MirFunc, mark: usize) {
-        for (iid, _) in func.insts.iter().skip(mark) {
-            self.add_inst(func, iid);
-        }
-    }
-
-    fn remove_inst(&mut self, func: &MirFunc, iid: Idx<Inst>) {
-        func.insts[iid].uses_each(&mut |value| {
-            self.remove_use(value, UseSite::Inst(iid));
-        });
-    }
-
-    fn add_term(&mut self, func: &MirFunc, bid: Idx<Block>) {
-        func.blocks[bid].term.uses_each(&mut |value| {
-            self.add_use(value, UseSite::Term(bid));
-        });
-    }
-
-    fn remove_term(&mut self, func: &MirFunc, bid: Idx<Block>) {
-        func.blocks[bid].term.uses_each(&mut |value| {
-            self.remove_use(value, UseSite::Term(bid));
-        });
-    }
-
-    fn replace(&mut self, func: &mut MirFunc, from: Idx<Inst>, to: Idx<Inst>) {
-        if from == to {
+    fn finish(self, func: &mut MirFunc) {
+        if self.values.values().next().is_none() {
             return;
         }
-        let remap = |value| if value == from { to } else { value };
-        for site in std::mem::take(self.slot(from)) {
-            match site {
-                UseSite::Inst(iid) => {
-                    self.remove_inst(func, iid);
-                    func.insts[iid].remap_uses(&remap);
-                    self.add_inst(func, iid);
-                }
-                UseSite::Term(bid) => {
-                    self.remove_term(func, bid);
-                    func.blocks[bid].term.remap_uses(&remap);
-                    self.add_term(func, bid);
-                }
+        let remap = |value| self.resolve(value);
+        for (_, block) in func.blocks.iter_mut() {
+            for &id in &block.insts {
+                func.insts[id].remap_uses(&remap);
             }
+            block.term.remap_uses(&remap);
         }
     }
 }
@@ -512,10 +411,10 @@ fn live_closure_at(header: &MirFunc, func: &MirFunc) -> LiveClosure {
 }
 
 macro_rules! copy_inst_tables {
-    ($target:expr, $source:expr, $inst_map:expr, $($field:ident),+ $(,)?) => {
+    ($target:expr, $source:expr, $mapped:expr, $($field:ident),+ $(,)?) => {
         $(
             for (old_id, value) in &$source.$field {
-                if let Some(&new_id) = $inst_map.get(old_id) {
+                if let Some(new_id) = $mapped(*old_id) {
                     $target.$field.insert(new_id, value.clone());
                 }
             }
@@ -526,12 +425,12 @@ macro_rules! copy_inst_tables {
 fn copy_inst_metadata(
     target: &mut MirFunc,
     source: &MirFunc,
-    inst_map: &HashMap<Idx<Inst>, Idx<Inst>>,
+    mapped: impl Fn(Idx<Inst>) -> Option<Idx<Inst>> + Copy,
 ) {
     copy_inst_tables!(
         target,
         source,
-        inst_map,
+        mapped,
         spec_bindings,
         callee_instances,
         call_abi_plans,
@@ -545,10 +444,10 @@ fn copy_inst_metadata(
         source
             .binding_initializers
             .iter()
-            .filter_map(|id| inst_map.get(id)),
+            .filter_map(|id| mapped(*id)),
     );
     for (old_id, span) in source.inst_spans.iter() {
-        if let Some(&new_id) = inst_map.get(&old_id) {
+        if let Some(new_id) = mapped(old_id) {
             target.inst_spans.insert(new_id, *span);
         }
     }
@@ -557,15 +456,15 @@ fn copy_inst_metadata(
 fn copy_projection_metadata(
     target: &mut MirFunc,
     source: &MirFunc,
-    inst_map: &HashMap<Idx<Inst>, Idx<Inst>>,
+    mapped: impl Fn(Idx<Inst>) -> Option<Idx<Inst>> + Copy,
 ) {
     target.synthetic_projections.extend(
         source
             .synthetic_projections
             .iter()
-            .filter_map(|id| inst_map.get(id)),
+            .filter_map(|id| mapped(*id)),
     );
-    copy_inst_tables!(target, source, inst_map, flat_box_widths);
+    copy_inst_tables!(target, source, mapped, flat_box_widths);
 }
 
 fn compact_live_template(
@@ -614,11 +513,13 @@ fn compact_region(
     for &id in &live_insts {
         inst_map.insert(id, insts.alloc(arena.insts[id].clone()));
     }
+    let mapped = |id| inst_map.get(&id).copied();
+    let remap = |id| inst_map[&id];
     for (_, inst) in insts.iter_mut() {
-        remap_clone(inst, &inst_map, &cell_map, &block_map);
+        remap_clone(inst, &remap, &cell_map, &block_map);
     }
     for (old_id, &new_id) in block_map.iter() {
-        blocks[new_id] = remap_block(&arena.blocks[old_id], &inst_map, &block_map);
+        blocks[new_id] = remap_block(&arena.blocks[old_id], &remap, &block_map);
     }
 
     let mut template = MirFunc::new(header.name);
@@ -690,9 +591,9 @@ fn compact_region(
         .collect();
     template.hoisted_fn_globals = arena.hoisted_fn_globals.clone();
 
-    copy_inst_metadata(&mut template, arena, &inst_map);
-    copy_projection_metadata(&mut template, arena, &inst_map);
-    copy_inst_tables!(template, arena, inst_map, bound_trees, resolved_bound_trees);
+    copy_inst_metadata(&mut template, arena, mapped);
+    copy_projection_metadata(&mut template, arena, mapped);
+    copy_inst_tables!(template, arena, mapped, bound_trees, resolved_bound_trees);
     if split_for_emission {
         template.materialized_default_guards.extend(
             arena
@@ -721,7 +622,7 @@ fn compact_region(
     import_call_sites(
         &mut template,
         arena,
-        &inst_map,
+        mapped,
         Some("call-site owner must exist in the candidate template"),
     );
 
@@ -801,17 +702,13 @@ fn classify(
     let Some(plan) = concrete_plans.get(inst) else {
         return Ok(Classified::default());
     };
-    let lowered = skull_mir::lower::validate_concrete_bound_plan(f, plan).and_then(|()| {
-        Ok((
-            skull_mir::lower::owner_abi_plan(ws, scx, concrete_plans, inst)?,
-            skull_mir::lower::lower_instance_with_plans(ws, scx, plan, concrete_plans)?,
-        ))
-    });
+    let lowered = skull_mir::lower::lower_instance_with_plans(ws, scx, plan, concrete_plans);
     // The callee's own emission reports why an unannotated body fails to lower.
-    let (abi, mf) = match lowered {
+    let mf = match lowered {
         Err(_) if small || callback => return Ok(Classified::default()),
         lowered => lowered?,
     };
+    let abi = Arc::clone(mf.abi_plan.as_ref().expect("lowered instance ABI"));
     let (template, lowered) = if retain_lowered {
         (mf.clone(), Some(Box::new(mf)))
     } else {
@@ -988,12 +885,12 @@ fn forward_param_reads(
     let mut forwarded: SmallVec<[(Idx<Inst>, Idx<Inst>); 8]> = SmallVec::new();
     for &(p, read) in &cand.forwardable_reads {
         if !scratch.coalesced[p] && forwards_arg(func, args[p]) {
-            forwarded.push((scratch.inst_map[&read], args[p]));
+            forwarded.push((splice_inst(scratch.inst_ids, read), args[p]));
         }
     }
     if !forwarded.is_empty() {
         let to = |v: Idx<Inst>| forwarded_to(&forwarded, v);
-        for &iid in &scratch.inst_ids {
+        for iid in scratch.inst_ids {
             func.insts[iid].remap_uses(&to);
         }
         for source_block in &cand.reachable {
@@ -1077,8 +974,8 @@ type SpliceChain = SmallVec<[FuncRef; 4]>;
 struct Site {
     pos: (Idx<Block>, usize),
     call_id: Idx<Inst>,
-    args: Vec<Idx<Inst>>,
-    dests: Option<Vec<Idx<Cell>>>,
+    args: SmallVec<[Idx<Inst>; 4]>,
+    dests: Option<SmallVec<[Idx<Cell>; 4]>>,
     inst: Instance,
     callbacks: SmallVec<[Idx<Inst>; 2]>,
 }
@@ -1266,6 +1163,7 @@ fn find_site(
     splice_chains: &HashMap<Idx<Inst>, SpliceChain>,
     concrete_plans: &ConcretePlans,
     callbacks: &mut CallbackProof,
+    aliases: &ResultAliases,
 ) -> Result<Option<Site>, CompilerError> {
     let specialize_callbacks = !skull_mir::pass_disabled("lambda");
     let (first_block, first_inst) = resume.map_or((0, 0), |(block, index)| (raw(block), index));
@@ -1297,6 +1195,7 @@ fn find_site(
             let mut proven = SmallVec::new();
             if specialize_callbacks {
                 for (param, &arg) in args.iter().enumerate() {
+                    let arg = aliases.resolve(arg);
                     if matches!(func.insts[arg], Inst::Lambda { .. })
                         && (noalloc_caller || callbacks.captures(func, arg))
                         && callbacks.proves(
@@ -1326,7 +1225,7 @@ fn find_site(
                 continue;
             };
             if &cand.subject != inst
-                || cand.abi.as_ref() != abi.as_ref()
+                || cand.abi != *abi
                 || cand.func.params.len() != args.len()
                 || dests.map_or(cand.ret_arity > 1, |dests| cand.ret_arity != dests.len())
             {
@@ -1335,8 +1234,8 @@ fn find_site(
             return Ok(Some(Site {
                 pos: (bid, idx),
                 call_id: iid,
-                args: args.clone(),
-                dests: dests.cloned(),
+                args: args.iter().map(|&arg| aliases.resolve(arg)).collect(),
+                dests: dests.map(|dests| SmallVec::from_slice(dests)),
                 inst: inst.clone(),
                 callbacks: proven,
             }));
@@ -1345,7 +1244,11 @@ fn find_site(
     Ok(None)
 }
 
-// Allocate every clone before remapping its operands.
+fn splice_inst(mut insts: IdxRange<Inst>, id: Idx<Inst>) -> Idx<Inst> {
+    insts.nth(raw(id)).expect("inline instruction")
+}
+
+// Cells and blocks are mapped first. Instruction IDs form an appended range.
 fn clone_body(caller: &mut MirFunc, callee: &MirFunc, scratch: &mut InlineScratch, kind: Kind) {
     caller.ensure_emit_ids();
     let (inst_base, cell_base, block_base) = caller.emit_nexts().unwrap();
@@ -1380,29 +1283,18 @@ fn clone_body(caller: &mut MirFunc, callee: &MirFunc, scratch: &mut InlineScratc
             scratch.block_map.insert(bid, nbid);
         }
     }
-    scratch.inst_map.clear();
-    scratch.inst_map.reserve(callee.insts.len());
-    scratch.inst_ids.clear();
-    scratch.inst_ids.reserve(callee.insts.len());
+    let first_inst = caller.insts.len();
+    let remap = |id| Idx::from_raw(((first_inst + raw(id)) as u32).into());
     for (iid, inst) in callee.insts.iter() {
-        let nid =
-            caller.alloc_inst_with_emit_id(inst.clone(), inst_base + callee.emit_inst_id(iid));
-        scratch.inst_map.insert(iid, nid);
-        scratch.inst_ids.push(nid);
+        let mut clone = inst.clone();
+        remap_clone(&mut clone, &remap, &scratch.cell_map, &scratch.block_map);
+        caller.alloc_inst_with_emit_id(clone, inst_base + callee.emit_inst_id(iid));
     }
-    copy_projection_metadata(caller, callee, &scratch.inst_map);
-    for &nid in &scratch.inst_ids {
-        remap_clone(
-            &mut caller.insts[nid],
-            &scratch.inst_map,
-            &scratch.cell_map,
-            &scratch.block_map,
-        );
-    }
+    scratch.inst_ids = caller.insts.allocated_since(first_inst);
+    copy_projection_metadata(caller, callee, |id| Some(remap(id)));
     if kind == Kind::General {
         for (bid, block) in callee.blocks.iter() {
-            caller.blocks[scratch.block_map[bid]] =
-                remap_block(block, &scratch.inst_map, &scratch.block_map);
+            caller.blocks[scratch.block_map[bid]] = remap_block(block, &remap, &scratch.block_map);
         }
         caller.for_iter_headers.extend(
             callee
@@ -1443,11 +1335,11 @@ fn import_cleanup_load_cells(
 
 fn remap_clone(
     inst: &mut Inst,
-    im: &HashMap<Idx<Inst>, Idx<Inst>>,
+    remap: &impl Fn(Idx<Inst>) -> Idx<Inst>,
     cm: &ArenaMap<Idx<Cell>, Idx<Cell>>,
     bm: &ArenaMap<Idx<Block>, Idx<Block>>,
 ) {
-    inst.remap_uses(&|x| im[&x]);
+    inst.remap_uses(remap);
     match inst {
         Inst::Load(c) => *c = cm[*c],
         Inst::Store { cell, .. } => *cell = cm[*cell],
@@ -1476,14 +1368,14 @@ fn remap_clone(
 
 fn remap_block(
     block: &Block,
-    im: &HashMap<Idx<Inst>, Idx<Inst>>,
+    remap: &impl Fn(Idx<Inst>) -> Idx<Inst>,
     bm: &ArenaMap<Idx<Block>, Idx<Block>>,
 ) -> Block {
     let mut term = block.term.clone();
-    term.remap_uses(&|x| im[&x]);
+    term.remap_uses(remap);
     term.remap_targets(&|x| bm[x]);
     Block {
-        insts: block.insts.iter().map(|id| im[id]).collect(),
+        insts: block.insts.iter().copied().map(remap).collect(),
         term,
     }
 }
@@ -1519,7 +1411,12 @@ pub(crate) fn clone_lambda_region(
         cell_map.insert(cell, mapped);
     }
     for (&old, &new) in &inst_map {
-        remap_clone(&mut mf.insts[new], &inst_map, &cell_map, &block_map);
+        remap_clone(
+            &mut mf.insts[new],
+            &|id| inst_map[&id],
+            &cell_map,
+            &block_map,
+        );
         macro_rules! copy_maps {
             ($($map:ident),+ $(,)?) => {$(
                 if let Some(value) = mf.$map.get(&old).cloned() {
@@ -1558,7 +1455,7 @@ pub(crate) fn clone_lambda_region(
         );
     }
     for &b in blocks {
-        mf.blocks[block_map[b]] = remap_block(&mf.blocks[b], &inst_map, &block_map);
+        mf.blocks[block_map[b]] = remap_block(&mf.blocks[b], &|id| inst_map[&id], &block_map);
     }
     let headers = mf
         .for_iter_headers
@@ -1585,7 +1482,6 @@ fn coalesce_overrides(
     scratch.overrides.clear();
     scratch.coalesced.clear();
     scratch.coalesced.resize(callee.params.len(), false);
-    let mut preds = None;
     for (i, &load) in args.iter().enumerate().take(callee.params.len()) {
         if !cand.coalescable_params.get(i).copied().unwrap_or(false) {
             continue;
@@ -1594,7 +1490,7 @@ fn coalesce_overrides(
         let Inst::Load(c) = caller.insts[load] else {
             continue;
         };
-        if snapshot_holds(caller, pinned, &mut preds, c, load, pos) {
+        if snapshot_holds(caller, pinned, &mut scratch.predecessors, c, load, pos) {
             scratch.overrides.insert(callee.params[i], c);
             scratch.coalesced[i] = true;
         }
@@ -1605,7 +1501,7 @@ fn coalesce_overrides(
 fn snapshot_holds(
     caller: &MirFunc,
     pinned: &HashSet<Idx<Cell>>,
-    preds: &mut Option<HashMap<Idx<Block>, Vec<Idx<Block>>>>,
+    preds: &mut Option<Predecessors>,
     c: Idx<Cell>,
     load: Idx<Inst>,
     (bid, idx): (Idx<Block>, usize),
@@ -1631,14 +1527,14 @@ fn snapshot_holds(
     }
     // The load dominates the call, so all intervening paths must keep the value.
     let preds = preds.get_or_insert_with(|| {
-        let mut map: HashMap<Idx<Block>, Vec<Idx<Block>>> = HashMap::default();
+        let mut map = vec![SmallVec::new(); caller.blocks.len()];
         for (from, block) in caller.blocks.iter() {
-            skull_mir::cfg::successors(&block.term, |to| map.entry(to).or_default().push(from));
+            skull_mir::cfg::successors(&block.term, |to| map[raw(to)].push(from));
         }
         map
     });
     let mut seen: HashSet<Idx<Block>> = HashSet::default();
-    let mut stack: Vec<Idx<Block>> = preds.get(&bid).cloned().unwrap_or_default();
+    let mut stack = preds[raw(bid)].clone();
     let mut found = false;
     while let Some(b) = stack.pop() {
         if !seen.insert(b) {
@@ -1655,7 +1551,7 @@ fn snapshot_holds(
         if !clear(insts) {
             return false;
         }
-        stack.extend(preds.get(&b).into_iter().flatten().copied());
+        stack.extend_from_slice(&preds[raw(b)]);
     }
     found
 }
@@ -1828,7 +1724,7 @@ fn rename_nested_tree(nested: &mut [MirFunc], names: &HashMap<Ustr, Ustr>) {
 fn import_nested_fns(
     func: &mut MirFunc,
     callee: &MirFunc,
-    inst_map: &HashMap<Idx<Inst>, Idx<Inst>>,
+    insts: IdxRange<Inst>,
 ) -> HashMap<Ustr, Ustr> {
     if callee.nested_fns.is_empty() {
         return HashMap::default();
@@ -1855,8 +1751,8 @@ fn import_nested_fns(
             }
         }
     }
-    for new_id in inst_map.values() {
-        remap_nested_global(&mut func.insts[*new_id], &names);
+    for new_id in insts {
+        remap_nested_global(&mut func.insts[new_id], &names);
     }
     let mut nested = callee.nested_fns.clone();
     rename_nested_tree(&mut nested, &names);
@@ -1867,14 +1763,14 @@ fn import_nested_fns(
 fn import_splice_metadata(
     func: &mut MirFunc,
     callee: &MirFunc,
-    inst_map: &HashMap<Idx<Inst>, Idx<Inst>>,
+    mapped: impl Fn(Idx<Inst>) -> Option<Idx<Inst>> + Copy,
     nested_names: &HashMap<Ustr, Ustr>,
 ) {
-    copy_inst_metadata(func, callee, inst_map);
+    copy_inst_metadata(func, callee, mapped);
     copy_inst_tables!(
         func,
         callee,
-        inst_map,
+        mapped,
         resolved_bound_trees,
         closure_env_plans
     );
@@ -1888,19 +1784,19 @@ fn import_splice_metadata(
             func.hoisted_fn_globals.push(n);
         }
     }
-    import_call_sites(func, callee, inst_map, None);
+    import_call_sites(func, callee, mapped, None);
 }
 
 fn import_call_sites(
     target: &mut MirFunc,
     source: &MirFunc,
-    inst_map: &HashMap<Idx<Inst>, Idx<Inst>>,
+    mapped: impl Fn(Idx<Inst>) -> Option<Idx<Inst>> + Copy,
     missing_owner: Option<&str>,
 ) {
     // The site keeps its source expression arena when its owner changes tables.
     let mut owner_map: HashMap<u32, skull_mir::site::OwnerRef> = HashMap::default();
     for (old_id, cs) in &source.call_sites {
-        let Some(&new_id) = inst_map.get(old_id) else {
+        let Some(new_id) = mapped(*old_id) else {
             continue;
         };
         let owner = match owner_map.get(&cs.owner.0) {
@@ -1936,22 +1832,34 @@ fn splice(
     concrete_plans: &ConcretePlans,
     pinned: &HashSet<Idx<Cell>>,
     scratch: &mut InlineScratch,
-    uses: &mut UseIndex,
+    aliases: &mut ResultAliases,
 ) -> Result<(), CompilerError> {
     scratch.added_blocks.clear();
     let callee = &cand.func;
     let (bid, idx) = site.pos;
     let args = &site.args;
+    match &mut func.insts[site.call_id] {
+        Inst::Call { args: original, .. } | Inst::CallMulti { args: original, .. } => {
+            original.copy_from_slice(args);
+        }
+        _ => unreachable!("inline site must be a concrete call"),
+    }
     let site_tree = func.bound_trees.remove(&site.call_id);
     let site_resolved_tree = func.resolved_bound_trees.remove(&site.call_id);
     coalesce_overrides(func, cand, args, (bid, idx), pinned, scratch);
     clone_body(func, callee, scratch, cand.kind);
-    let repack_mark = func.insts.len();
+    // Bound repacking allocates instructions in the original map's order.
+    let bound_inst_map = &mut scratch.bound_inst_map;
+    bound_inst_map.clear();
+    bound_inst_map.reserve(callee.insts.len());
     if cand.resolves_bounds || site_tree.as_ref().is_some_and(|tree| !tree.is_empty()) {
+        for ((old, _), new) in callee.insts.iter().zip(scratch.inst_ids) {
+            bound_inst_map.insert(old, new);
+        }
         resolve_cloned_bound_calls(
             func,
             callee,
-            &scratch.inst_map,
+            bound_inst_map,
             site_tree.as_ref(),
             site_resolved_tree.as_ref(),
             ws,
@@ -1959,8 +1867,9 @@ fn splice(
             concrete_plans,
         )?;
     }
-    let names = import_nested_fns(func, callee, &scratch.inst_map);
-    import_splice_metadata(func, callee, &scratch.inst_map, &names);
+    let names = import_nested_fns(func, callee, scratch.inst_ids);
+    let mapped = |id| Some(splice_inst(scratch.inst_ids, id));
+    import_splice_metadata(func, callee, mapped, &names);
     let forwarded = forward_param_reads(func, cand, args, scratch);
     if cand.kind == Kind::General && !forwarded.is_empty() {
         for source in &cand.reachable {
@@ -1969,17 +1878,9 @@ fn splice(
                 .retain(|inst| !forwarded.iter().any(|(read, _)| read == inst));
         }
     }
-    for &iid in &scratch.inst_ids {
-        uses.add_inst(func, iid);
-    }
-    uses.add_insts_from(func, repack_mark);
-    for &bid in scratch.block_map.values() {
-        uses.add_term(func, bid);
-    }
-    uses.remove_inst(func, site.call_id);
     match cand.kind {
-        Kind::Straight => splice_straight(func, &site, cand, scratch, uses, &forwarded),
-        Kind::General => splice_general(func, &site, cand, scratch, uses),
+        Kind::Straight => splice_straight(func, &site, cand, scratch, aliases, &forwarded),
+        Kind::General => splice_general(func, &site, cand, scratch),
     }
     Ok(())
 }
@@ -1989,7 +1890,6 @@ fn bind_params(
     site: &Site,
     cand: &CalleeBody,
     scratch: &InlineScratch,
-    uses: &mut UseIndex,
     push: &mut impl FnMut(&mut MirFunc, Idx<Inst>),
 ) {
     let args = &site.args;
@@ -2002,7 +1902,6 @@ fn bind_params(
             value: arg,
         });
         if !copy_unread(cand, i) || !forwards_arg(func, arg) {
-            uses.add_inst(func, store);
             push(func, store);
         }
     }
@@ -2013,28 +1912,28 @@ fn splice_straight(
     site: &Site,
     cand: &CalleeBody,
     scratch: &mut InlineScratch,
-    uses: &mut UseIndex,
+    aliases: &mut ResultAliases,
     forwarded: &[(Idx<Inst>, Idx<Inst>)],
 ) {
     let callee = &cand.func;
     let (bid, idx) = site.pos;
     let block = &callee.blocks[callee.entry];
     let mut replacement = std::mem::take(&mut scratch.replacement);
-    bind_params(func, site, cand, scratch, uses, &mut |_, inst| {
+    bind_params(func, site, cand, scratch, &mut |_, inst| {
         replacement.push(inst);
     });
     replacement.extend(
         block
             .insts
             .iter()
-            .map(|inst| scratch.inst_map[inst])
+            .map(|&inst| splice_inst(scratch.inst_ids, inst))
             .filter(|inst| !forwarded.iter().any(|(read, _)| read == inst)),
     );
 
     let Term::Return(values) = &block.term else {
         unreachable!("straight candidate entry must end in Return");
     };
-    let mapped = |value: &Idx<Inst>| forwarded_to(forwarded, scratch.inst_map[value]);
+    let mapped = |value: &Idx<Inst>| forwarded_to(forwarded, splice_inst(scratch.inst_ids, *value));
     let mut result = None;
     if let Some(dests) = &site.dests {
         for (&cell, value) in dests.iter().zip(values) {
@@ -2042,7 +1941,6 @@ fn splice_straight(
                 cell,
                 value: mapped(value),
             });
-            uses.add_inst(func, st);
             replacement.push(st);
         }
     } else if let Some(value) = values.first() {
@@ -2056,31 +1954,24 @@ fn splice_straight(
         .insts
         .splice(idx..=idx, replacement.drain(..));
     scratch.replacement = replacement;
-    if let Some(to) = result {
-        uses.replace(func, site.call_id, to);
+    if let Some(to) = result.filter(|&to| to != site.call_id) {
+        aliases.values.insert(site.call_id, to);
     }
 }
 
-fn splice_general(
-    func: &mut MirFunc,
-    site: &Site,
-    cand: &CalleeBody,
-    scratch: &mut InlineScratch,
-    uses: &mut UseIndex,
-) {
+fn splice_general(func: &mut MirFunc, site: &Site, cand: &CalleeBody, scratch: &mut InlineScratch) {
     let (bid, idx) = site.pos;
     let callee = &cand.func;
     let entry_clone = scratch.block_map[callee.entry];
+    scratch.predecessors = None;
 
     let after = func.blocks[bid].insts.split_off(idx + 1);
     func.blocks[bid].insts.truncate(idx);
-    uses.remove_term(func, bid);
     let orig_term = std::mem::replace(&mut func.blocks[bid].term, Term::Goto(entry_clone));
 
     let cont = func.new_block();
     func.blocks[cont].insts = after;
     func.blocks[cont].term = orig_term;
-    uses.add_term(func, cont);
 
     let result_cell = match &site.dests {
         None => {
@@ -2093,7 +1984,7 @@ fn splice_general(
         Some(_) => None,
     };
 
-    bind_params(func, site, cand, scratch, uses, &mut |func, inst| {
+    bind_params(func, site, cand, scratch, &mut |func, inst| {
         func.blocks[bid].insts.push(inst);
     });
 
@@ -2104,7 +1995,6 @@ fn splice_general(
             Term::Return(vs) => vs.clone(),
             _ => continue,
         };
-        uses.remove_term(func, nb);
         match &site.dests {
             None => {
                 let rc = result_cell.unwrap();
@@ -2113,13 +2003,11 @@ fn splice_general(
                     None => {
                         let nil = func.alloc_inst(Inst::Const(Lit::Nil));
                         func.blocks[nb].insts.push(nil);
-                        uses.add_inst(func, nil);
                         nil
                     }
                 };
                 let st = func.alloc_inst(Inst::Store { cell: rc, value: v });
                 func.blocks[nb].insts.push(st);
-                uses.add_inst(func, st);
             }
             Some(dests) => {
                 for (dest, rv) in dests.iter().zip(vs.iter()) {
@@ -2128,12 +2016,10 @@ fn splice_general(
                         value: *rv,
                     });
                     func.blocks[nb].insts.push(st);
-                    uses.add_inst(func, st);
                 }
             }
         }
         func.blocks[nb].term = Term::Goto(cont);
-        uses.add_term(func, nb);
     }
     scratch
         .added_blocks
@@ -2167,7 +2053,9 @@ pub(crate) fn inline_functions_with_plans(
     }
     let mut pinned: HashSet<Idx<Cell>> = HashSet::default();
     pin_cells(func, &top, 0, &mut pinned);
-    let mut uses: Option<UseIndex> = None;
+    // The predecessor table stays valid across straight-line splices.
+    cache.scratch.predecessors = None;
+    let mut aliases = ResultAliases::default();
     let mut resume: Option<(Idx<Block>, usize)> = None;
     let mut splice_chains: HashMap<Idx<Inst>, SpliceChain> = HashMap::default();
     let mut budget = MAX_INLINES_PER_FN;
@@ -2189,6 +2077,7 @@ pub(crate) fn inline_functions_with_plans(
             &splice_chains,
             concrete_plans,
             &mut callbacks,
+            &aliases,
         )?
         else {
             break;
@@ -2197,7 +2086,6 @@ pub(crate) fn inline_functions_with_plans(
         let fref = site.inst.func;
         let mut chain = splice_chains.remove(&site.call_id).unwrap_or_default();
         chain.push(fref);
-        let uses = uses.get_or_insert_with(|| UseIndex::build(func));
         let cand = cache.cands[&site.inst]
             .as_deref()
             .or_else(|| {
@@ -2218,14 +2106,14 @@ pub(crate) fn inline_functions_with_plans(
             concrete_plans,
             &pinned,
             scratch,
-            uses,
+            &mut aliases,
         )?;
         top.resize(func.blocks.len(), false);
         for block in scratch.added_blocks.drain(..) {
             top[raw(block)] = true;
         }
         pin_cells(func, &top, blocks_before, &mut pinned);
-        for &inst in &scratch.inst_ids {
+        for inst in scratch.inst_ids {
             if matches!(func.insts[inst], Inst::Call { .. } | Inst::CallMulti { .. }) {
                 splice_chains.insert(inst, chain.clone());
             }
@@ -2244,10 +2132,7 @@ pub(crate) fn inline_functions_with_plans(
         let mut seen: HashSet<ustr::Ustr> = HashSet::default();
         func.statics.retain(|sc| seen.insert(sc.cell));
     }
-    #[cfg(test)]
-    if let Some(uses) = &uses {
-        uses.record_drift(func);
-    }
+    aliases.finish(func);
     outcome.dependencies.extend(callbacks.dependencies);
     outcome.splices = MAX_INLINES_PER_FN - budget;
     Ok(outcome)
@@ -2311,9 +2196,8 @@ mod tests {
     use super::*;
     use ustr::Ustr;
 
-    /// The splice's use index must include users added by bound repacking.
     #[test]
-    fn use_index_covers_bound_element_repack_after_splice() {
+    fn splice_rewires_arguments_and_preserves_bound_element_repack() {
         let src = r#"
 nobox value Pair { x: int, y: int }
 struct Counter { n: int }
@@ -2322,6 +2206,7 @@ fn next(c: Counter) -> (bool, int) {
     c.n = c.n + 1
     return (true, c.n)
 }
+@noalloc
 fn wide_next(c: Counter) -> (bool, Pair) {
     return (true, Pair { x: c.n, y: c.n })
 }
@@ -2330,7 +2215,9 @@ fn sum_all<I: Iterator<int>>(it: I) -> int {
     for x in it { s = s + 1 }
     return s
 }
-fn top() -> int { return sum_all(Counter { n: 0 }) }
+@inline
+fn counter() -> Counter { return Counter { n: 0 } }
+fn top() -> int { return sum_all(counter()) + counter().n }
 "#;
         let mut modules: Vec<_> = rock_stdlib::stdlib_files()
             .iter()
@@ -2357,7 +2244,7 @@ fn top() -> int { return sum_all(Counter { n: 0 }) }
                 .expect("fixture function")
                 .0,
         };
-        let (top, wide) = (find("top"), find("wide_next"));
+        let (top, wide, counter) = (find("top"), find("wide_next"), find("counter"));
         let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
         let graph = skull_graph::instance_graph::build_in(
             &ws,
@@ -2370,6 +2257,14 @@ fn top() -> int { return sum_all(Counter { n: 0 }) }
         let plan = plans.get(&Instance::base(top)).expect("top plan");
         let mut func =
             skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, plans).expect("lower top");
+        let counter_calls: Vec<_> = func
+            .insts
+            .iter()
+            .filter_map(|(id, inst)| {
+                matches!(inst, Inst::Call { func, .. } if *func == counter).then_some(id)
+            })
+            .collect();
+        assert_eq!(counter_calls.len(), 2);
         // Give the splice a witness with a wider result than the body planned for.
         let witness = func
             .resolved_bound_trees
@@ -2386,25 +2281,49 @@ fn top() -> int { return sum_all(Counter { n: 0 }) }
         inline_functions_with_plans(&ws, &scx, top, &mut func, &mut cache, plans)
             .expect("inline top");
 
-        let rebuilt = func.blocks.iter().any(|(_, block)| {
-            block.insts.iter().any(|iid| {
-                matches!(
-                    &func.insts[*iid],
-                    Inst::MakeValueStruct {
-                        form: ValueCtorForm::Leaves,
-                        ..
-                    }
-                )
+        let mut uses_counter_call = false;
+        for (_, block) in func.blocks.iter() {
+            let mut check = |value| uses_counter_call |= counter_calls.contains(&value);
+            for &iid in &block.insts {
+                assert!(!counter_calls.contains(&iid));
+                func.insts[iid].uses_each(&mut check);
+            }
+            block.term.uses_each(&mut check);
+        }
+        assert!(!uses_counter_call, "the removed call still has live users");
+
+        let repacked = func.blocks.iter().any(|(_, block)| {
+            let Some((call, dests)) =
+                block
+                    .insts
+                    .iter()
+                    .enumerate()
+                    .find_map(|(at, &id)| match &func.insts[id] {
+                        Inst::CallMulti { func, dests, .. } if *func == wide => Some((at, dests)),
+                        _ => None,
+                    })
+            else {
+                return false;
+            };
+            block.insts[call + 1..].iter().any(|&id| {
+                let Inst::MakeValueStruct {
+                    form: ValueCtorForm::Leaves,
+                    fields,
+                    ..
+                } = &func.insts[id]
+                else {
+                    return false;
+                };
+                fields.len() == dests.len() - 1
+                    && fields.iter().zip(&dests[1..]).all(|((_, value), dest)| {
+                        matches!(func.insts[*value], Inst::Load(cell) if cell == *dest)
+                            && block.insts[call + 1..].contains(value)
+                    })
             })
         });
         assert!(
-            rebuilt,
-            "the splice did not repack a splatted bound element"
-        );
-        let (missing, stale) = USE_INDEX_DRIFT.with(|drift| drift.borrow().clone());
-        assert!(
-            missing.is_empty() && stale.is_empty(),
-            "inliner UseIndex drifted from the caller body\nmissing: {missing:#?}\nstale: {stale:#?}"
+            repacked,
+            "the repack must load each leaf returned by the bound call in order"
         );
     }
 }
