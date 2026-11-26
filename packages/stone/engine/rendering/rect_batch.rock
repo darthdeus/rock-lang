@@ -27,15 +27,15 @@ inline(lua) fn __copy_vertex_buffer_prefix(
     return target
 """
 
-// Vertex is binary-compatible with the float pointer expected by the extern.
+// The buffer owns both its storage and the float view refreshed on reseat.
 @nomangle inline(lua) fn __stone_draw_mesh_vertex_raw(
-    p: Ptr<Vertex>, vertex_count: int, stride: int,
+    buf: NativeBuffer<Vertex>, vertex_count: int, stride: int,
     attr_sizes: Ptr<int>, attr_count: int, texture_kind: int, texture: int, fan_ranges: NativeBuffer<int>?, fan_count: int
 ) -> int = """
     if fan_count > 0 then
-        return stone.stone_draw_mesh_fans(ffi.cast("float*", p), vertex_count, stride, attr_sizes, attr_count, texture_kind, texture, fan_ranges.ptr, fan_count)
+        return stone.stone_draw_mesh_fans(buf.__vf, vertex_count, stride, attr_sizes, attr_count, texture_kind, texture, fan_ranges.ptr, fan_count)
     end
-    return stone.stone_draw_mesh(ffi.cast("float*", p), vertex_count, stride, attr_sizes, attr_count, texture_kind, texture)
+    return stone.stone_draw_mesh(buf.__vf, vertex_count, stride, attr_sizes, attr_count, texture_kind, texture)
 """
 
 // The expansion derives the GL layout from the buffer element type.
@@ -54,7 +54,7 @@ pub @nomangle fn __stone_draw_mesh_vertex(
         attr_count = counts.len()
     }
     let result = __stone_draw_mesh_vertex_raw(
-        buf.ptr, vertex_count, vertex_stride(buf), sizes.ptr, attr_count,
+        buf, vertex_count, vertex_stride(buf), sizes.ptr, attr_count,
         texture_kind, texture, fan_ranges, fan_count)
     if audit_inputs && result >= 0 {
         audit_implicit_texture_slot(result != 0)
@@ -76,10 +76,10 @@ fn draw_mesh_sampled(
 }
 
 @nomangle inline(lua) fn __stone_mesh_create_vertex_raw(
-    p: Ptr<Vertex>, vertex_count: int, stride: int,
+    buf: NativeBuffer<Vertex>, vertex_count: int, stride: int,
     attr_sizes: Ptr<int>, attr_count: int,
 ) -> int = """
-    return stone.stone_mesh_create(1, ffi.cast("float*", p), vertex_count, stride, attr_sizes, attr_count)
+    return stone.stone_mesh_create(1, buf.__vf, vertex_count, stride, attr_sizes, attr_count)
 """
 
 fn retained_sprite_mesh_upload(buf: NativeBuffer<Vertex>, vertex_count: int) -> MeshId {
@@ -91,7 +91,7 @@ fn retained_sprite_mesh_upload(buf: NativeBuffer<Vertex>, vertex_count: int) -> 
         attr_count = counts.len()
     }
     let handle = __stone_mesh_create_vertex_raw(
-        buf.ptr, vertex_count, vertex_stride(buf), sizes.ptr, attr_count)
+        buf, vertex_count, vertex_stride(buf), sizes.ptr, attr_count)
     if handle == 0 { error("retained SpriteMesh GPU upload was rejected") }
     return MeshId(handle)
 }
