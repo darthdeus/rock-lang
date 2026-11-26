@@ -359,6 +359,39 @@ impl<'a> Builder<'a> {
         })
     }
 
+    fn ordering_operand_ty(&self, operand: Idx<Expr>) -> Result<Option<ArithTy>, CompilerError> {
+        let concrete = self.concrete_expr_ty(operand);
+        if matches!(concrete, Some(MonoTy::Never)) {
+            return Ok(None);
+        }
+        let wrapped = match concrete {
+            Some(
+                ty @ MonoTy::App {
+                    ctor: crate::monoty::MonoCtor::Nominal(name),
+                    ..
+                },
+            ) if self.ws.nominals.newtype_id(*name).is_some() => {
+                self.member_ty(ty, *name, super::pattern::Member::Wrapped)
+            }
+            _ => None,
+        };
+        let kind = match wrapped.as_ref().or(concrete) {
+            Some(MonoTy::Int) => Some(ArithTy::Int),
+            Some(MonoTy::Uint) => Some(ArithTy::Uint),
+            Some(MonoTy::Float) => Some(ArithTy::Float),
+            None => self.arith_ty(operand),
+            _ => None,
+        };
+        if let Some(kind @ (ArithTy::Int | ArithTy::Uint | ArithTy::Float)) = kind {
+            return Ok(Some(kind));
+        }
+        let got = concrete.map_or_else(|| "unknown type".into(), MonoTy::render);
+        Err(CompilerError::new_with_label(
+            self.body.expr_spans[operand],
+            format!("ordering operators require numeric operands, got {got}"),
+        ))
+    }
+
     pub(crate) fn lower_binop(
         &mut self,
         op: BinOp,
@@ -368,8 +401,8 @@ impl<'a> Builder<'a> {
     ) -> Result<Idx<Inst>, CompilerError> {
         match op {
             BinOp::Lt | BinOp::Leq | BinOp::Gt | BinOp::Geq => {
-                let lf = self.arith_ty(lhs);
-                let rf = self.arith_ty(rhs);
+                let lf = self.ordering_operand_ty(lhs)?;
+                let rf = self.ordering_operand_ty(rhs)?;
                 let float = lf == Some(ArithTy::Float) || rf == Some(ArithTy::Float);
                 let uint = lf == Some(ArithTy::Uint) || rf == Some(ArithTy::Uint);
                 let lv = self.lower_expr(lhs)?;

@@ -1,0 +1,15 @@
+newtype Key<T>(T)
+
+fn before<T>(a: T, b: T) -> bool { return a < b }
+
+@test fn generic_newtypes_compare_using_the_instantiated_numeric_type() {
+    let low = Key(-0.5)
+    let high = Key(0.5)
+    assert(low < high)
+    assert(before(low, high) && !before(high, low))
+
+    let zero = Key(0 as uint)
+    let large = Key(4294967295 as uint)
+    assert(zero < large)
+    assert(before(zero, large) && !before(large, zero))
+}

@@ -1,0 +1,19 @@
+//=== PROLOGUE: generic_compare ===
+fn before<T>(a: T, b: T) -> bool { return a < b }
+
+//=== TEST CASE: generic_enum_ordering_Generic ===
+//--- USE: generic_compare ---
+//! expect: ordering operators require numeric operands
+enum Color { Red, Green }
+fn main() { print(before(Color::Red, Color::Green)) }
+
+//=== TEST CASE: generic_value_ordering_Generic ===
+//--- USE: generic_compare ---
+//! expect: ordering operators require numeric operands
+value Point { x: int, y: int }
+fn main() { print(before(Point { x: 1, y: 2 }, Point { x: 3, y: 4 })) }
+
+//=== TEST CASE: generic_nullable_ordering_Generic ===
+//--- USE: generic_compare ---
+//! expect: ordering operators require numeric operands
+fn main() { print(before<int?>(null, 2)) }

@@ -136,3 +136,18 @@ fn destination_returns_keep_effect_order_and_defer_snapshots() {
         print(value.0); print(value.1.x); print(value.1.y)
     }
 }
+
+fn exit_from_ordering_left(n: float) -> int {
+    let _ = { return 23 } < n
+    return 41
+}
+
+fn exit_from_ordering_right(n: int) -> int {
+    let _ = n < { return 17 }
+    return 31
+}
+
+@test fn ordering_operands_can_exit_the_function() {
+    assert_eq(exit_from_ordering_left(2.5), 23)
+    assert_eq(exit_from_ordering_right(3), 17)
+}
