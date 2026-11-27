@@ -558,8 +558,9 @@ A native library may issue OpenGL itself inside a stage, in Stone's context:
   refuses unload, reload, wrap changes and writes on it.
   `image_import_update(image, w, h)` records new storage and advances the
   generation; `image_release_import(image)` forgets the handle.
-- `gpu_scope_*`, `pixel_readback_*` and `image_load/require/ready/unload` are
-  the existing exports of those names.
+- `gpu_scope_begin(name)` and `gpu_scope_end()` are the existing GPU scope
+  exports. Native code reads pixels back with its own GL, and loads images
+  itself and registers them through `image_import_gl_texture`.
 
 Rules for native GL:
 
