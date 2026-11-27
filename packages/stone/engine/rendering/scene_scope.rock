@@ -11,6 +11,7 @@ struct SceneRenderSaved0 {
     render_batches: RenderBatchPool,
     render_batch_sort_keys: [string],
     outline_mask_batches: RenderBatchPool,
+    native_silhouette_draws: [NativeSilhouetteDraw],
     mesh_pending: [SpriteMesh],
     mesh_free: [SpriteMesh],
     mesh_in_flight: [SpriteMesh],
@@ -107,6 +108,7 @@ pub fn with_scene_render_scope(view: FrameView, body: fn() -> ()) {
         pools.push(RENDER_BATCHES)
         OUTLINE_MASK_BATCHES = render_batch_pool_new()
         pools.push(OUTLINE_MASK_BATCHES)
+        NATIVE_SILHOUETTE_DRAWS = []
         world.batches = RENDER_BATCHES
         gizmo.batches = RENDER_BATCHES
         CURRENT_RENDER_POOL = RenderBatchScope {}
@@ -231,6 +233,7 @@ fn scene_render_save0() -> SceneRenderSaved0 {
         render_batches: RENDER_BATCHES,
         render_batch_sort_keys: RENDER_BATCH_SORT_KEYS,
         outline_mask_batches: OUTLINE_MASK_BATCHES,
+        native_silhouette_draws: NATIVE_SILHOUETTE_DRAWS,
         mesh_pending: MESH_PENDING,
         mesh_free: MESH_FREE,
         mesh_in_flight: MESH_IN_FLIGHT,
@@ -257,6 +260,7 @@ fn scene_render_restore0(saved0: SceneRenderSaved0) {
     RENDER_BATCHES = saved0.render_batches
     RENDER_BATCH_SORT_KEYS = saved0.render_batch_sort_keys
     OUTLINE_MASK_BATCHES = saved0.outline_mask_batches
+    NATIVE_SILHOUETTE_DRAWS = saved0.native_silhouette_draws
     MESH_PENDING = saved0.mesh_pending
     MESH_FREE = saved0.mesh_free
     MESH_IN_FLIGHT = saved0.mesh_in_flight
@@ -369,6 +373,7 @@ fn scene_render_expect_restored0(saved: SceneRenderSaved0) {
     assert(actual.render_batches == saved.render_batches, "scene render restores render_batches")
     assert(actual.render_batch_sort_keys == saved.render_batch_sort_keys, "scene render restores render_batch_sort_keys")
     assert(actual.outline_mask_batches == saved.outline_mask_batches, "scene render restores outline_mask_batches")
+    assert(actual.native_silhouette_draws == saved.native_silhouette_draws, "scene render restores native silhouette draws")
     assert(actual.mesh_pending == saved.mesh_pending, "scene render restores mesh_pending")
     assert(actual.mesh_free == saved.mesh_free, "scene render restores mesh_free")
     assert(actual.mesh_in_flight == saved.mesh_in_flight, "scene render restores mesh_in_flight")

@@ -96,7 +96,7 @@ fn retained_pass_scene_return_reuses_only_matching_snapshots() {
     let output = retained_pass_canvas(11)
     let first = scene_return_pass(source, output)
     assert(same_ref(first, scene_return_pass(source, output)))
-    reset_scene_return_pass()
+    reset_queued_render_passes()
     assert(SCENE_RETURN_PASS == null)
     assert(!same_ref(first, scene_return_pass(source, output)))
     assert(sampled_texture_matches_canvas(first.slot_inputs[0].0, source))

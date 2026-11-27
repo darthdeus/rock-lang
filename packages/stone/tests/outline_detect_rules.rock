@@ -200,3 +200,83 @@ fn outline_detect_reads_target_mask_and_visible_id_in_slot_order() {
             "swapping the canvases rings the other silhouette (left {b_left}, right {b_right})")
     })
 }
+
+inline(lua) fn mask_test_callback(body: fn(int) -> int) -> PtrU8 = """
+    return ffi.cast("StoneNativeSilhouetteFn", function(_, target) return body(tonumber(target)) end)
+"""
+
+@test
+fn native_silhouette_overwrites_in_selected_order_and_contributes_bounds() {
+    gpu_test_host()
+    let view = resolve_frame_view(v(16, 16), iv(16, 16), Camera2D {}, RENDER_CONFIG).unwrap()
+    with_scene_render_scope(view, () => {
+        let target = outline_target_canvas
+        let handle = target.handle.0
+        let prior = CURRENT_CANVAS_HANDLE
+        let calls = 0
+        let before = mask_test_callback((actual) => {
+            assert_eq(actual, handle)
+            assert_eq(stone_native_frame_target(), handle)
+            let ids = canvas_read_region_i32(target, 0, 0, 1, 1)
+            assert_eq(canvas_id_at(ids, 0, 0), 0)
+            calls += 1
+            stone_clear_canvas_int(0, 7)
+            return 1
+        })
+        let after = mask_test_callback((actual) => {
+            assert_eq(actual, handle)
+            calls += 1
+            stone_set_scissor(true, 0, 0, 1, 1)
+            stone_clear_canvas_int(0, 9)
+            return 1
+        })
+        let empty = mask_test_callback((_actual) => { calls += 1; return 0 })
+        defer {
+            scene_test_free_callback(empty)
+            scene_test_free_callback(after)
+            scene_test_free_callback(before)
+        }
+
+        set_canvas(target)
+        stone_clear_canvas_int(0, 99)
+        set_canvas_handle(prior)
+        outline_detect_quad(OUTLINE_MASK_BATCHES, sampled_image(WHITE_PIXEL.unwrap()), v(0, 0), v(4, 4), 2)
+        // Order selection puts the first enqueued callback after the script draws.
+        assert(queue_native_silhouette_draw(after, scene_test_null(), Rect { x: 4, y: 6, w: 1, h: 1 }, SilhouetteMaskOrder::AfterScript))
+        assert(queue_native_silhouette_draw(before, scene_test_null(), Rect { x: -5, y: -6, w: 10, h: 12 }, SilhouetteMaskOrder::BeforeScript))
+        render_batches()
+        assert_eq(calls, 2)
+        assert(outline_mask_written)
+        assert(OUTLINE_MASK_BOUNDS_VALID)
+        assert_eq(OUTLINE_MASK_BOUNDS_MIN_X, -5.0)
+        assert_eq(OUTLINE_MASK_BOUNDS_MIN_Y, -6.0)
+        assert_eq(OUTLINE_MASK_BOUNDS_MAX_X, 5.0)
+        assert_eq(OUTLINE_MASK_BOUNDS_MAX_Y, 7.0)
+        let ids = canvas_read_region_i32(target, 0, 0, 16, 16)
+        assert_eq(canvas_id_at(ids, 0, 15), 9)
+        let script_pixels = 0
+        for y in 0..16 {
+            for x in 0..16 {
+                if canvas_id_at(ids, x, y) == 2 { script_pixels += 1 }
+            }
+        }
+        assert(script_pixels > 0, "script mask geometry overwrites the before-script draw")
+
+        render_commands_begin_frame()
+        assert(queue_native_silhouette_draw(after, scene_test_null(), Rect { x: 4, y: 6, w: 1, h: 1 }, SilhouetteMaskOrder::AfterScript))
+        render_batches()
+        assert_eq(calls, 3)
+        assert(outline_mask_written)
+        assert_eq(OUTLINE_MASK_BOUNDS_MIN_X, 4.0)
+
+        render_commands_begin_frame()
+        assert(queue_native_silhouette_draw(before, scene_test_null(), Rect { x: 0, y: 0, w: 0, h: 0 }, SilhouetteMaskOrder::BeforeScript))
+        render_commands_begin_frame()
+        assert(queue_native_silhouette_draw(empty, scene_test_null(), Rect { x: 10, y: 10, w: 1, h: 1 }, SilhouetteMaskOrder::AfterScript))
+        render_batches()
+        assert_eq(calls, 4)
+        assert(!outline_mask_written)
+        assert(!OUTLINE_MASK_BOUNDS_VALID)
+        assert_eq(CURRENT_CANVAS_HANDLE, prior)
+    })
+}

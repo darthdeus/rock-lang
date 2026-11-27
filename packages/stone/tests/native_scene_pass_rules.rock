@@ -220,7 +220,7 @@ fn native_scene_context_lifetime_case(_which: int) {
     defer { let _ = stone_teardown() }
 
     assert(queue_native_scene_pass(callback, scene_test_null()))
-    reset_scene_return_pass()
+    reset_queued_render_passes()
     assert_eq(SCENE_PASSES.len(), 0)
     run_scene_passes()
     assert_eq(calls, 0)

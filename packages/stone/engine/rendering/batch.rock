@@ -1824,10 +1824,11 @@ pub fn render_batches(after_scene: bool = false) {
         stamp_outline_mask_bounds(OUTLINE_MASK_BATCHES)
         // Skipping is safe: the target is cleared where it is created, so an unrun
         // pass leaves it empty. The forced scan scans an empty mask and needs the clear.
-        if pool_has_pending(OUTLINE_MASK_BATCHES) || outline_force_scan() {
+        let native_pending = NATIVE_SILHOUETTE_DRAWS.len() > 0 && !NATIVE_SILHOUETTE_RUNNING
+        if pool_has_pending(OUTLINE_MASK_BATCHES) || native_pending || outline_force_scan() {
             profile_begin("outline_target_mask")
-            outline_mask_written = render_silhouette_mask(
-                OUTLINE_MASK_BATCHES, outline_target_canvas, cam_offset, cam_scale) > 0
+            outline_mask_written = render_silhouette_mask_ordered(
+                OUTLINE_MASK_BATCHES, outline_target_canvas, cam_offset, cam_scale, native_pending) > 0
             profile_end("outline_target_mask")
         } else {
             outline_mask_written = false
@@ -1848,6 +1849,18 @@ pub fn render_silhouette_mask(
     cam_offset: Vec2,
     cam_scale: float
 ) -> int {
+    return render_silhouette_mask_ordered(pool, target, cam_offset, cam_scale, false)
+}
+
+fn render_silhouette_mask_ordered(pool: RenderBatchPool, target: Canvas,
+    cam_offset: Vec2, cam_scale: float, native_pending: bool) -> int {
+    if native_pending { NATIVE_SILHOUETTE_RUNNING = true }
+    defer {
+        if native_pending {
+            NATIVE_SILHOUETTE_DRAWS.clear()
+            NATIVE_SILHOUETTE_RUNNING = false
+        }
+    }
     let prior = CURRENT_CANVAS_HANDLE
     set_canvas(target)
     stone_clear_canvas_int(0, 0)
@@ -1860,12 +1873,19 @@ pub fn render_silhouette_mask(
     unset_depth_mode()
 
     let drawn = 0
+    if native_pending {
+        drawn += run_native_silhouette_draws(target.handle.0, SilhouetteMaskOrder::BeforeScript)
+    }
     for (_, batch_row) in pool.entries {
         let batch = batch_row.borrow().unwrap()
         if batch.count == 0 { continue }
 
         draw_batch_mesh(batch)
         drawn += 1
+    }
+
+    if native_pending {
+        drawn += run_native_silhouette_draws(target.handle.0, SilhouetteMaskOrder::AfterScript)
     }
 
     reset_camera()
