@@ -199,6 +199,7 @@ fn render_scaled_ui_batches(pool: RenderBatchPool = UI_RENDER_BATCHES) {
     let extent = screen_size()
     set_canvas(target)
     stone_clear_canvas(0.0, 0.0, 0.0, 0.0)
+    run_ui_begin_hooks()
     render_ui_batches(pool, projection_extent: extent,
         convention: TargetConvention::PresentSource)
     unset_canvas()

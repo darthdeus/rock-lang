@@ -101,9 +101,9 @@ typedef struct StoneFrameInfo {
     float world_to_scene_offset_x;
     float world_to_scene_offset_y;
     float world_to_scene_scale;
-    uint32_t _reserved;
+    uint32_t framebuffer;
 } StoneFrameInfo;
-// Return 0 for no writes, 1 after writing the scene target, negative on failure.
+// Return 0 for no writes, 1 after writing the hook's target, negative on failure.
 typedef int32_t (*StoneFrameHookFn)(void* userdata, const StoneFrameInfo* info);
 typedef void (*StoneFrameHookReleaseFn)(void* userdata);
 

@@ -177,10 +177,49 @@ fn frame_hook_test_window_pixel(x: int, y: int, channel: int) -> int {
     return pixel[channel]
 }
 
-// Runs two frames with a UI_BEGIN hook that clears the target blue, and
-// checks the layer order on the window: the hook's blue above the
-// post-processed world (red) and below the script UI batch (green). The hook
-// draws a canvas-sized clear, so wherever it drew stays visible.
+inline(lua) fn frame_hook_test_viewport() -> string = """
+    pcall(ffi.cdef, "void* SDL_GL_GetProcAddress(const char* proc);")
+    local get = ffi.cast("void (*)(uint32_t, int*)", stone.SDL_GL_GetProcAddress("glGetIntegerv"))
+    local viewport = ffi.new("int[4]")
+    get(0x0BA2, viewport)
+    return viewport[0] .. "," .. viewport[1] .. "," .. viewport[2] .. "," .. viewport[3]
+"""
+
+inline(lua) fn frame_hook_test_draw_framebuffer() -> int = """
+    local get = ffi.cast("void (*)(uint32_t, int*)", stone.SDL_GL_GetProcAddress("glGetIntegerv"))
+    local binding = ffi.new("int[1]")
+    get(0x8CA6, binding)
+    return binding[0]
+"""
+
+// Like frame_hook_test_callback; keeps the target fields of the hook's
+// StoneFrameInfo for frame_hook_test_info.
+inline(lua) fn frame_hook_test_info_callback(body: fn() -> int) -> PtrU8 = """
+    return ffi.cast("StoneFrameHookFn", function(_, info)
+        _G.__frame_hook_test_info = string.format("%d,%d,%d,%d,%d", tonumber(info.framebuffer),
+            info.target_width, info.target_height, info.active_width, info.active_height)
+        return body()
+    end)
+"""
+
+inline(lua) fn frame_hook_test_info() -> string = "return _G.__frame_hook_test_info"
+
+// Clears one pixel of the bound target white.
+inline(lua) fn frame_hook_test_mark(x: int, y: int) = """
+    local function gl(name, signature)
+        return ffi.cast(signature, stone.SDL_GL_GetProcAddress(name))
+    end
+    gl("glEnable", "void (*)(uint32_t)")(0x0C11)
+    gl("glScissor", "void (*)(int, int, int, int)")(x, y, 1, 1)
+    gl("glClearColor", "void (*)(float, float, float, float)")(1, 1, 1, 1)
+    gl("glClear", "void (*)(uint32_t)")(0x4000)
+    gl("glDisable", "void (*)(uint32_t)")(0x0C11)
+"""
+
+// Runs two frames with a UI_BEGIN hook that clears its target blue and marks
+// one white pixel, and checks the layer order on the window: the hook's blue
+// above the post-processed world (red) and below the script UI batch
+// (green), and the marked pixel covering scale x scale window pixels.
 fn frame_hook_ui_begin_case(title: string, raster_scale: float) {
     let _ = native_runner_test_boot(title)
     defer { let _ = stone_teardown() }
@@ -190,14 +229,18 @@ fn frame_hook_ui_begin_case(title: string, raster_scale: float) {
     RENDER_CONFIG = config
     defer { RENDER_CONFIG = saved }
     frame_core_resolve_view()
-    assert_eq(UI_RASTER_CANVAS != null, raster_scale != 1.0, "the case selects the UI raster canvas path")
+    let scale = int(round(1.0 / raster_scale))
+    let target = 16 ./ scale
+    assert_eq(UI_RASTER_CANVAS != null, scale != 1, "the case selects the UI raster canvas path")
     let calls = 0
-    let window_under_hook: [int] = [0, 0, 0]
-    let ui_begin = frame_hook_test_callback(() => {
+    let viewport = ""
+    let bound = -1
+    let ui_begin = frame_hook_test_info_callback(() => {
         calls += 1
-        window_under_hook = [frame_hook_test_window_pixel(12, 8, 0),
-            frame_hook_test_window_pixel(12, 8, 1), frame_hook_test_window_pixel(12, 8, 2)]
+        viewport = frame_hook_test_viewport()
+        bound = frame_hook_test_draw_framebuffer()
         stone_clear_canvas(0.0, 0.0, 1.0, 1.0)
+        frame_hook_test_mark(target * 3 ./ 4, target ./ 4)
         return 1
     })
     defer { frame_hook_test_free(ui_begin) }
@@ -220,12 +263,27 @@ fn frame_hook_ui_begin_case(title: string, raster_scale: float) {
         assert_eq(calls, frame, "the hook runs outside the world draw")
         frame_core_render_ui_flush()
         assert_eq(calls, frame + 1, "the hook runs once per frame")
-        assert(window_under_hook[0] > 200 && window_under_hook[2] < 50,
-            "frame {frame}: the hook runs after the post-processed world reaches the window, got {window_under_hook}")
-        assert_eq(frame_hook_test_window_pixel(12, 8, 2), 255,
-            "frame {frame}: the hook's blue covers the post-processed world")
+        assert_eq(viewport, "0,0,{target},{target}", "frame {frame}: the viewport is the target's full extent")
+        assert_eq(frame_hook_test_info(), "{bound},{target},{target},{target},{target}",
+            "frame {frame}: the frame info describes the hook's target")
+        let world = stone_read_canvas_pixel_channel(PRESENTED_SCENE_SAMPLE.unwrap().canvas.handle.0, 12, 8, 0)
+        assert(world > 0.5, "frame {frame}: the post-processed world is red, got {world}")
         let ui = [frame_hook_test_window_pixel(2, 8, 1), frame_hook_test_window_pixel(2, 8, 2)]
         assert(ui[0] == 255 && ui[1] == 0, "frame {frame}: the script UI batch covers the hook, got green,blue {ui}")
+        let marked: [string] = []
+        let blue = 0
+        for y in 0..16 {
+            for x in 8..16 {
+                let (r, b) = (frame_hook_test_window_pixel(x, y, 0), frame_hook_test_window_pixel(x, y, 2))
+                if r == 255 && b == 255 {
+                    marked.push("{x},{y}")
+                } else if r == 0 && b == 255 {
+                    blue += 1
+                }
+            }
+        }
+        assert_eq(marked.len(), scale * scale, "frame {frame}: the marked pixel covers scale x scale window pixels, got {marked}")
+        assert_eq(blue + marked.len(), 128, "frame {frame}: the hook's blue covers the post-processed world")
     }
 }
 
