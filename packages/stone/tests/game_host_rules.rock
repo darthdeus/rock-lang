@@ -120,6 +120,7 @@ inline(lua) fn game_host_test_drive(max_frames: int, quit_at: int) -> (int, int,
         info.time = stone.stone_get_time()
         assert(entries.frame_begin(info, plan) == 1)
         if plan.running == 0 then termination = plan.termination break end
+        _G.__game_host_test_plan = { dt = plan.dt, ticks = plan.ticks }
         assert(entries.frame_update(plan) == 1)
         assert(plan.frame == info.frame, "the plan names the frame begin opened")
         _G.__game_host_test_frame = tonumber(plan.frame)
@@ -284,6 +285,16 @@ fn game_host_drives_frame_case(which: int) {
         let (_, draws, swapped, _, _) = game_host_test_drive(1, 0)
         assert_eq(draws, 1)
         presents += swapped
+    } else if which == 8 {
+        // The engine selects dt: a paused timeline plans no tick.
+        timeline_set_paused(true)
+        let (_, _, swapped, _, _) = game_host_test_drive(1, 0)
+        assert_eq(game_host_test_last_plan(), (0.0, false))
+        timeline_set_paused(false)
+        let (_, _, more, _, _) = game_host_test_drive(1, 0)
+        let (dt, ticks) = game_host_test_last_plan()
+        assert(ticks && dt > 0.0)
+        presents = swapped + more
     } else if which == 7 {
         // A script reload republishes the entries, and the host's next frames
         // run the reloaded code through them. The overlay replaces the draw
@@ -364,6 +375,11 @@ inline(lua) fn game_host_test_state_before_image() -> string = """
 inline(lua) fn game_host_test_entries_generation() -> int =
     "return tonumber(stone.stone_game_entries().generation)"
 
+inline(lua) fn game_host_test_last_plan() -> (float, bool) = """
+    local plan = _G.__game_host_test_plan
+    return plan.dt, plan.ticks ~= 0
+"""
+
 inline(lua) fn game_host_test_reloaded_draws() -> int =
     "return _G.__game_host_test_reloaded_draws or 0"
 
@@ -427,6 +443,11 @@ fn state_the_host_leaves_outside_the_baseline_is_reported() {
 @test
 fn the_host_frame_entries_survive_a_script_reload() {
     profiler_test_process("game_host_drives_frame_case", 7)
+}
+
+@test
+fn a_paused_timeline_plans_frames_without_a_tick() {
+    profiler_test_process("game_host_drives_frame_case", 8)
 }
 
 @test
