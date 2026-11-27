@@ -55,6 +55,8 @@ pub extern(ffi, "stone") fn stone_file_transaction_write_png(transaction: int, p
 pub extern(ffi, "stone") fn stone_file_write_poll(id: int, wait: bool = false) -> int
 pub extern(ffi, "stone") fn stone_flush_image_uploads()
 extern(ffi, "stone") fn stone_force_vsync_off(force: int)
+extern(ffi, "stone") fn stone_frame_baseline_enter() -> bool
+extern(ffi, "stone") fn stone_frame_baseline_leave()
 pub extern(ffi, "stone") fn stone_frame_event(index: int, event: StoneEvent) -> bool
 pub extern(ffi, "stone") fn stone_frame_event_count() -> int
 extern(ffi, "stone") fn stone_game_entries_publish(frame_begin: PtrU8, frame_update: PtrU8, frame_draw: PtrU8, shutdown: PtrU8) -> int

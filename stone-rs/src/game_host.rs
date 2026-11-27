@@ -228,6 +228,232 @@ pub extern "C" fn stone_game_entries_publish(
     })
 }
 
+// The GL state between the engine's frame entries and host code:
+// - VAO 0 and program 0, the window framebuffer for draw and read (0, or the
+//   screen framebuffer Stone owns for a headless window);
+// - GL's default blend, depth, stencil, cull and colour mask (Stone never
+//   changes the stencil functions or cull mode, and debug builds report a native
+//   stage that does);
+// - viewport and scissor box covering the drawable, scissor test off;
+// - no pixel pack or unpack buffer, alignment 1 and row length 0;
+// - FRAMEBUFFER_SRGB off and no pending GL error.
+// The engine snapshots its own state (a native stage) when an entry returns and
+// restores it on the next entry, so host code between entries needs no snapshot.
+// Debug builds check the state the host hands back at the next entry.
+const BASELINE_OFF: [(u32, &str); 6] = [
+    (glow::BLEND, "BLEND"),
+    (glow::DEPTH_TEST, "DEPTH_TEST"),
+    (glow::STENCIL_TEST, "STENCIL_TEST"),
+    (glow::CULL_FACE, "CULL_FACE"),
+    (glow::SCISSOR_TEST, "SCISSOR_TEST"),
+    (glow::FRAMEBUFFER_SRGB, "FRAMEBUFFER_SRGB"),
+];
+#[cfg(debug_assertions)]
+const BASELINE_INTS: [(u32, i32, &str); 15] = [
+    (glow::VERTEX_ARRAY_BINDING, 0, "VERTEX_ARRAY_BINDING"),
+    (glow::CURRENT_PROGRAM, 0, "CURRENT_PROGRAM"),
+    (glow::BLEND_SRC_RGB, glow::ONE as i32, "BLEND_SRC_RGB"),
+    (glow::BLEND_SRC_ALPHA, glow::ONE as i32, "BLEND_SRC_ALPHA"),
+    (glow::BLEND_DST_RGB, glow::ZERO as i32, "BLEND_DST_RGB"),
+    (glow::BLEND_DST_ALPHA, glow::ZERO as i32, "BLEND_DST_ALPHA"),
+    (
+        glow::BLEND_EQUATION_RGB,
+        glow::FUNC_ADD as i32,
+        "BLEND_EQUATION_RGB",
+    ),
+    (
+        glow::BLEND_EQUATION_ALPHA,
+        glow::FUNC_ADD as i32,
+        "BLEND_EQUATION_ALPHA",
+    ),
+    (glow::DEPTH_FUNC, glow::LESS as i32, "DEPTH_FUNC"),
+    (
+        glow::PIXEL_PACK_BUFFER_BINDING,
+        0,
+        "PIXEL_PACK_BUFFER_BINDING",
+    ),
+    (
+        glow::PIXEL_UNPACK_BUFFER_BINDING,
+        0,
+        "PIXEL_UNPACK_BUFFER_BINDING",
+    ),
+    (glow::PACK_ALIGNMENT, 1, "PACK_ALIGNMENT"),
+    (glow::UNPACK_ALIGNMENT, 1, "UNPACK_ALIGNMENT"),
+    (glow::PACK_ROW_LENGTH, 0, "PACK_ROW_LENGTH"),
+    (glow::UNPACK_ROW_LENGTH, 0, "UNPACK_ROW_LENGTH"),
+];
+// Pixel store state the engine's stage snapshot does not cover.
+const ENGINE_PIXEL_STORE: [u32; 4] = [
+    glow::PACK_ALIGNMENT,
+    glow::UNPACK_ALIGNMENT,
+    glow::PACK_ROW_LENGTH,
+    glow::UNPACK_ROW_LENGTH,
+];
+
+#[derive(Clone, Copy)]
+struct EngineState {
+    stage: u32,
+    pixel_store: [i32; 4],
+    pack_buffer: i32,
+    unpack_buffer: i32,
+    srgb: bool,
+}
+
+thread_local! {
+    static ENGINE_STATE: Cell<Option<EngineState>> = const { Cell::new(None) };
+}
+
+fn drawable() -> (i32, i32) {
+    crate::with_window(|w| w.window.drawable_size()).map_or((0, 0), |(w, h)| (w as i32, h as i32))
+}
+
+/// Snapshot the engine's GL state and leave the baseline for the host. The
+/// frame entries call it when they return, including after a failed entry.
+/// GL errors the engine left pending are drained and logged first, in every
+/// build, so the host never reads one of them as its own.
+/// rock-ffi stone private
+#[no_mangle]
+pub extern "C" fn stone_frame_baseline_leave() {
+    crate::with_gl(|gl| unsafe {
+        crate::native_renderer::drain_gl_errors(gl, "pending when a frame entry returned")
+    });
+    if let Some(stale) = ENGINE_STATE.with(Cell::take) {
+        crate::native_renderer::stone_native_stage_end(stale.stage);
+    }
+    let stage = crate::native_renderer::stone_native_stage_begin();
+    if stage == 0 {
+        return;
+    }
+    let (width, height) = drawable();
+    let window_fbo = crate::canvas::resolve_target(None);
+    let saved = crate::with_gl(|gl| unsafe {
+        let saved = EngineState {
+            stage,
+            pixel_store: ENGINE_PIXEL_STORE.map(|param| gl.get_parameter_i32(param)),
+            pack_buffer: gl.get_parameter_i32(glow::PIXEL_PACK_BUFFER_BINDING),
+            unpack_buffer: gl.get_parameter_i32(glow::PIXEL_UNPACK_BUFFER_BINDING),
+            srgb: gl.is_enabled(glow::FRAMEBUFFER_SRGB),
+        };
+        gl.bind_vertex_array(None);
+        gl.use_program(None);
+        gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, window_fbo);
+        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, window_fbo);
+        for (cap, _) in BASELINE_OFF {
+            gl.disable(cap);
+        }
+        gl.blend_func(glow::ONE, glow::ZERO);
+        gl.blend_equation(glow::FUNC_ADD);
+        gl.depth_func(glow::LESS);
+        gl.depth_mask(true);
+        gl.cull_face(glow::BACK);
+        gl.color_mask(true, true, true, true);
+        gl.viewport(0, 0, width, height);
+        gl.scissor(0, 0, width, height);
+        gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+        gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, None);
+        for param in ENGINE_PIXEL_STORE {
+            let value = if matches!(param, glow::PACK_ALIGNMENT | glow::UNPACK_ALIGNMENT) {
+                1
+            } else {
+                0
+            };
+            gl.pixel_store_i32(param, value);
+        }
+        saved
+    });
+    ENGINE_STATE.with(|state| state.set(saved));
+}
+
+/// Check the baseline (debug builds) and restore the engine's GL state for a
+/// frame entry. Returns false when no state was left by a previous entry.
+/// rock-ffi stone private
+#[no_mangle]
+pub extern "C" fn stone_frame_baseline_enter() -> bool {
+    #[cfg(debug_assertions)]
+    report_host_baseline_differences();
+    let Some(saved) = ENGINE_STATE.with(Cell::take) else {
+        return false;
+    };
+    crate::with_gl(|gl| unsafe {
+        for (param, value) in ENGINE_PIXEL_STORE.into_iter().zip(saved.pixel_store) {
+            gl.pixel_store_i32(param, value);
+        }
+        let buffer = |name: i32| std::num::NonZeroU32::new(name as u32).map(glow::NativeBuffer);
+        gl.bind_buffer(glow::PIXEL_PACK_BUFFER, buffer(saved.pack_buffer));
+        gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, buffer(saved.unpack_buffer));
+        if saved.srgb {
+            gl.enable(glow::FRAMEBUFFER_SRGB);
+        }
+    });
+    crate::native_renderer::stone_native_stage_end(saved.stage);
+    true
+}
+
+/// The baseline state that differs from the current GL state, plus a pending
+/// GL error, which reading consumes.
+#[cfg(debug_assertions)]
+fn baseline_differences() -> Vec<String> {
+    let (width, height) = drawable();
+    let window_fbo = crate::canvas::resolve_target(None).map_or(0, |fbo| fbo.0.get() as i32);
+    crate::with_gl(|gl| unsafe {
+        let mut differs: Vec<String> = Vec::new();
+        for (cap, name) in BASELINE_OFF {
+            if gl.is_enabled(cap) {
+                differs.push(name.into());
+            }
+        }
+        for (param, value, name) in BASELINE_INTS {
+            if gl.get_parameter_i32(param) != value {
+                differs.push(name.into());
+            }
+        }
+        for (param, name) in [
+            (glow::DRAW_FRAMEBUFFER_BINDING, "DRAW_FRAMEBUFFER_BINDING"),
+            (glow::READ_FRAMEBUFFER_BINDING, "READ_FRAMEBUFFER_BINDING"),
+        ] {
+            if gl.get_parameter_i32(param) != window_fbo {
+                differs.push(name.into());
+            }
+        }
+        let mut mask = [0i32; 4];
+        gl.get_parameter_i32_slice(glow::COLOR_WRITEMASK, &mut mask);
+        if mask != [1; 4] {
+            differs.push("COLOR_WRITEMASK".into());
+        }
+        if gl.get_parameter_i32(glow::DEPTH_WRITEMASK) == 0 {
+            differs.push("DEPTH_WRITEMASK".into());
+        }
+        for (param, name) in [
+            (glow::VIEWPORT, "VIEWPORT"),
+            (glow::SCISSOR_BOX, "SCISSOR_BOX"),
+        ] {
+            let mut rect = [0i32; 4];
+            gl.get_parameter_i32_slice(param, &mut rect);
+            if rect != [0, 0, width, height] {
+                differs.push(name.into());
+            }
+        }
+        let error = gl.get_error();
+        if error != glow::NO_ERROR {
+            differs.push(format!("GL error 0x{error:X}"));
+        }
+        differs
+    })
+    .unwrap_or_default()
+}
+
+#[cfg(debug_assertions)]
+fn report_host_baseline_differences() {
+    let differs = baseline_differences();
+    if !differs.is_empty() {
+        ::log::error!(
+            target: "STONE",
+            "the host left GL state outside the frame baseline: {}",
+            differs.join(", ")
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

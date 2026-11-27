@@ -674,8 +674,11 @@ pub @nomangle fn stone_game_boot(config: GameConfig) -> bool {
     }
     GAME_RUN = run
     game_frame_open(run)
-    if HOST_DRIVES_FRAME && game_entries_publish() == 0 {
-        log_error("STONE", "stone_game_boot: the host frame entries were not published")
+    if HOST_DRIVES_FRAME {
+        if game_entries_publish() == 0 {
+            log_error("STONE", "stone_game_boot: the host frame entries were not published")
+        }
+        stone_frame_baseline_leave()
     }
     return true
 }
@@ -696,11 +699,16 @@ pub @nomangle fn stone_game_boot(config: GameConfig) -> bool {
         local info_size = ffi.sizeof("StoneFrameBeginInfo")
         local plan_size = ffi.sizeof("StoneFramePlan")
         local result_size = ffi.sizeof("StoneFrameResult")
+        -- The host gets the GL baseline back also when the entry failed.
         local function call(entry, ...)
+            stone.stone_frame_baseline_enter()
             local ok, value = xpcall(fns[entry], __rock_traceback, ...)
-            if ok then return value end
-            pcall(fns.failed, entry, tostring(value))
-            return nil
+            if not ok then
+                pcall(fns.failed, entry, tostring(value))
+                value = nil
+            end
+            stone.stone_frame_baseline_leave()
+            return value
         end
         local function fill_plan(out, plan)
             out.struct_size = plan_size

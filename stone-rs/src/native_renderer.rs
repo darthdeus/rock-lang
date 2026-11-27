@@ -169,7 +169,7 @@ fn report_default_state_changes(entry: &DefaultState, exit: &DefaultState) {
 /// Drain pending GL errors (bounded: a lost context can report one forever)
 /// and report them against `site`. Runs before any checked DebugGl call, which
 /// would otherwise consume the error and blame its own operation.
-unsafe fn drain_gl_errors(gl: &DebugGl, site: &str) -> bool {
+pub(crate) unsafe fn drain_gl_errors(gl: &DebugGl, site: &str) -> bool {
     let mut codes = [0u32; 8];
     let mut count = 0;
     while count < codes.len() {
