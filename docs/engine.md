@@ -483,8 +483,9 @@ through a single versioned C function-pointer table:
   The pointer stays valid for the lifetime of the loaded Stone shared library.
 - Every entry is render-thread only: it must run on the thread that owns
   Stone's GL context. Elsewhere it does nothing and returns `0`/false (a
-  destroy called from a worker thread leaks the GL objects); the first such
-  call logs a warning.
+  destroy called from a worker thread leaks the GL objects). The first ignored
+  call logs a warning. The frame-active, frame-target, and frame-size queries
+  report inactivity silently.
 - `packages/stone/engine/rendering_ffi.h` declares `StoneNativeRendererApiV1`
   for C callers. Version 1 only appends fields; `stone-rs` asserts every
   field's offset at compile time and a test checks the header against the

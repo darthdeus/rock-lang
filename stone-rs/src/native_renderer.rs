@@ -413,7 +413,8 @@ pub extern "C" fn stone_native_stage_end(scope: u32) -> u32 {
 /// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_native_frame_active() -> bool {
-    with_gl(|_| ()).is_some() && NATIVE_STAGE_STACK.with(|stack| !stack.borrow().is_empty())
+    crate::with_window(|_| ()).is_some()
+        && NATIVE_STAGE_STACK.with(|stack| !stack.borrow().is_empty())
 }
 
 /// Currently bound render target handle during an active frame scope (0 = window).

@@ -580,6 +580,8 @@ unsafe fn owned_attachments_change_only_through_their_owner() {
     assert_eq!(stone_target_attachment(target, 1), child);
     assert!(!stone_canvas_attach_color_target(other, child, 1));
     assert_eq!(stone_target_attachment(other, 1), 0);
+    assert!(!stone_canvas_attach_color_target(child, other, 1));
+    assert_eq!(stone_target_attachment(child, 1), 0);
     assert_eq!(
         stone_native_handle_generation(STONE_RESOURCE_TARGET, target),
         target_gen
