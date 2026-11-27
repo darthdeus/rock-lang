@@ -592,6 +592,13 @@ pub fn stone_gpu_host_window() -> StoneWindow? {
     return window
 }
 
+inline(lua) fn stone_teardown_native() -> bool = "return stone.stone_teardown() ~= 0"
+
+pub fn stone_teardown() -> bool {
+    reset_scene_return_pass()
+    return stone_teardown_native()
+}
+
 // Runs ONCE after the main loop exits; stone_teardown() ends the window, the
 // GL context and everything allocated in it.
 fn stone_shutdown_window() -> bool {

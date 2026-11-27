@@ -44,6 +44,7 @@ void stone_show_window(void);
 unsigned long long stone_gl_swap_count(void);
 
 // Window functions
+uint8_t stone_teardown(void);
 
 // Filesystem functions
 const char* stone_get_working_directory(void);
@@ -273,7 +274,6 @@ void stone_swap_window(StoneWindow* _window);
 uint8_t stone_take_window_display_changed(void);
 uint8_t stone_take_window_moved(void);
 uint8_t stone_take_window_resized(void);
-uint8_t stone_teardown(void);
 void stone_unload_image(uint64_t handle);
 uint8_t stone_unload_music(uint64_t handle);
 uint8_t stone_unload_sound(uint64_t handle);

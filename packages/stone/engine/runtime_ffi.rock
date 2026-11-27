@@ -175,7 +175,6 @@ pub extern(ffi, "stone") fn stone_swap_window(window: StoneWindow)
 extern(ffi, "stone") fn stone_take_window_display_changed() -> bool
 extern(ffi, "stone") fn stone_take_window_moved() -> bool
 extern(ffi, "stone") fn stone_take_window_resized() -> bool
-pub extern(ffi, "stone") fn stone_teardown() -> bool
 pub extern(ffi, "stone") fn stone_unload_image(handle: int)
 pub extern(ffi, "stone") fn stone_unload_music(handle: int) -> bool
 pub extern(ffi, "stone") fn stone_unload_sound(handle: int) -> bool

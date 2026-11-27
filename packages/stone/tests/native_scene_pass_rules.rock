@@ -210,3 +210,32 @@ fn native_scene_rebuild_case(_which: int) {
 fn native_scene_discards_on_scene_target_rebuild() {
     profiler_test_process("native_scene_rebuild_case", 0)
 }
+
+@nomangle
+fn native_scene_context_lifetime_case(_which: int) {
+    let (_, config) = native_runner_test_boot("native scene context lifetime")
+    let calls = 0
+    let callback = scene_test_callback((_current, _partner) => { calls += 1; return 0 })
+    defer { scene_test_free_callback(callback) }
+    defer { let _ = stone_teardown() }
+
+    assert(queue_native_scene_pass(callback, scene_test_null()))
+    reset_scene_return_pass()
+    assert_eq(SCENE_PASSES.len(), 0)
+    run_scene_passes()
+    assert_eq(calls, 0)
+
+    let old_generation = stone_native_context_generation()
+    assert(queue_native_scene_pass(callback, scene_test_null()))
+    assert(stone_teardown())
+    assert_eq(SCENE_PASSES.len(), 0)
+    let _ = stone_init_window(config.title, 0, 0, 16, 16, 0, false, 0).unwrap()
+    assert(stone_native_context_generation() != old_generation)
+    run_scene_passes()
+    assert_eq(calls, 0)
+}
+
+@test
+fn native_scene_discards_on_reload_and_teardown() {
+    profiler_test_process("native_scene_context_lifetime_case", 0)
+}
