@@ -101,6 +101,7 @@ pub extern(ffi, "stone") fn stone_get_glyph_unit_metrics(font_id: int, face: int
 pub extern(ffi, "stone") fn stone_get_live_canvas_bytes() -> int
 pub extern(ffi, "stone") fn stone_get_live_canvas_count() -> int
 pub extern(ffi, "stone") fn stone_get_live_canvas_handle(index: int) -> int
+pub extern(ffi, "stone") fn stone_get_live_mesh_bytes() -> int
 pub extern(ffi, "stone") fn stone_get_live_mesh_count() -> int
 pub extern(ffi, "stone") fn stone_get_live_mesh_handle(index: int) -> int
 extern(ffi, "stone") fn stone_get_mouse_position(x: Ptr<int>, y: Ptr<int>)
