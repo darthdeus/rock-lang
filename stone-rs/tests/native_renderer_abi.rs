@@ -11,9 +11,11 @@ fn main() {
             return;
         }
         if args.iter().any(|arg| arg == "--list") {
+            println!("native_renderer_reads_asset_bytes: test");
             println!("second_native_library_renders_multi_attachment_target_restores_state_and_invalidates_handles: test");
             return;
         }
+        native_renderer_reads_asset_bytes();
         second_native_library_renders_multi_attachment_target_restores_state_and_invalidates_handles();
     }
 }
@@ -1370,6 +1372,42 @@ fn api() -> &'static stone_rs::native_renderer::StoneNativeRendererApiV1 {
     unsafe {
         &*stone_native_renderer_api(1).cast::<stone_rs::native_renderer::StoneNativeRendererApiV1>()
     }
+}
+
+fn native_renderer_reads_asset_bytes() {
+    use std::ptr::{null, null_mut};
+    use stone_rs::asset_registry::stone_register_asset;
+
+    let dir = tempfile::tempdir().unwrap();
+    let embedded = CString::new(dir.path().join("embedded.bin").to_str().unwrap()).unwrap();
+    let filesystem_path = dir.path().join("filesystem.bin");
+    let filesystem = CString::new(filesystem_path.to_str().unwrap()).unwrap();
+    let missing = CString::new(dir.path().join("missing.bin").to_str().unwrap()).unwrap();
+    let embedded_bytes = [0x81, 0, 0x23, 0x45];
+    let filesystem_bytes = [0x67, 0x89, 0, 0xab];
+    stone_register_asset(
+        embedded.as_ptr(),
+        embedded_bytes.as_ptr(),
+        embedded_bytes.len(),
+    );
+    std::fs::write(filesystem_path, filesystem_bytes).unwrap();
+
+    let read = api().asset_read;
+    for (path, bytes) in [(&embedded, embedded_bytes), (&filesystem, filesystem_bytes)] {
+        let size = bytes.len() as i64;
+        assert_eq!(read(path.as_ptr(), null_mut(), 0), size, "{path:?}");
+
+        let mut buffer = [0xff; 6];
+        assert_eq!(read(path.as_ptr(), buffer.as_mut_ptr(), 2), size);
+        assert_eq!(buffer, [bytes[0], bytes[1], 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(read(path.as_ptr(), buffer.as_mut_ptr(), buffer.len()), size);
+        assert_eq!(&buffer[..bytes.len()], &bytes);
+        assert_eq!(&buffer[bytes.len()..], &[0xff; 2]);
+    }
+
+    assert_eq!(read(missing.as_ptr(), null_mut(), 0), -1);
+    assert_eq!(read(null(), null_mut(), 0), -1);
+    assert_eq!(read(c"\xff".as_ptr(), null_mut(), 0), -1);
 }
 
 unsafe fn stage_binds_no_vertex_array_and_drains_gl_errors(gl: &glow::Context) {

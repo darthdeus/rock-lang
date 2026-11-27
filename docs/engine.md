@@ -481,7 +481,7 @@ through a single versioned C function-pointer table:
   (null otherwise). Callers validate `abi_version == 1` and
   `struct_size >= sizeof(StoneNativeRendererApiV1)` before dereferencing fields.
   The pointer stays valid for the lifetime of the loaded Stone shared library.
-- Every entry is render-thread only: it must run on the thread that owns
+- Entries that access renderer state must run on the thread that owns
   Stone's GL context. Elsewhere it does nothing and returns `0`/false (a
   destroy called from a worker thread leaks the GL objects). The first ignored
   call logs a warning. The frame-active, frame-target, and frame-size queries
@@ -490,10 +490,20 @@ through a single versioned C function-pointer table:
   for C callers. Version 1 only appends fields; `stone-rs` asserts every
   field's offset at compile time and a test checks the header against the
   Rust field order.
-- Every entry in `StoneNativeRendererApiV1` is also exported directly in
+- Renderer-state entries are also exported directly in
   `packages/stone/engine/rendering_ffi.h` or `runtime_ffi.h` (and their `.rock`
   bindings) via `stone-rs/build.rs`. Native code should use the table rather
   than receiving export addresses from script code.
+
+### Asset bytes
+
+`asset_read(const char* path, uint8_t* dst, size_t cap) -> int64_t` takes a
+NUL-terminated UTF-8 path after script-side overlay resolution. Like Stone's
+loaders, it checks the mod root for registered paths, then the embedded registry,
+then the filesystem path. It copies `min(cap, size)` bytes into the caller-owned
+buffer and returns the total byte size. Pass `NULL` and `0` for `dst` and `cap`
+to query the size. A missing asset or read failure returns `-1`. A null path or
+invalid UTF-8 returns `-1` and logs one error per call.
 
 ### Stage scope and GL state save/restore
 
