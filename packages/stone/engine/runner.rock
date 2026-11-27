@@ -506,6 +506,7 @@ pub @nomangle fn stone_game_boot(config: GameConfig) -> bool {
     let _ = font_coverage_oversampling_require(
         config.font_coverage_oversampling)
     setup_stone()
+    HOST_DRIVES_FRAME = stone_host_drives_frame()
     if runner_checked_run() { collect_logged_errors() }
     perf_phase_vm_start()
     let runner_phase = perf_phase_begin("startup.runner")
@@ -673,8 +674,95 @@ pub @nomangle fn stone_game_boot(config: GameConfig) -> bool {
     }
     GAME_RUN = run
     game_frame_open(run)
+    if HOST_DRIVES_FRAME && game_entries_publish() == 0 {
+        log_error("STONE", "stone_game_boot: the host frame entries were not published")
+    }
     return true
 }
+
+@nomangle fn game_entry_failed(entry: string, message: string) {
+    log_error("STONE", "{entry}: {message}")
+}
+
+// Publishes the C entries in stone_game_entries(). The callbacks are created
+// once per process and call the Rock entries through a table each publication
+// refreshes. LuaJIT callbacks are a bounded process resource; these are never
+// freed. A Lua error must not unwind into the host, so each call is protected.
+@nomangle inline(lua) fn game_entries_publish() -> int = """
+    local fns = _G.__stone_game_entry_fns
+    if not fns then
+        fns = {}
+        _G.__stone_game_entry_fns = fns
+        local info_size = ffi.sizeof("StoneFrameBeginInfo")
+        local plan_size = ffi.sizeof("StoneFramePlan")
+        local result_size = ffi.sizeof("StoneFrameResult")
+        local function call(entry, ...)
+            local ok, value = xpcall(fns[entry], __rock_traceback, ...)
+            if ok then return value end
+            pcall(fns.failed, entry, tostring(value))
+            return nil
+        end
+        local function fill_plan(out, plan)
+            out.struct_size = plan_size
+            out.termination = plan.termination
+            out.frame = plan.frame
+            out.dt = plan.dt
+            out.active_width = plan.active_width
+            out.active_height = plan.active_height
+            out.running = plan.running and 1 or 0
+            out.ticks = plan.ticks and 1 or 0
+            out.draws = plan.draws and 1 or 0
+        end
+        local begin = ffi.cast("StoneGameFrameBeginFn", function(info, out)
+            if info == nil or out == nil or info.struct_size < info_size then
+                pcall(fns.failed, "stone_game_frame_begin", "invalid arguments")
+                return 0
+            end
+            local plan = call("begin", tonumber(info.time), tonumber(info.frame))
+            if plan == nil then return 0 end
+            fill_plan(out, plan)
+            return 1
+        end)
+        local update = ffi.cast("StoneGameFrameUpdateFn", function(out)
+            if out == nil then
+                pcall(fns.failed, "stone_game_frame_update", "invalid arguments")
+                return 0
+            end
+            local plan = call("update")
+            if plan == nil then return 0 end
+            fill_plan(out, plan)
+            return 1
+        end)
+        local draw = ffi.cast("StoneGameFrameDrawFn", function(out)
+            if out == nil then
+                pcall(fns.failed, "stone_game_frame_draw", "invalid arguments")
+                return 0
+            end
+            local result = call("draw")
+            if result == nil then return 0 end
+            out.struct_size = result_size
+            out.termination = result.termination
+            out.running = result.running and 1 or 0
+            out.present = result.present and 1 or 0
+            return 1
+        end)
+        local shutdown = ffi.cast("StoneGameShutdownFn", function()
+            return call("shutdown") and 1 or 0
+        end)
+        fns.callbacks = { begin, update, draw, shutdown }
+    end
+    fns.begin = stone_game_frame_begin
+    fns.update = stone_game_frame_update
+    fns.draw = stone_game_frame_draw
+    fns.shutdown = stone_game_shutdown
+    fns.failed = game_entry_failed
+    local cb = fns.callbacks
+    return tonumber(stone.stone_game_entries_publish(cb[1], cb[2], cb[3], cb[4]))
+"""
+
+@nomangle inline(lua) fn game_entries_withdraw() = """
+    stone.stone_game_entries_publish(nil, nil, nil, nil)
+"""
 
 // Start frame `run.frame + 1`, or end the run when a bounded run is complete.
 // The previous frame's outer interval closes here.
@@ -890,6 +978,7 @@ pub @nomangle fn stone_game_shutdown() -> bool {
         log_error("STONE", "stone_game_shutdown: frame {run.frame} was not finished")
     }
     GAME_RUN = null
+    if HOST_DRIVES_FRAME { game_entries_withdraw() }
     let frame = run.frame
     let config = run.config
     let max_frames = run.max_frames

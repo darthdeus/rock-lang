@@ -303,6 +303,7 @@ mod ffi_array;
 mod file_jobs;
 mod filesystem;
 mod frame_stream;
+mod game_host;
 mod image_data;
 pub mod image_decode;
 mod image_publication;
@@ -1713,7 +1714,11 @@ pub extern "C" fn stone_poll_event(event: *mut StoneEvent) -> bool {
     if event.is_null() {
         return false;
     }
-    let polled = with_window_mut(poll_window_event).flatten();
+    let polled = if game_host::stone_host_drives_frame() {
+        game_host::guest_next_event()
+    } else {
+        with_window_mut(poll_window_event).flatten()
+    };
     unsafe { *event = polled.unwrap_or_default() };
     polled.is_some()
 }
@@ -1777,7 +1782,7 @@ fn alt_enter(event: &Event) -> Option<bool> {
 
 /// The next event for the game, or a blank event for one the engine consumed;
 /// None once the queue is empty.
-fn poll_window_event(window: &mut StoneWindow) -> Option<StoneEvent> {
+pub(crate) fn poll_window_event(window: &mut StoneWindow) -> Option<StoneEvent> {
     if let Some(translated) = window
         .controller_manager
         .borrow_mut()

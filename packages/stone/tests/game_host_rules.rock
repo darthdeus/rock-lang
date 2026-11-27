@@ -1,0 +1,83 @@
+use stone::*
+
+// Drives the game the way an embedding host does, through the C entries, the
+// event pump and the swap only. profiler_test_process runs it with the JIT off,
+// which LuaJIT requires when Lua code enters a callback through C. A quit
+// event pushed before frame `quit_at` (0 for none) reaches both sides.
+inline(lua) fn game_host_test_drive(max_frames: int, quit_at: int) -> (int, int, int, int, int) = """
+    pcall(ffi.cdef, "int SDL_PushEvent(void* event);")
+    local entries = stone.stone_game_entries()
+    assert(entries.frame_begin ~= nil, "the frame entries were not published")
+    local info = ffi.new("StoneFrameBeginInfo")
+    info.struct_size = ffi.sizeof(info)
+    local plan = ffi.new("StoneFramePlan")
+    local result = ffi.new("StoneFrameResult")
+    local event = ffi.new("StoneEvent")
+    local frames, draws, presents, quits, termination = 0, 0, 0, 0, -1
+    while frames < max_frames do
+        if frames + 1 == quit_at then
+            local quit = ffi.new("uint32_t[16]")
+            quit[0] = 0x100
+            assert(stone.SDL_PushEvent(quit) == 1)
+        end
+        local pumped = stone.stone_pump_events()
+        for i = 0, pumped - 1 do
+            assert(stone.stone_frame_event(i, event) ~= 0)
+            if event.type == 1 then quits = quits + 1 end
+        end
+        info.frame = frames + 1
+        info.time = stone.stone_get_time()
+        assert(entries.frame_begin(info, plan) == 1)
+        if plan.running == 0 then termination = plan.termination break end
+        assert(entries.frame_update(plan) == 1)
+        if plan.draws ~= 0 then
+            assert(plan.active_width == 16 and plan.active_height == 16)
+            draws = draws + 1
+        end
+        assert(entries.frame_draw(result) == 1)
+        frames = frames + 1
+        if result.present ~= 0 then
+            stone.stone_swap_window(nil)
+            presents = presents + 1
+        end
+        if result.running == 0 then termination = result.termination break end
+    end
+    -- After the run ended, begin reports it again instead of opening a frame.
+    if termination >= 0 then
+        assert(entries.frame_begin(info, plan) == 1 and plan.running == 0)
+    end
+    assert(entries.shutdown() == 1)
+    assert(stone.stone_game_entries().frame_begin == nil, "shutdown withdraws the entries")
+    return frames, draws, presents, quits, termination
+"""
+
+@nomangle
+fn game_host_drives_frame_case(which: int) {
+    if which == 0 { os_setenv("FRAME_COUNT", "3") }
+    stone_host_drives_frame_set(true)
+    let swaps_before = stone_gl_swap_count()
+    stone_run_game(GameConfig { title: "game host", width: 16, height: 16,
+        font_path: project_asset_path("@engine/assets/fonts/DroidSans.ttf"), vsync: 0 })
+    assert(HOST_DRIVES_FRAME)
+    let (frames, draws, presents, quits, termination) =
+        game_host_test_drive(10, if which == 1 { 2 } else { 0 })
+    if which == 0 {
+        // A bounded run ends on its frame cap, as through stone_run_game.
+        assert_eq((frames, draws, presents, termination), (3, 3, 3, STONE_GAME_FRAME_CAP))
+    } else {
+        // The guest saw the quit the host pumped and ended after that frame.
+        assert_eq((frames, quits, termination), (2, 1, STONE_GAME_QUIT))
+    }
+    // The guest never swaps when the host drives the frame.
+    assert_eq(stone_gl_swap_count() - swaps_before, presents)
+}
+
+@test
+fn a_host_drives_frames_through_the_entries_until_the_frame_cap() {
+    profiler_test_process("game_host_drives_frame_case", 0)
+}
+
+@test
+fn a_quit_event_the_host_pumps_ends_the_guest_run() {
+    profiler_test_process("game_host_drives_frame_case", 1)
+}
