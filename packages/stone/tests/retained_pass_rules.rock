@@ -39,7 +39,7 @@ fn retained_pass_input_updates_preserve_queued_records() {
                     if i == 0 { canvas } else { retained_pass_canvas(4) }))
                 assert_eq(seen.slot_inputs[0].1, if i == 0 { TextureFilter::Nearest } else { TextureFilter::Linear })
             }
-            ScenePassEntry::Native(_, _) => { error("unexpected native callback") }
+            ScenePassEntry::Native(_, _, _) => { error("unexpected native callback") }
         }
     }
     assert(same_ref(FINAL_PASSES[0], original))

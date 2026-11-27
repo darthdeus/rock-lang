@@ -538,8 +538,9 @@ int32_t body(void* userdata, uint64_t current_scene, uint64_t partner_scene);
 Stone runs the entry once at most on the render thread, after world composition
 and before scene overlays and post-processing. The queue borrows the function
 pointer and opaque userdata until the frame drains or discards the entry.
-A target rebuild, suppressed submission, or frame reset may discard it without
-invoking the callback or reading userdata. Enqueue returns false for a null
+A target rebuild, suppressed submission, frame reset, reload, or Stone
+teardown discards pending entries. Dispatch checks the context generation
+captured at enqueue and skips stale entries before accessing userdata. Enqueue returns false for a null
 callback, an unavailable render context, suppressed submission, or an active
 scene drain. The scene queue cannot be modified or drained recursively during
 dispatch.

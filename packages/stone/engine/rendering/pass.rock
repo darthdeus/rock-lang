@@ -264,7 +264,7 @@ pub fn run_passes(passes: [Pass]) {
 // Queue them each frame; use final passes for the tonemapped image.
 pub(package) enum ScenePassEntry {
     Script(Pass),
-    Native(PtrU8, PtrU8),
+    Native(int, PtrU8, PtrU8),
 }
 
 pub(package) global SCENE_PASSES: [ScenePassEntry] = []
@@ -301,9 +301,10 @@ pub fn queue_scene_pass(p: Pass) {
 
 /// Borrows callback code and userdata through this frame's scene drain or discard.
 pub fn queue_native_scene_pass(body: PtrU8, userdata: PtrU8) -> bool {
-    if SCENE_PASSES_RUNNING || SIM_SKIP_SUBMIT || !native_scene_callback_present(body)
-        || stone_native_context_generation() == 0 { return false }
-    SCENE_PASSES.push(ScenePassEntry::Native(body, userdata))
+    if SCENE_PASSES_RUNNING || SIM_SKIP_SUBMIT || !native_scene_callback_present(body) { return false }
+    let generation = stone_native_context_generation()
+    if generation == 0 { return false }
+    SCENE_PASSES.push(ScenePassEntry::Native(generation, body, userdata))
     return true
 }
 
@@ -361,6 +362,7 @@ global SCENE_RETURN_PASS: Pass? = null
 @nomangle
 @on_reload
 fn reset_scene_return_pass() {
+    SCENE_PASSES.clear()
     SCENE_RETURN_PASS = null
 }
 
@@ -396,7 +398,8 @@ pub fn run_scene_passes() {
     for entry in SCENE_PASSES {
         let p = match entry {
             ScenePassEntry::Script(pass) => pass,
-            ScenePassEntry::Native(body, userdata) => {
+            ScenePassEntry::Native(generation, body, userdata) => {
+                if generation != stone_native_context_generation() { continue }
                 if run_native_scene_pass(body, userdata, current.handle.0, partner.handle.0) {
                     let swap = current
                     current = partner

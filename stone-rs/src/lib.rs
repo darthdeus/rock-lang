@@ -1167,7 +1167,6 @@ pub extern "C" fn stone_quit_requested() -> bool {
 
 /// Release context-owned resources while the context is current. Call after the
 /// main loop, never mid-frame. Safe if already torn down or never initialized.
-/// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_teardown() -> bool {
     crate::relight_jobs::shutdown();
