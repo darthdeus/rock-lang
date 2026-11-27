@@ -971,6 +971,24 @@ pub extern "C" fn stone_shader_texture_slot_info(
     copy_c_name(&name, name_out, name_cap)
 }
 
+extern "C" fn asset_read(path: *const c_char, dst: *mut u8, cap: usize) -> i64 {
+    let Some(path) = (unsafe { crate::filesystem::cstr(path) }) else {
+        ::log::error!(target: "ASSETS", "native renderer asset_read requires a non-null UTF-8 path");
+        return -1;
+    };
+    if cap > 0 && dst.is_null() {
+        return -1;
+    }
+    let Some(bytes) = crate::asset_registry::resolve_asset(path) else {
+        return -1;
+    };
+    let count = cap.min(bytes.len());
+    if count > 0 {
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), dst, count) };
+    }
+    bytes.len() as i64
+}
+
 /// Stable versioned function-pointer table handed to another native library in
 /// the same process via `stone_native_renderer_api(1)`.
 #[repr(C)]
@@ -1060,6 +1078,7 @@ pub struct StoneNativeRendererApiV1 {
     pub frame_set_world_image: extern "C" fn(u64, u32) -> bool,
     pub gpu_scope_begin: unsafe extern "C" fn(*const c_char),
     pub gpu_scope_end: extern "C" fn(),
+    pub asset_read: extern "C" fn(*const c_char, *mut u8, usize) -> i64,
 }
 
 // Version 1 only appends: each entry keeps its index, so its offset never moves.
@@ -1150,6 +1169,7 @@ api_v1_layout! {
     frame_set_world_image = 67,
     gpu_scope_begin = 68,
     gpu_scope_end = 69,
+    asset_read = 70,
 }
 
 static STONE_NATIVE_RENDERER_API_V1: StoneNativeRendererApiV1 = StoneNativeRendererApiV1 {
@@ -1232,6 +1252,7 @@ static STONE_NATIVE_RENDERER_API_V1: StoneNativeRendererApiV1 = StoneNativeRende
     frame_set_world_image: crate::native_frame::stone_native_frame_set_world_image,
     gpu_scope_begin: crate::stone_gpu_scope_begin,
     gpu_scope_end: crate::stone_gpu_scope_end,
+    asset_read,
 };
 
 /// Return the static function table for `abi_version`, or null if unsupported.
