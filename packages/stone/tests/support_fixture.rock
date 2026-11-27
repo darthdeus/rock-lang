@@ -2,7 +2,14 @@ pub use stone_native::test_support::{world_fixture_call, world_fixture_raised,
     world_fixture_with_cleanup, world_fixture_traceback};
 
 // Profiler globals and native counters belong to the process, not a test shard.
-inline(lua) fn profiler_test_process(entry: string, which: int) = """
+fn profiler_test_process(entry: string, which: int) {
+    let (passed, log) = profiler_test_process_run(entry, which)
+    assert(passed, log)
+}
+
+// Runs `entry(which)` in a fresh process. Returns whether it exited 0 after
+// the entry returned, and its output.
+inline(lua) fn profiler_test_process_run(entry: string, which: int) -> (bool, string) = """
     local function quote(s) return "'" .. s:gsub("'", "'\\''") .. "'" end
     local library_key = ffi.os == "OSX" and "DYLD_LIBRARY_PATH" or "LD_LIBRARY_PATH"
     local library_env = library_key .. "=" .. quote(assert(os.getenv(library_key)))
@@ -17,7 +24,7 @@ inline(lua) fn profiler_test_process(entry: string, which: int) = """
     local log = file:read("*a")
     file:close()
     assert(os.remove(path))
-    assert(status == 0 and log:find("PROFILER_PROCESS_PASS", 1, true), log)
+    return status == 0 and log:find("PROFILER_PROCESS_PASS", 1, true) ~= nil, log
 """
 
 // Run it in a fresh process (profiler_test_process): the runner's clocks,

@@ -751,6 +751,9 @@ deco init on_reload {
 // argument. Skips under hot reload (the reload path re-runs top-level code
 // but must not re-enter main), catches Ctrl+C cleanly, and re-raises other
 // errors with their original message so stack traces point at the real fault.
+// A runtime whose program keeps running after `main` returns (a host-driven
+// game) sets `__rock_logged_errors_finish_deferred`; the wrapper then leaves
+// `finish` to it by setting `__rock_logged_errors_finish_owed`.
 @nomangle inline(lua) fn __rock_main_wrapper(main_fn: any) = """
     if _G.HOT_RELOAD then return end
     local ok, err = pcall(main_fn)
@@ -762,7 +765,9 @@ deco init on_reload {
         end
     end
     local errors = _G.__rock_logged_errors
-    if errors and errors.finish then
+    if _G.__rock_logged_errors_finish_deferred then
+        _G.__rock_logged_errors_finish_owed = true
+    elseif errors and errors.finish then
         collectgarbage("collect")
         errors.finish()
     end

@@ -2,12 +2,23 @@ use stone::*
 
 global GAME_HOST_TEST_DRAWS: bool = false
 global GAME_HOST_TEST_RAISES: bool = false
+// A logged error record the next draw takes, as a program expecting it does.
+global GAME_HOST_TEST_TAKES: string = ""
+global GAME_HOST_TEST_LOGS: bool = false
 
 // A script batch the guest draws above the world image.
 @draw
 fn game_host_test_draw() {
     if GAME_HOST_TEST_DRAWS {
         rect(pixel_screen, v(0.0, 0.0), v(8.0, 16.0), Color { r: 0.0, g: 1.0, b: 0.0, a: 1.0 })
+    }
+    if GAME_HOST_TEST_TAKES != "" {
+        assert(take_logged_error(GAME_HOST_TEST_TAKES))
+        GAME_HOST_TEST_TAKES = ""
+    }
+    if GAME_HOST_TEST_LOGS {
+        GAME_HOST_TEST_LOGS = false
+        log_error("TEST", "logged in a frame")
     }
     if GAME_HOST_TEST_RAISES {
         set_blend_mode(BlendMode::Additive)
@@ -368,6 +379,28 @@ fn game_host_drives_frame_case(which: int) {
     assert(presents > 0)
 }
 
+// The program's main boots a host-driven game and returns before the first
+// frame. Its frames then take an error logged at boot (0), or log one nothing
+// takes (1).
+@nomangle
+fn game_host_main_case(which: int) {
+    __rock_main_wrapper(() => {
+        stone_host_drives_frame_set(true)
+        stone_run_game(GameConfig { title: "game host", width: 16, height: 16,
+            font_path: project_asset_path("@engine/assets/fonts/DroidSans.ttf"), vsync: 0 })
+        if which == 0 {
+            log_error("TEST", "taken by a frame")
+            GAME_HOST_TEST_TAKES = "[TEST] taken by a frame"
+        }
+        return ()
+    })
+    GAME_HOST_TEST_LOGS = which == 1
+    let (frames, _, _, _, _) = game_host_test_drive(3, 0)
+    assert_eq(frames, 3)
+    assert_eq(GAME_HOST_TEST_TAKES, "")
+    game_host_test_shutdown()
+}
+
 // The host's view of the baseline right after boot, before it touches GL.
 inline(lua) fn game_host_test_state_before_image() -> string = """
     pcall(ffi.cdef, "void* SDL_GL_GetProcAddress(const char* proc);")
@@ -463,4 +496,11 @@ fn a_paused_timeline_plans_frames_without_a_tick() {
 @test
 fn the_host_frame_entries_survive_a_full_script_reload() {
     profiler_test_process("game_host_drives_frame_case", 9)
+}
+
+@test
+fn a_host_run_checks_logged_errors_at_shutdown_not_when_main_returns() {
+    profiler_test_process("game_host_main_case", 0)
+    let (passed, log) = profiler_test_process_run("game_host_main_case", 1)
+    assert(!passed && log.contains("logged error(s) after main: [TEST] logged in a frame"), log)
 }
