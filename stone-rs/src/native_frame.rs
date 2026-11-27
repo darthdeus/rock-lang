@@ -72,6 +72,11 @@ thread_local! {
     static LAST_HOOK_ID: Cell<u64> = const { Cell::new(0) };
     static DISPATCHING: Cell<Option<(u32, u64, StoneFrameInfo)>> = const { Cell::new(None) };
     static WORLD_IMAGE: Cell<Option<WorldImage>> = const { Cell::new(None) };
+    // `target` is an imported image handle here, not an engine target.
+    static HOST_WORLD_IMAGE: Cell<Option<WorldImage>> = const { Cell::new(None) };
+    // The read framebuffer the host image is attached to for its copy, with
+    // the context generation it was created in.
+    static HOST_IMAGE_FBO: Cell<Option<(u64, glow::Framebuffer)>> = const { Cell::new(None) };
 }
 
 /// Register `run` (a `StoneFrameHookFn`) to be called at `point` every frame,
@@ -168,6 +173,10 @@ pub(crate) fn release_all() {
     HOOKS.with(|hooks| hooks.borrow_mut().iter_mut().for_each(|h| h.removed = true));
     release_removed();
     WORLD_IMAGE.with(|w| w.set(None));
+    HOST_WORLD_IMAGE.with(|w| w.set(None));
+    if let Some((_, fbo)) = HOST_IMAGE_FBO.with(Cell::take) {
+        with_gl(|gl| unsafe { gl.delete_framebuffer(fbo) });
+    }
     DISPATCHING.with(|d| d.set(None));
 }
 
@@ -178,7 +187,8 @@ pub(crate) fn release_all() {
 /// `STONE_FRAME_HOOKS_WROTE` when a hook wrote the scene target and, at
 /// `WORLD_BEGIN`, `STONE_FRAME_HOOKS_WORLD_IMAGE` when a hook supplied the
 /// world image (already copied into the scene target when it is another
-/// target). Returns 0 when no hook ran. Each hook's stage restores GL state
+/// target) or the host set one with `stone_frame_set_host_world_image`.
+/// Returns 0 when no hook ran and no host image applied. Each hook's stage restores GL state
 /// and Stone's caches, and the caller's target is rebound through
 /// `stone_set_canvas`, so the caller's script-side caches stay valid.
 /// rock-ffi stone-rendering private
@@ -203,7 +213,16 @@ pub extern "C" fn stone_native_frame_hooks_run(
             .map(|h| (h.order, h.id))
             .collect()
     });
-    if due.is_empty() {
+    let host_image = if point == STONE_FRAME_HOOK_WORLD_BEGIN {
+        let frame = crate::stream_buffer::frame();
+        HOST_WORLD_IMAGE
+            .with(|w| w.take())
+            .filter(|image| image.frame == frame)
+            .map(|image| image.target)
+    } else {
+        None
+    };
+    if due.is_empty() && host_image.is_none() {
         return 0;
     }
     let Some(context_generation) = with_gl(|_| crate::handles::context_generation()) else {
@@ -240,6 +259,9 @@ pub extern "C" fn stone_native_frame_hooks_run(
     if point == STONE_FRAME_HOOK_WORLD_BEGIN {
         WORLD_IMAGE.with(|w| w.set(None));
     }
+    // Hooks run after it and may draw over it or replace it.
+    let host_image_copied =
+        host_image.is_some_and(|image| copy_host_image(image, scene_target, active_w, active_h));
 
     // Each hook's own stage restores GL state; the dispatch only binds the
     // scene target and gives the caller's target back.
@@ -288,11 +310,15 @@ pub extern "C" fn stone_native_frame_hooks_run(
 
     if point == STONE_FRAME_HOOK_WORLD_BEGIN {
         if let Some(image) = current_world_image() {
-            if image != scene_target && !copy_color(image, scene_target, active_w, active_h) {
+            let copied = image == scene_target
+                || crate::canvas::canvas_framebuffer(image)
+                    .is_some_and(|fbo| copy_color(fbo, scene_target, active_w, active_h));
+            if !copied {
+                ::log::error!(target: "STONE", "world image {image}: copy into scene target {scene_target} failed");
                 WORLD_IMAGE.with(|w| w.set(None));
             }
         }
-        if current_world_image().is_some() {
+        if current_world_image().is_some() || host_image_copied {
             flags |= STONE_FRAME_HOOKS_WORLD_IMAGE;
         }
     }
@@ -345,6 +371,101 @@ pub extern "C" fn stone_native_frame_set_world_image(target: u64, flags: u32) ->
     true
 }
 
+/// Supply this frame's world image from the embedding host that drives the
+/// frame: `image` is registered through `stone_image_import_gl_texture` and its
+/// size is the plan's active size. Call between `frame_update` and
+/// `frame_draw`; it applies to that frame only. `flags` are as for
+/// `stone_native_frame_set_world_image`. A `WORLD_BEGIN` hook still runs and may
+/// draw over the image or replace it. Returns false with a logged error for an
+/// invalid image or flags; an image whose size does not match the scene logs
+/// at `WORLD_BEGIN`. Either way the frame renders through the engine path.
+/// rock-ffi stone-rendering
+#[no_mangle]
+pub extern "C" fn stone_frame_set_host_world_image(image: u64, flags: u32) -> bool {
+    HOST_WORLD_IMAGE.with(|w| w.set(None));
+    if DISPATCHING.with(Cell::get).is_some() {
+        ::log::error!(target: "STONE", "stone_frame_set_host_world_image: called from a frame hook; use stone_native_frame_set_world_image");
+        return false;
+    }
+    if flags != STONE_WORLD_IMAGE_KEEP_POST {
+        ::log::error!(target: "STONE", "stone_frame_set_host_world_image: unsupported flags 0x{flags:X} (only KEEP_POST)");
+        return false;
+    }
+    if !crate::image_texture::is_imported(image) {
+        ::log::error!(target: "STONE", "stone_frame_set_host_world_image: image {image} is not an imported GL texture");
+        return false;
+    }
+    let frame = crate::stream_buffer::frame();
+    HOST_WORLD_IMAGE.with(|w| {
+        w.set(Some(WorldImage {
+            target: image,
+            frame,
+        }))
+    });
+    true
+}
+
+fn copy_host_image(image: u64, scene: u64, w: c_int, h: c_int) -> bool {
+    let size = crate::image_texture::image_info(image).map(|(_, iw, ih, _, _)| (iw, ih));
+    let texture = crate::image_texture::sample_image_texture(image)
+        .and_then(std::num::NonZeroU32::new)
+        .map(glow::NativeTexture);
+    let (Some((iw, ih)), Some(texture)) = (size, texture) else {
+        ::log::error!(target: "STONE", "host world image {image} is no longer live");
+        return false;
+    };
+    if (iw, ih) != (w, h) {
+        ::log::error!(target: "STONE", "host world image {image} is {iw}x{ih}, not the {w}x{h} scene");
+        return false;
+    }
+    let scope = stone_native_stage_begin();
+    let source = with_gl(|gl| unsafe {
+        let generation = crate::handles::context_generation();
+        let fbo = match HOST_IMAGE_FBO.with(Cell::get) {
+            Some((created_in, fbo)) if created_in == generation => fbo,
+            _ => {
+                let fbo = gl.create_framebuffer().ok()?;
+                HOST_IMAGE_FBO.with(|f| f.set(Some((generation, fbo))));
+                fbo
+            }
+        };
+        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(fbo));
+        gl.framebuffer_texture_2d(
+            glow::READ_FRAMEBUFFER,
+            glow::COLOR_ATTACHMENT0,
+            glow::TEXTURE_2D,
+            Some(texture),
+            0,
+        );
+        Some(fbo)
+    })
+    .flatten();
+    let copied = source.is_some_and(|fbo| {
+        let complete = with_gl(|gl| unsafe {
+            gl.check_framebuffer_status(glow::READ_FRAMEBUFFER) == glow::FRAMEBUFFER_COMPLETE
+        }) == Some(true);
+        complete && copy_color(fbo, scene, w, h)
+    });
+    if let Some(fbo) = source {
+        // Detached, so the host's texture is not kept alive between frames.
+        with_gl(|gl| unsafe {
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(fbo));
+            gl.framebuffer_texture_2d(
+                glow::READ_FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                None,
+                0,
+            );
+        });
+    }
+    stone_native_stage_end(scope);
+    if !copied {
+        ::log::error!(target: "STONE", "host world image {image}: copy into scene target {scene} failed");
+    }
+    copied
+}
+
 fn current_world_image() -> Option<u64> {
     let frame = crate::stream_buffer::frame();
     WORLD_IMAGE
@@ -353,14 +474,11 @@ fn current_world_image() -> Option<u64> {
         .map(|image| image.target)
 }
 
-/// Blit colour 0 of `source` over the active rect of `scene`. Only colour 0 of
+/// Blit colour 0 of `src_fbo` over the active rect of `scene`. Only colour 0 of
 /// the scene is written: a blit writes every draw buffer, and integer
 /// attachments cannot take a float source.
-fn copy_color(source: u64, scene: u64, w: c_int, h: c_int) -> bool {
-    let (Some(src_fbo), Some(dst_fbo)) = (
-        crate::canvas::canvas_framebuffer(source),
-        crate::canvas::canvas_framebuffer(scene),
-    ) else {
+fn copy_color(src_fbo: glow::Framebuffer, scene: u64, w: c_int, h: c_int) -> bool {
+    let Some(dst_fbo) = crate::canvas::canvas_framebuffer(scene) else {
         return false;
     };
     let scope = stone_native_stage_begin();
@@ -396,9 +514,6 @@ fn copy_color(source: u64, scene: u64, w: c_int, h: c_int) -> bool {
     })
     .unwrap_or(false);
     stone_native_stage_end(scope);
-    if !copied {
-        ::log::error!(target: "STONE", "world image {source}: copy into scene target {scene} failed");
-    }
     copied
 }
 

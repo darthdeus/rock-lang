@@ -80,6 +80,7 @@ extern(ffi, "stone") fn stone_draw_mesh(vertex_data: Ptr<float>, vertex_count: i
 extern(ffi, "stone") fn stone_font_atlas_instance_count(font_id: int) -> int
 pub extern(ffi, "stone") fn stone_font_data_len(font_id: int) -> int
 pub extern(ffi, "stone") fn stone_font_release_coverage(font_id: int) -> bool
+pub extern(ffi, "stone") fn stone_frame_set_host_world_image(image: int, flags: int) -> bool
 extern(ffi, "stone") fn stone_frame_stream_begin(path: string) -> bool
 extern(ffi, "stone") fn stone_frame_stream_finish(out_frames: Ptr<int>, out_w: Ptr<int>, out_h: Ptr<int>) -> bool
 extern(ffi, "stone") fn stone_frame_stream_record(width: int, height: int) -> bool
