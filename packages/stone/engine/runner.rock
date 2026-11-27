@@ -1470,7 +1470,9 @@ fn frame_core_present(window: StoneWindow) {
     }
     profile_mark_pre_swap()
     if HOST_DRIVES_FRAME {
-        // The host swaps after drawing whatever it puts above this frame.
+        // The host swaps after drawing whatever it puts above this frame, and
+        // owns any post-swap sync. The frame's timing closes in the draw entry,
+        // before that swap, so present_ms excludes it.
         FRAME_PRESENT_PENDING = true
     } else {
         stone_swap_window(window)
