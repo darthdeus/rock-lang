@@ -197,6 +197,8 @@ uint8_t stone_file_transaction_write_png(int transaction, const char* path, cons
 int stone_file_write_poll(int id, bool wait);
 void stone_flush_image_uploads(void);
 void stone_force_vsync_off(int force);
+uint8_t stone_frame_baseline_enter(void);
+void stone_frame_baseline_leave(void);
 uint8_t stone_frame_event(int index, StoneEvent* event);
 int stone_frame_event_count(void);
 uint64_t stone_game_entries_publish(const void* frame_begin, const void* frame_update, const void* frame_draw, const void* shutdown);
