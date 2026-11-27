@@ -1,0 +1,212 @@
+use stone::*
+
+inline(lua) fn scene_test_callback(body: fn(int, int) -> int) -> PtrU8 = """
+    return ffi.cast("int32_t (*)(void *, uint64_t, uint64_t)", function(_, current, partner)
+        return body(tonumber(current), tonumber(partner))
+    end)
+"""
+
+inline(lua) fn scene_test_free_callback(callback: PtrU8) { 'callback:free()' }
+inline(lua) fn scene_test_null() -> PtrU8 = 'return ffi.cast("void *", nil)'
+
+fn scene_test_blit(input: Canvas, output: Canvas, blend: BlendMode) -> Pass {
+    return Pass { pipeline: BLIT_PIPELINE, slot_inputs: [(sampled_canvas(input), TextureFilter::Nearest)],
+        output, blend }
+}
+
+fn scene_test_fill(canvas: Canvas, r: float) {
+    set_canvas(canvas)
+    stone_clear_canvas(r, 0.0, 0.0, 1.0)
+}
+
+@test
+fn native_scene_fifo_pair_and_scope() {
+    gpu_test_host()
+    let view = resolve_frame_view(v(16,16), iv(16,16), Camera2D {}, RENDER_CONFIG).unwrap()
+    with_scene_render_scope(view, () => {
+        let source = new_canvas(16.0, 16.0, "rgba8")
+        defer { unset_canvas(); destroy_canvas(source) }
+        let primary = screen_canvas
+        let secondary = screen_canvas_2
+        for c in [primary, secondary, source] { set_canvas_active(c, 8, 8) }
+        scene_test_fill(source, 0.2)
+        unset_depth_mode()
+
+        for result in [0, 1, 27, 28] {
+            for reversed in [false, true] {
+                if reversed && result != 0 { continue }
+                scene_test_fill(primary, 0.2)
+                scene_test_fill(secondary, 0.05)
+                let calls = 0
+                let active = false
+                let saw_current = 0
+                let saw_partner = 0
+                let callback = scene_test_callback((current, partner) => {
+                    calls += 1
+                    active = stone_native_frame_active()
+                    saw_current = current
+                    saw_partner = partner
+                    let r = stone_read_canvas_pixel_channel(current, 2, 2, 0)
+                    let _ = stone_native_stage_begin()
+                    stone_set_canvas(if result == 1 { partner } else { current })
+                    if result != 27 { stone_clear_canvas(r * 0.5, 0.0, 0.0, 1.0) }
+                    stone_set_shader(0)
+                    stone_set_viewport_rect(0, 0, 1, 1)
+                    stone_set_scissor(true, 0, 0, 1, 1)
+                    stone_set_color_mask(false, false, false, false)
+                    if result == 28 {
+                        stone_reset_frame_stats()
+                        return 0
+                    }
+                    return result
+                })
+                defer { scene_test_free_callback(callback) }
+                unset_canvas()
+                queue_scene_pass(scene_test_blit(primary, secondary, BlendMode::Replace))
+                let last = scene_test_blit(source, if result == 1 { primary } else { secondary }, BlendMode::Additive)
+                if reversed { queue_scene_pass(last) }
+                assert(queue_native_scene_pass(callback, scene_test_null()))
+                if !reversed { queue_scene_pass(last) }
+                if result == 27 {
+                    assert_error_logs(["[RENDER] native scene pass returned invalid result 27"], () => {
+                        run_scene_passes()
+                    })
+                } else {
+                    run_scene_passes()
+                }
+                assert_eq(calls, 1)
+                assert(active && !stone_native_frame_active())
+                assert_eq(saw_current, secondary.handle.0)
+                assert_eq(saw_partner, primary.handle.0)
+                let expected = if result == 27 { 0.4 } else if reversed { 0.2 } else { 0.3 }
+                assert(abs(stone_read_canvas_pixel_channel(primary.handle.0, 2, 2, 0) - expected) < 0.01)
+                run_scene_passes()
+                assert_eq(calls, 1)
+            }
+        }
+    })
+}
+
+@test
+fn native_scene_discards_suppressed_submissions() {
+    gpu_test_host()
+    let saved = SIM_SKIP_SUBMIT
+    defer { SIM_SKIP_SUBMIT = saved }
+    let calls = 0
+    let callback = scene_test_callback((_current, _partner) => { calls += 1; return 0 })
+    defer { scene_test_free_callback(callback) }
+    SIM_SKIP_SUBMIT = false
+    assert(!queue_native_scene_pass(scene_test_null(), scene_test_null()))
+    assert(queue_native_scene_pass(callback, scene_test_null()))
+    SIM_SKIP_SUBMIT = true
+    run_scene_passes()
+    SIM_SKIP_SUBMIT = false
+    run_scene_passes()
+    assert_eq(calls, 0)
+}
+
+value SceneScopeTestU { gain: float }
+
+struct SceneScopeTestTex { source: Sampler2D }
+
+@shader(fragment)
+fn scene_scope_test_frag(@textures t: SceneScopeTestTex, @uniform u: SceneScopeTestU, uv: Vec2) -> Vec4 {
+    return v(texture(t.source, uv).x * u.gain, 0.0, 0.0, 1.0)
+}
+
+@shader(fragment)
+fn scene_scope_dirty_frag(@uniform u: SceneScopeTestU, uv: Vec2) -> Vec4 {
+    return v(u.gain, uv.x, 0.0, 1.0)
+}
+
+@test
+fn native_scene_restores_clipped_viewport_shader_ubo_and_sampler() {
+    gpu_test_host()
+    let view = resolve_frame_view(v(16,16), iv(16,16), Camera2D {}, RENDER_CONFIG).unwrap()
+    with_scene_render_scope(view, () => {
+        let source = screen_canvas_2
+        let output = screen_canvas
+        set_canvas_active(source, 8, 8)
+        set_canvas_active(output, 8, 8)
+        scene_test_fill(source, 0.8)
+        scene_test_fill(output, 0.0)
+        unset_depth_mode()
+        set_blend_mode(BlendMode::Replace)
+        let shader = rock_shader(scene_scope_test_frag)
+        let dirty = rock_shader(scene_scope_dirty_frag)
+        set_shader(dirty)
+        set_uniform_block(dirty, SceneScopeTestU { gain: 0.125 })
+        set_shader(shader)
+        set_uniform_block(shader, SceneScopeTestU { gain: 0.5 })
+        assert(bind_sampled_to_slot(sampled_canvas(source), 0, TextureFilter::Nearest))
+        stone_set_scissor(true, 2, 0, 4, 8)
+        let write_state = stone_gl_write_state()
+        let handle = get_shader_handle(shader)
+        let block_state = stone_uniform_block_binding_state_json(handle)
+        let dirty_state = ""
+        let dirty_handle = get_shader_handle(dirty)
+        let callback = scene_test_null()
+        let requeued = true
+        callback = scene_test_callback((_current, _partner) => {
+            requeued = queue_native_scene_pass(callback, scene_test_null())
+            queue_scene_pass(scene_test_blit(source, output, BlendMode::Replace))
+            run_scene_passes()
+            stone_set_canvas(source.handle.0)
+            stone_set_viewport_rect(0, 0, 1, 1)
+            stone_set_scissor(false, 0, 0, 0, 0)
+            stone_set_shader(dirty_handle)
+            sampler_release_unit(0)
+            dirty_state = stone_uniform_block_binding_state_json(handle)
+            return 0
+        })
+        defer { scene_test_free_callback(callback) }
+        assert(queue_native_scene_pass(callback, scene_test_null()))
+        run_scene_passes()
+        assert(!requeued)
+        assert_eq(SCENE_PASSES_RUN_LAST, 1)
+        assert_eq(CURRENT_CANVAS_HANDLE, output.handle.0)
+        assert_eq(WATCHER.current_shader_name, shader)
+        assert(dirty_state != block_state)
+        assert_eq(stone_uniform_block_binding_state_json(handle), block_state)
+        assert(stone_sampler_bound(0))
+        assert_eq(stone_gl_write_state(), write_state)
+        // Draw without rebinding any state. A leaked 1x1 viewport misses x=4.
+        stone_draw_fullscreen_rect(0.0, 0.0, 0.5, 0.5)
+        assert(abs(stone_read_canvas_pixel_channel(output.handle.0, 4, 2, 0) - 0.4) < 0.01)
+        assert_eq(stone_read_canvas_pixel_channel(output.handle.0, 1, 2, 0), 0.0)
+        assert_eq(stone_read_canvas_pixel_channel(output.handle.0, 6, 2, 0), 0.0)
+        end_shader()
+        sampler_release_unit(0)
+    })
+}
+
+@nomangle
+fn native_scene_rebuild_case(_which: int) {
+    let _ = native_runner_test_boot("native scene rebuild")
+    defer { let _ = stone_teardown() }
+    let calls = 0
+    let callback = scene_test_callback((_current, _partner) => { calls += 1; return 0 })
+    defer { scene_test_free_callback(callback) }
+    let dropped = PASSES_DROPPED_ON_REBUILD
+    assert(queue_native_scene_pass(callback, scene_test_null()))
+    ensure_scene_capacity(SCENE_CAPACITY + iv(16, 16))
+    run_scene_passes()
+    assert_eq(calls, 0)
+    assert_eq(PASSES_DROPPED_ON_REBUILD, dropped + 1)
+
+    assert(queue_native_scene_pass(callback, scene_test_null()))
+    SIM_SKIP_SUBMIT = true
+    frame_core_render_world()
+    SIM_SKIP_SUBMIT = false
+    frame_core_render_world()
+    assert_eq(calls, 0)
+
+    assert(queue_native_scene_pass(callback, scene_test_null()))
+    frame_core_render_world()
+    assert_eq(calls, 1)
+}
+
+@test
+fn native_scene_discards_on_scene_target_rebuild() {
+    profiler_test_process("native_scene_rebuild_case", 0)
+}

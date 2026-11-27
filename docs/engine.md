@@ -524,6 +524,41 @@ through a single versioned C function-pointer table:
   `stone_native_frame_size(&w, &h)` are valid only on the render thread while a
   stage scope is open; off-thread or outside a stage they report inactive.
 
+### Native scene passes
+
+Call `queue_native_scene_pass(body: PtrU8, userdata: PtrU8) -> bool` from
+Rock to enqueue a native callback in FIFO order with ordinary scene passes.
+The callback uses the C signature declared by `StoneNativeSceneFn`:
+
+```c
+int32_t body(void* userdata, uint64_t current_scene, uint64_t partner_scene);
+```
+
+Stone runs the entry once at most on the render thread, after world composition
+and before scene overlays and post-processing. The queue borrows the function
+pointer and opaque userdata until the frame drains or discards the entry.
+A target rebuild, suppressed submission, or frame reset may discard it without
+invoking the callback or reading userdata. Enqueue returns false for a null
+callback, an unavailable render context, suppressed submission, or an active
+scene drain. The scene queue cannot be modified or drained recursively during
+dispatch.
+
+Both canvas handles are in logical order at the entry's position in the queue.
+Return `STONE_SCENE_NO_OUTPUT_CHANGE` (0) when the result remains in the
+incoming current target, or `STONE_SCENE_OUTPUT_PARTNER` (1) when it lives in
+the incoming partner. Other values log an error and retain the incoming order.
+Later passes see the reported output, and Stone copies the last scene back to
+the primary scene canvas when needed.
+
+Stone opens a native stage for the callback and skips invocation if the stage
+cannot open. The stage restores the ambient bindings and render state, unwinds
+open inner scopes, and uses the custom-draw recovery path if the stage was lost.
+The callback selects its own targets and checks for feedback, including aliased
+attachments. Writes to textures and mutations to resources persist. Restore any
+draw-buffer changes made to shared framebuffers other than the entry framebuffer
+before returning. Draws are ordered with the surrounding passes through normal
+GL command ordering.
+
 ### Handle validity, lookup and invalidation
 
 Resource kinds are typed (`STONE_RESOURCE_TARGET = 1`, `SHADER = 2`,

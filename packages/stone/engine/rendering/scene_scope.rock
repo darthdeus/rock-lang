@@ -15,7 +15,7 @@ struct SceneRenderSaved0 {
     mesh_free: [SpriteMesh],
     mesh_in_flight: [SpriteMesh],
     world_prepare_passes: [Pass],
-    scene_passes: [Pass],
+    scene_passes: [ScenePassEntry],
     scene_passes_run_last: int,
     world_batch_fast: Map<int, [string]>,
     batch_occ: Map<string, Occ>,

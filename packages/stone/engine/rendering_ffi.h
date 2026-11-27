@@ -68,6 +68,11 @@ double stone_ensure_font_atlas_instance_number(uint32_t font_id, int pixel_size)
 const char* stone_native_live_handles(const char* class);
 const char* stone_native_id_accounting(void);
 
+// Used by the Rock queue_native_scene_pass function.
+typedef int32_t (*StoneNativeSceneFn)(void* userdata, uint64_t current_scene, uint64_t partner_scene);
+static const int STONE_SCENE_NO_OUTPUT_CHANGE = 0;
+static const int STONE_SCENE_OUTPUT_PARTNER = 1;
+
 // The table `stone_native_renderer_api(1)` returns. Version 1 only ever
 // appends fields: check `abi_version == 1` and `struct_size >= sizeof` before
 // use. Every entry must be called on the render thread.
