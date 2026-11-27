@@ -276,7 +276,8 @@ pub const STONE_SCENE_OUTPUT_PARTNER: int = 1
 inline(lua) fn native_scene_callback_present(body: PtrU8) -> bool = "return body ~= nil"
 
 inline(lua) fn call_native_scene_pass(body: PtrU8, userdata: PtrU8, current: int, partner: int) -> int = """
-    return ffi.cast("int32_t (*)(void *, uint64_t, uint64_t)", body)(userdata, current, partner)
+    local callback = ffi.cast("int32_t (*)(void *, uint64_t, uint64_t)", body)
+    return callback(ffi.cast("void *", userdata), current, partner)
 """
 
 pub global WORLD_PREPARE_PASSES: [Pass] = []
@@ -312,11 +313,13 @@ fn run_native_scene_pass(body: PtrU8, userdata: PtrU8, current: int, partner: in
     let shader = WATCHER.current_shader_name
     let stage = stone_native_stage_begin()
     if stage == 0 { return false }
-    let result = call_native_scene_pass(body, userdata, current, partner)
-    if !restore_after_custom_draw(stage, target, DepthMode::Off, blend, shader) {
-        if target != 0 { stone_set_draw_buffer_mask(1) }
-        if let name = shader { set_shader(name) } else { end_shader() }
+    defer {
+        if !restore_after_custom_draw(stage, target, DepthMode::Off, blend, shader) {
+            if target != 0 { stone_set_draw_buffer_mask(1) }
+            if let name = shader { set_shader(name) } else { end_shader() }
+        }
     }
+    let result = call_native_scene_pass(body, userdata, current, partner)
     if result != STONE_SCENE_NO_OUTPUT_CHANGE && result != STONE_SCENE_OUTPUT_PARTNER {
         log_error("RENDER", "native scene pass returned invalid result {result}")
         return false
