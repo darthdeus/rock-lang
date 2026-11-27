@@ -29,6 +29,7 @@ pub(crate) struct Canvas {
     // The target whose owned attachment this is (0 = none). Only the owner
     // resizes, re-attaches or destroys it.
     owner: u64,
+    color_source: u64,
 }
 
 impl Canvas {
@@ -159,7 +160,9 @@ impl Canvas {
     }
 
     unsafe fn delete(&self, gl: &crate::DebugGl) {
-        gl.delete_texture(self.texture);
+        if self.color_source == 0 {
+            gl.delete_texture(self.texture);
+        }
         if let Some(depth) = self.depth_texture {
             gl.delete_texture(depth);
         }
@@ -173,6 +176,7 @@ fn rebind_current(gl: &crate::DebugGl) {
 
 thread_local! {
     static CANVASES: RefCell<HashMap<u64, Canvas>> = RefCell::new(HashMap::new());
+    static COLOR_VIEWS: RefCell<HashMap<u64, Vec<u64>>> = RefCell::new(HashMap::new());
     static CURRENT_FBO: RefCell<Option<glow::Framebuffer>> = const { RefCell::new(None) };
     static CURRENT_CANVAS_HANDLE: Cell<u64> = const { Cell::new(0) };
     static CURRENT_TARGET_SIZE: RefCell<(f32, f32)> = const { RefCell::new((0.0, 0.0)) };
@@ -407,15 +411,23 @@ pub extern "C" fn stone_set_present_viewport(active: bool, x: c_int, y: c_int, w
 /// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_set_canvas_active(handle: u64, w: c_int, h: c_int) {
-    with_canvas_mut(handle, |canvas| {
+    let changed = with_canvas_mut(handle, |canvas| {
+        if canvas.color_source != 0 {
+            return false;
+        }
         let new_w = w.clamp(1, canvas.width);
         let new_h = h.clamp(1, canvas.height);
         if canvas.active_w != new_w || canvas.active_h != new_h {
             canvas.active_w = new_w;
             canvas.active_h = new_h;
             canvas.generation = crate::handles::next_generation();
+            return true;
         }
+        false
     });
+    if changed == Some(true) {
+        destroy_color_views(handle);
+    }
 }
 
 /// rock-ffi stone-rendering
@@ -728,6 +740,7 @@ pub extern "C" fn stone_create_canvas(
             owned_attachments: [0; DRAW_BUFFERS],
             attached_slots: [0; DRAW_BUFFERS],
             owner: 0,
+            color_source: 0,
         };
         gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(texture), 0);
         gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::TEXTURE_2D, depth_texture, 0);
@@ -825,9 +838,9 @@ pub extern "C" fn stone_canvas_report(handle: u64, width: *mut c_int, height: *m
     if handle == 0 || width.is_null() || height.is_null() {
         return -1;
     }
-    let found = with_canvas(handle, |canvas| {
-        (canvas.width, canvas.height, canvas.format)
-    });
+    let found = lookup_canvas(handle)
+        .filter(|canvas| canvas.color_source == 0)
+        .map(|canvas| (canvas.width, canvas.height, canvas.format));
     let Some((w, h, format)) = found else {
         return -1;
     };
@@ -862,7 +875,7 @@ pub extern "C" fn stone_canvas_resize(handle: u64, width: c_int, height: c_int) 
         );
         return false;
     };
-    if refuse_owned_attachment("stone_canvas_resize", handle) {
+    if canvas.color_source != 0 || refuse_owned_attachment("stone_canvas_resize", handle) {
         return false;
     }
     if (canvas.width, canvas.height) == (width, height) {
@@ -925,6 +938,7 @@ pub extern "C" fn stone_canvas_resize(handle: u64, width: c_int, height: c_int) 
             }
             c.generation = crate::handles::next_generation();
         });
+        destroy_color_views(target);
     }
     complete
 }
@@ -950,12 +964,37 @@ pub extern "C" fn stone_destroy_canvas(handle: u64) {
     destroy_canvas(handle);
 }
 
+fn destroy_color_views(source: u64) {
+    let views = COLOR_VIEWS.with_borrow_mut(|views| views.remove(&source));
+    if let Some(views) = views {
+        for view in views {
+            destroy_canvas(view);
+        }
+    }
+}
+
 fn destroy_canvas(handle: u64) {
     let removed = CANVASES.with(|canvases| canvases.borrow_mut().remove(&handle));
     if let Some(canvas) = removed {
+        if canvas.color_source == 0 {
+            destroy_color_views(handle);
+        } else {
+            COLOR_VIEWS.with_borrow_mut(|views| {
+                if let Some(siblings) = views.get_mut(&canvas.color_source) {
+                    siblings.retain(|&view| view != handle);
+                    if siblings.is_empty() {
+                        views.remove(&canvas.color_source);
+                    }
+                }
+            });
+        }
         if CURRENT_CANVAS_HANDLE.with(Cell::get) == handle {
-            CURRENT_CANVAS_HANDLE.with(|c| c.set(0));
-            CURRENT_FBO.with(|c| *c.borrow_mut() = None);
+            if canvas.color_source != 0 {
+                stone_set_canvas(0);
+            } else {
+                CURRENT_CANVAS_HANDLE.with(|c| c.set(0));
+                CURRENT_FBO.with(|c| *c.borrow_mut() = None);
+            }
         }
         crate::handles::retire(Class::Canvas, handle);
         with_gl(|gl| unsafe { canvas.delete(gl) });
@@ -1080,6 +1119,53 @@ fn target_create_releases_children_and_primary_on_attach_failure() {
             ("destroy", 1),
         ]
     );
+}
+
+/// Borrow a target's primary color image as output zero of a color-only FBO.
+/// The returned handle is retired whenever the source's generation changes.
+/// rock-ffi stone-rendering
+#[no_mangle]
+pub extern "C" fn stone_target_color_view(source: u64) -> u64 {
+    with_gl(|gl| unsafe {
+        let Some(canvas) = lookup_canvas(source).filter(|canvas| canvas.color_source == 0) else {
+            return 0;
+        };
+        let Ok(fbo) = gl.create_framebuffer() else {
+            return 0;
+        };
+        let previous = crate::native_renderer::read_framebuffer(gl, glow::DRAW_FRAMEBUFFER_BINDING);
+        gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(fbo));
+        gl.framebuffer_texture_2d(
+            glow::DRAW_FRAMEBUFFER,
+            glow::COLOR_ATTACHMENT0,
+            glow::TEXTURE_2D,
+            Some(canvas.texture),
+            0,
+        );
+        let status = gl.check_framebuffer_status(glow::DRAW_FRAMEBUFFER);
+        gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, previous);
+        if status != glow::FRAMEBUFFER_COMPLETE {
+            gl.delete_framebuffer(fbo);
+            return 0;
+        }
+
+        let view = Canvas {
+            fbo,
+            depth_texture: None,
+            bound_as_target: false,
+            generation: crate::handles::next_generation(),
+            owned_attachments: [0; DRAW_BUFFERS],
+            attached_slots: [0; DRAW_BUFFERS],
+            owner: 0,
+            color_source: source,
+            ..canvas
+        };
+        let handle = crate::handles::mint(Class::Canvas);
+        CANVASES.with_borrow_mut(|canvases| canvases.insert(handle, view));
+        COLOR_VIEWS.with_borrow_mut(|views| views.entry(source).or_default().push(handle));
+        handle
+    })
+    .unwrap_or(0)
 }
 
 /// Resize a native-owned render target and all of its owned attachments.
@@ -1270,6 +1356,9 @@ pub extern "C" fn stone_canvas_attach_color_target(
         );
         return false;
     };
+    if color.color_source != 0 || id.color_source != 0 {
+        return false;
+    }
     let (color_wh, id_wh) = ((color.width, color.height), (id.width, id.height));
     if color_wh != id_wh {
         crate::log_once!(
@@ -1307,6 +1396,7 @@ pub extern "C" fn stone_canvas_attach_color_target(
             c.attached_slots[slot as usize] = id_handle;
             c.generation = crate::handles::next_generation();
         });
+        destroy_color_views(color_handle);
     }
     ok
 }
@@ -1750,6 +1840,7 @@ pub(crate) fn live_canvas_bytes() -> u64 {
         canvases
             .borrow()
             .values()
+            .filter(|canvas| canvas.color_source == 0)
             .map(|canvas| {
                 let color_bytes = color_format(canvas.format).3;
                 let pixels = canvas.width.max(0) as u64 * canvas.height.max(0) as u64;
@@ -1782,7 +1873,7 @@ pub(crate) fn capture_resources() -> serde_json::Value {
 pub(crate) fn capture_texture_owner(texture: u32) -> serde_json::Value {
     CANVASES.with(|c| c.borrow().iter().find_map(|(handle, c)| {
         let depth = c.depth_texture.is_some_and(|t| t.0.get() == texture);
-        (c.texture.0.get() == texture || depth).then(|| serde_json::json!({
+        (c.color_source == 0 && (c.texture.0.get() == texture || depth)).then(|| serde_json::json!({
             "canvas_handle": handle, "depth": depth, "active_width": c.active_w, "active_height": c.active_h,
         }))
     })).unwrap_or(serde_json::Value::Null)

@@ -201,6 +201,7 @@ pub extern(ffi, "stone") fn stone_shader_upload_uniform_block(handle: int, data:
 pub extern(ffi, "stone") fn stone_show_cursor(show: bool)
 extern(ffi, "stone") fn stone_sprite_init() -> bool
 pub extern(ffi, "stone") fn stone_target_attachment(handle: int, slot: int) -> int
+pub extern(ffi, "stone") fn stone_target_color_view(source: int) -> int
 pub extern(ffi, "stone") fn stone_target_create(width: int, height: int, attachment_formats: Ptr<int>, attachment_count: int, with_depth: bool) -> int
 pub extern(ffi, "stone") fn stone_target_destroy(handle: int)
 pub extern(ffi, "stone") fn stone_target_resize(handle: int, width: int, height: int) -> bool

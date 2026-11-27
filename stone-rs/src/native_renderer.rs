@@ -129,7 +129,7 @@ fn set_units(mask: u32) -> impl Iterator<Item = usize> {
     (0..MAX_TEXTURE_UNITS).filter(move |unit| mask & (1 << unit) != 0)
 }
 
-unsafe fn read_framebuffer(gl: &DebugGl, param: u32) -> Option<glow::Framebuffer> {
+pub(crate) unsafe fn read_framebuffer(gl: &DebugGl, param: u32) -> Option<glow::Framebuffer> {
     NonZeroU32::new(gl.get_parameter_i32(param) as u32).map(glow::NativeFramebuffer)
 }
 
@@ -856,6 +856,7 @@ pub struct StoneNativeRendererApiV1 {
     pub mesh_update_instances: extern "C" fn(u64, *const c_float, c_int) -> c_int,
     pub mesh_draw: extern "C" fn(u64, u64, c_int) -> c_int,
     pub mesh_free: extern "C" fn(u64),
+    pub target_color_view: extern "C" fn(u64) -> u64,
 }
 
 // Version 1 only appends: each entry keeps its index, so its offset never moves.
@@ -931,6 +932,7 @@ api_v1_layout! {
     mesh_update_instances = 52,
     mesh_draw = 53,
     mesh_free = 54,
+    target_color_view = 55,
 }
 
 static STONE_NATIVE_RENDERER_API_V1: StoneNativeRendererApiV1 = StoneNativeRendererApiV1 {
@@ -997,6 +999,7 @@ static STONE_NATIVE_RENDERER_API_V1: StoneNativeRendererApiV1 = StoneNativeRende
     mesh_update_instances: crate::mesh::stone_mesh_update_instances,
     mesh_draw: crate::mesh::stone_mesh_draw,
     mesh_free: crate::mesh::stone_mesh_free,
+    target_color_view: crate::canvas::stone_target_color_view,
 };
 
 /// Return the static function table for `abi_version`, or null if unsupported.
