@@ -170,3 +170,81 @@ fn frame_hook_world_image_runner_case(_which: int) {
 fn frame_hooks_world_image_frame_keeps_post_processing_and_present() {
     profiler_test_process("frame_hook_world_image_runner_case", 0)
 }
+
+fn frame_hook_test_window_pixel(x: int, y: int, channel: int) -> int {
+    let pixel = native_buffer_u8(4)
+    stone_read_window_rect(x, y, 1, 1, pixel.ptr)
+    return pixel[channel]
+}
+
+// Runs two frames with a UI_BEGIN hook that clears the target blue, and
+// checks the layer order on the window: the hook's blue above the
+// post-processed world (red) and below the script UI batch (green). The hook
+// draws a canvas-sized clear, so wherever it drew stays visible.
+fn frame_hook_ui_begin_case(title: string, raster_scale: float) {
+    let _ = native_runner_test_boot(title)
+    defer { let _ = stone_teardown() }
+    let saved = RENDER_CONFIG
+    let config = RENDER_CONFIG
+    config.ui.raster_scale = raster_scale
+    RENDER_CONFIG = config
+    defer { RENDER_CONFIG = saved }
+    frame_core_resolve_view()
+    assert_eq(UI_RASTER_CANVAS != null, raster_scale != 1.0, "the case selects the UI raster canvas path")
+    let calls = 0
+    let window_under_hook: [int] = [0, 0, 0]
+    let ui_begin = frame_hook_test_callback(() => {
+        calls += 1
+        window_under_hook = [frame_hook_test_window_pixel(12, 8, 0),
+            frame_hook_test_window_pixel(12, 8, 1), frame_hook_test_window_pixel(12, 8, 2)]
+        stone_clear_canvas(0.0, 0.0, 1.0, 1.0)
+        return 1
+    })
+    defer { frame_hook_test_free(ui_begin) }
+    // The world is the scene target cleared red, post processed.
+    let scene_end = frame_hook_test_callback(() => {
+        stone_clear_canvas(1.0, 0.0, 0.0, 1.0)
+        return 1
+    })
+    defer { frame_hook_test_free(scene_end) }
+    let hook = frame_hook_test_register(STONE_FRAME_HOOK_UI_BEGIN, ui_begin)
+    let world_hook = frame_hook_test_register(STONE_FRAME_HOOK_SCENE_END, scene_end)
+    defer {
+        assert(stone_native_frame_hook_unregister(hook))
+        assert(stone_native_frame_hook_unregister(world_hook))
+    }
+
+    for frame in 0..2 {
+        rect(screen, v(0.0, 0.0), v(8.0, 16.0), Color { r: 0.0, g: 1.0, b: 0.0, a: 1.0 })
+        frame_core_render_world()
+        assert_eq(calls, frame, "the hook runs outside the world draw")
+        frame_core_render_ui_flush()
+        assert_eq(calls, frame + 1, "the hook runs once per frame")
+        assert(window_under_hook[0] > 200 && window_under_hook[2] < 50,
+            "frame {frame}: the hook runs after the post-processed world reaches the window, got {window_under_hook}")
+        assert_eq(frame_hook_test_window_pixel(12, 8, 2), 255,
+            "frame {frame}: the hook's blue covers the post-processed world")
+        let ui = [frame_hook_test_window_pixel(2, 8, 1), frame_hook_test_window_pixel(2, 8, 2)]
+        assert(ui[0] == 255 && ui[1] == 0, "frame {frame}: the script UI batch covers the hook, got green,blue {ui}")
+    }
+}
+
+@nomangle
+fn frame_hook_ui_begin_runner_case(_which: int) {
+    frame_hook_ui_begin_case("frame hook ui begin", 1.0)
+}
+
+@test
+fn a_ui_begin_hook_draws_between_the_post_processed_world_and_script_ui() {
+    profiler_test_process("frame_hook_ui_begin_runner_case", 0)
+}
+
+@nomangle
+fn frame_hook_ui_begin_raster_runner_case(_which: int) {
+    frame_hook_ui_begin_case("frame hook ui begin raster", 0.5)
+}
+
+@test
+fn a_ui_begin_hook_layers_the_same_way_through_the_ui_raster_canvas() {
+    profiler_test_process("frame_hook_ui_begin_raster_runner_case", 0)
+}

@@ -603,6 +603,7 @@ pub const STONE_STAGE_GL_ERROR: int = 32
 pub const STONE_FRAME_HOOK_WORLD_BEGIN: int = 1
 pub const STONE_FRAME_HOOK_WORLD_BATCHES: int = 2
 pub const STONE_FRAME_HOOK_SCENE_END: int = 3
+pub const STONE_FRAME_HOOK_UI_BEGIN: int = 4
 pub const STONE_WORLD_IMAGE_KEEP_POST: int = 1
 // Result bits of stone_native_frame_hooks_run above the stage flags.
 pub const STONE_FRAME_HOOKS_WROTE: int = 256

@@ -221,9 +221,19 @@ fn game_host_drives_frame_case(which: int) {
     assert_eq(game_host_test_state(), baseline)
     let presents = 0
     if which == 0 {
-        // A bounded run ends on its frame cap, as through stone_run_game.
+        // A bounded run ends on its frame cap, as through stone_run_game. A
+        // UI_BEGIN hook runs once per frame inside the draw entry.
+        let ui_begin_in_draw = 0
+        let ui_begin = frame_hook_test_callback(() => {
+            if GAME_RUN.unwrap().phase == GAME_PHASE_UPDATED { ui_begin_in_draw += 1 }
+            return 0
+        })
+        defer { frame_hook_test_free(ui_begin) }
+        let hook = frame_hook_test_register(STONE_FRAME_HOOK_UI_BEGIN, ui_begin)
         let (frames, draws, swapped, _, termination) = game_host_test_drive(10, 0)
+        assert(stone_native_frame_hook_unregister(hook))
         assert_eq((frames, draws, swapped, termination), (3, 3, 3, STONE_GAME_FRAME_CAP))
+        assert_eq(ui_begin_in_draw, draws)
         presents = swapped
     } else if which == 1 {
         // The guest saw the quit the host pumped and ended that frame without

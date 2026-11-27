@@ -13,6 +13,9 @@ use crate::with_gl;
 pub const STONE_FRAME_HOOK_WORLD_BEGIN: u32 = 1;
 pub const STONE_FRAME_HOOK_WORLD_BATCHES: u32 = 2;
 pub const STONE_FRAME_HOOK_SCENE_END: u32 = 3;
+/// Runs after present, before the script UI flush, and draws into the window
+/// framebuffer rather than the scene target.
+pub const STONE_FRAME_HOOK_UI_BEGIN: u32 = 4;
 
 pub const STONE_WORLD_IMAGE_KEEP_POST: u32 = 1;
 /// Reserved: the world image is the composite and post processing is skipped.
@@ -98,7 +101,7 @@ pub extern "C" fn stone_native_frame_hook_register(
     if with_gl(|_| ()).is_none() {
         return 0;
     }
-    if !(STONE_FRAME_HOOK_WORLD_BEGIN..=STONE_FRAME_HOOK_SCENE_END).contains(&point) {
+    if !(STONE_FRAME_HOOK_WORLD_BEGIN..=STONE_FRAME_HOOK_UI_BEGIN).contains(&point) {
         ::log::error!(target: "STONE", "stone_native_frame_hook_register: unknown point {point}");
         return 0;
     }
@@ -181,15 +184,18 @@ pub(crate) fn release_all() {
 }
 
 /// Run the hooks registered at `point` for this frame. The engine calls this
-/// at each point with the frame's scene target pair and world transform; the
-/// scene target is bound while hooks run, and the binding before the call is
-/// restored after. Returns the OR of the hooks' `STONE_STAGE_*` flags plus
-/// `STONE_FRAME_HOOKS_WROTE` when a hook wrote the scene target and, at
-/// `WORLD_BEGIN`, `STONE_FRAME_HOOKS_WORLD_IMAGE` when a hook supplied the
-/// world image (already copied into the scene target when it is another
-/// target) or the host set one with `stone_frame_set_host_world_image`.
-/// Returns 0 when no hook ran and no host image applied. Each hook's stage restores GL state
-/// and Stone's caches, and the caller's target is rebound through
+/// at each point with the frame's scene target pair and world transform. The
+/// scene target is bound while hooks run, except at `UI_BEGIN`, where the
+/// window is: a scaled-UI frame draws its script UI into the UI raster canvas
+/// and composites that over the window, so the window is the layer the hook
+/// has to sit in. The binding before the call is restored after. Returns the
+/// OR of the hooks' `STONE_STAGE_*` flags plus `STONE_FRAME_HOOKS_WROTE` when
+/// a hook wrote the hook target and, at `WORLD_BEGIN`,
+/// `STONE_FRAME_HOOKS_WORLD_IMAGE` when a hook supplied the world image
+/// (already copied into the scene target when it is another target) or the
+/// host set one with `stone_frame_set_host_world_image`. Returns 0 when no
+/// hook ran and no host image applied. Each hook's stage restores GL state and
+/// Stone's caches, and the caller's target is rebound through
 /// `stone_set_canvas`, so the caller's script-side caches stay valid.
 /// rock-ffi stone-rendering private
 #[no_mangle]
@@ -264,10 +270,15 @@ pub extern "C" fn stone_native_frame_hooks_run(
         host_image.is_some_and(|image| copy_host_image(image, scene_target, active_w, active_h));
 
     // Each hook's own stage restores GL state; the dispatch only binds the
-    // scene target and gives the caller's target back.
+    // hook's target and gives the caller's target back.
+    let hook_target = if point == STONE_FRAME_HOOK_UI_BEGIN {
+        0
+    } else {
+        scene_target
+    };
     let previous_target = crate::canvas::current_canvas_handle();
-    if previous_target != scene_target {
-        crate::canvas::stone_set_canvas(scene_target);
+    if previous_target != hook_target {
+        crate::canvas::stone_set_canvas(hook_target);
     }
     let mut flags = 0;
     DISPATCHING.with(|d| d.set(Some((point, frame, info))));
@@ -322,7 +333,7 @@ pub extern "C" fn stone_native_frame_hooks_run(
             flags |= STONE_FRAME_HOOKS_WORLD_IMAGE;
         }
     }
-    if previous_target != scene_target {
+    if previous_target != hook_target {
         crate::canvas::stone_set_canvas(previous_target);
     }
     release_removed();

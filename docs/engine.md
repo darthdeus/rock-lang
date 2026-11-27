@@ -595,13 +595,20 @@ once and `release` runs when the dispatch ends. `stone_teardown` runs every
   attachments selects them itself.
 - `STONE_FRAME_HOOK_SCENE_END = 3`: after scene passes and after-scene
   batches, before post processing.
+- `STONE_FRAME_HOOK_UI_BEGIN = 4`: after post processing, pixel-screen
+  draws and present, before the script UI flush, so native output lies above
+  the post-processed world and below script UI and imgui. The window
+  framebuffer is bound instead of the scene target, also on the frames whose
+  script UI is drawn into the UI raster canvas and composited over the
+  window afterwards.
 
 Each hook runs inside its own stage and a GPU scope named `name`, with the
-scene target bound. `StoneFrameInfo` gives the frame number, context
-generation, scene target and partner with their sizes and generation, and
-the camera script batches use (`stone_set_camera(offset, scale)`). A hook
-returns 0 for no writes, 1 after writing the scene target, or a negative
-value, which is logged. Hooks do not run when submission is suppressed.
+scene target bound unless its point says otherwise. `StoneFrameInfo` gives
+the frame number, context generation, scene target and partner with their
+sizes and generation, and the camera script batches use
+(`stone_set_camera(offset, scale)`). A hook returns 0 for no writes, 1 after
+writing the target it drew into, or a negative value, which is logged.
+Hooks do not run when submission is suppressed.
 
 `frame_set_world_image(target, STONE_WORLD_IMAGE_KEEP_POST)`, called from a
 `WORLD_BEGIN` hook, makes `target` this frame's world image. `target` must

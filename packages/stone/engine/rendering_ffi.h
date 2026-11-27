@@ -80,6 +80,7 @@ typedef int32_t (*StoneNativeSilhouetteFn)(void* userdata, uint64_t target);
 static const int STONE_FRAME_HOOK_WORLD_BEGIN = 1;
 static const int STONE_FRAME_HOOK_WORLD_BATCHES = 2;
 static const int STONE_FRAME_HOOK_SCENE_END = 3;
+static const int STONE_FRAME_HOOK_UI_BEGIN = 4;
 static const int STONE_WORLD_IMAGE_KEEP_POST = 1;
 // Reserved; `frame_set_world_image` rejects it.
 static const int STONE_WORLD_IMAGE_SKIP_POST = 2;

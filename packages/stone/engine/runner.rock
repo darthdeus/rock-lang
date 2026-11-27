@@ -1419,7 +1419,12 @@ fn frame_core_render_ui_flush() {
     if pool_has_pending(pixel_screen.batches) {
         log_once("RENDER", "composite content was queued after flush_pixel_screen (an @late_draw system?) -- pixel_screen and composite UiRects draw in @draw; this frame's is dropped")
     }
-    if !SIM_SKIP_SUBMIT { text_render_order_present() }
+    if !SIM_SKIP_SUBMIT {
+        text_render_order_present()
+        if let view = RENDER_VIEW {
+            run_frame_hooks(STONE_FRAME_HOOK_UI_BEGIN, camera_offset_in(view), view.world_to_scene_scale)
+        }
+    }
     profile_gpu_begin("screen.ui_flush.world_overlay")
     flush_world_overlay()
     profile_gpu_end("screen.ui_flush.world_overlay")
