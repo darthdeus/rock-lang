@@ -277,3 +277,116 @@ fn native_scene_records_named_inspector_passes_in_order() {
         assert_eq(names[3], script.pipeline.shader_name)
     })
 }
+
+inline(lua) fn scene_test_userdata_callback(body: fn(PtrU8, int, int) -> int) -> PtrU8 = """
+    return ffi.cast("int32_t (*)(void *, uint64_t, uint64_t)", function(userdata, current, partner)
+        return body(userdata, tonumber(current), tonumber(partner))
+    end)
+"""
+
+inline(lua) fn scene_test_same_pointer(a: PtrU8, b: PtrU8) -> bool = """
+    return ffi.cast("const void *", a) == ffi.cast("const void *", b)
+"""
+
+@test
+fn native_scene_partner_output_flows_through_mixed_entries() {
+    gpu_test_host()
+    let view = resolve_frame_view(v(16,16), iv(16,16), Camera2D {}, RENDER_CONFIG).unwrap()
+    with_scene_render_scope(view, () => {
+        let primary = screen_canvas
+        let partner = screen_canvas_2
+        let userdata = stone_native_renderer_api(STONE_NATIVE_RENDERER_ABI_VERSION)
+        let calls = 0
+        let observed_userdata = false
+        let observed_order: [int] = []
+        let first = scene_test_userdata_callback((data, current, next) => {
+            calls += 1
+            observed_userdata = scene_test_same_pointer(data, userdata)
+            observed_order.push(current)
+            observed_order.push(next)
+            stone_set_canvas(next)
+            stone_clear_canvas(0.625, 0.0, 0.0, 1.0)
+            return STONE_SCENE_OUTPUT_PARTNER
+        })
+        let last = scene_test_callback((current, next) => {
+            calls += 1
+            observed_order.push(current)
+            observed_order.push(next)
+            return STONE_SCENE_NO_OUTPUT_CHANGE
+        })
+        defer {
+            scene_test_free_callback(last)
+            scene_test_free_callback(first)
+        }
+        unset_depth_mode()
+        for mixed in [false, true] {
+            scene_test_fill(primary, 0.0)
+            scene_test_fill(partner, 0.0)
+            calls = 0
+            observed_order.clear()
+            observed_userdata = false
+            assert(queue_native_scene_pass(first, userdata))
+            if mixed {
+                let shader = rock_shader(scene_scope_test_frag)
+                queue_scene_pass(Pass { pipeline: pipeline(shader),
+                    slot_inputs: [(sampled_canvas(partner), TextureFilter::Nearest)],
+                    block: pass_block(shader, SceneScopeTestU { gain: 0.5 }),
+                    output: primary, blend: BlendMode::Replace })
+                assert(queue_native_scene_pass(last, scene_test_null()))
+            }
+            run_scene_passes()
+            assert(observed_userdata)
+            assert_eq(observed_order[0], primary.handle.0)
+            assert_eq(observed_order[1], partner.handle.0)
+            if mixed {
+                assert_eq(observed_order[2], primary.handle.0)
+                assert_eq(observed_order[3], partner.handle.0)
+            }
+            assert_eq(calls, if mixed { 2 } else { 1 })
+            assert_eq(SCENE_PASSES_RUN_LAST, if mixed { 3 } else { 1 })
+            let expected = if mixed { 0.3125 } else { 0.625 }
+            assert(abs(stone_read_canvas_pixel_channel(primary.handle.0, 2, 2, 0) - expected) < 0.01)
+            run_scene_passes()
+            assert_eq(calls, if mixed { 2 } else { 1 })
+        }
+    })
+}
+
+@nomangle
+fn native_scene_refusal_and_reset_case(_which: int) {
+    let calls = 0
+    let callback = scene_test_callback((_current, _partner) => { calls += 1; return 0 })
+    defer { scene_test_free_callback(callback) }
+
+    assert_eq(stone_native_context_generation(), 0)
+    assert(!queue_native_scene_pass(callback, scene_test_null()))
+    // Admission and stage opening are separate guards. Exercise the latter directly.
+    assert(!run_native_scene_pass("no context", callback, scene_test_null(), 0, 0))
+    assert_eq(calls, 0)
+
+    let (_, config) = native_runner_test_boot("native scene refusal")
+    defer { let _ = stone_teardown() }
+    SIM_SKIP_SUBMIT = true
+    assert(!queue_native_scene_pass(callback, scene_test_null()))
+    SIM_SKIP_SUBMIT = false
+    assert_eq(SCENE_PASSES.len(), 0)
+
+    assert(queue_native_scene_pass(callback, scene_test_null()))
+    render_commands_begin_frame()
+    run_scene_passes()
+    assert_eq(calls, 0)
+
+    // A C host can replace the context without running the Rock teardown wrapper.
+    assert(queue_native_scene_pass(callback, scene_test_null()))
+    assert(stone_teardown_native())
+    assert_eq(SCENE_PASSES.len(), 1)
+    let _ = stone_init_window(config.title, 0, 0, 16, 16, 0, false, 0).unwrap()
+    run_scene_passes()
+    assert_eq(calls, 0)
+    assert_eq(SCENE_PASSES.len(), 0)
+}
+
+@test
+fn native_scene_refuses_invalid_admission_and_discards_pending_entries() {
+    profiler_test_process("native_scene_refusal_and_reset_case", 0)
+}
