@@ -100,6 +100,9 @@ extern "C" {
     fn stone_set_canvas(handle: u64);
     fn stone_destroy_canvas(handle: u64);
     fn stone_get_live_canvas_count() -> c_int;
+    fn stone_get_live_canvas_bytes() -> u64;
+    fn stone_set_canvas_active(handle: u64, width: c_int, height: c_int);
+    fn stone_read_canvas_pixel_channel(handle: u64, x: c_int, y: c_int, channel: c_int) -> f32;
     fn stone_current_shader_bound() -> bool;
     fn stone_set_draw_buffer_mask(mask: c_int);
     fn stone_clear_canvas(r: c_float, g: c_float, b: c_float, a: c_float);
@@ -784,6 +787,7 @@ fn second_native_library_renders_multi_attachment_target_restores_state_and_inva
         let blit = stone_create_shader_from_combined(blit_src.as_ptr());
         assert_ne!(blit, 0);
         stone_shader_set_texture(blit, c"uTexture".as_ptr(), 0);
+        color_view_samples_siblings_and_tracks_source_lifetime(gl, blit);
 
         let mrt_src = CString::new(MRT_SHADER).unwrap();
         let shader = stone_create_shader_from_combined(mrt_src.as_ptr());
@@ -1061,6 +1065,83 @@ fn second_native_library_renders_multi_attachment_target_restores_state_and_inva
     });
 
     unsafe { libc::dlclose(lib) };
+}
+
+unsafe fn color_view_samples_siblings_and_tracks_source_lifetime(gl: &glow::Context, blit: u64) {
+    use stone_rs::native_renderer::StoneNativeRendererApiV1;
+
+    let api = &*stone_native_renderer_api(1).cast::<StoneNativeRendererApiV1>();
+    let formats = [STONE_CANVAS_RGBA8; 2];
+    let target = stone_target_create(8, 8, formats.as_ptr(), 2, true);
+    let sibling = stone_target_attachment(target, 1);
+    assert_ne!(sibling, 0);
+    stone_set_canvas_active(target, 4, 4);
+
+    let bytes = stone_get_live_canvas_bytes();
+    let count = stone_get_live_canvas_count();
+    let view = (api.target_color_view)(target);
+    assert_ne!(view, 0);
+    assert_ne!(view, target);
+    assert_eq!(stone_get_live_canvas_bytes(), bytes);
+    assert_eq!(stone_get_live_canvas_count(), count + 1);
+    assert_eq!((api.target_color_view)(0), 0);
+    assert_eq!((api.target_color_view)(view), 0);
+    assert_eq!(stone_target_attachment(view, 0), view);
+    assert_eq!(stone_target_attachment(view, 1), 0);
+    assert!(!stone_target_resize(view, 12, 12));
+    assert!(!stone_canvas_attach_color_target(view, sibling, 1));
+    assert!(!stone_canvas_attach_color_target(target, view, 1));
+
+    let (mut w, mut h, mut format, mut outputs, mut depth) = (0, 0, -1, 0, true);
+    assert_ne!(
+        stone_native_target_info(view, &mut w, &mut h, &mut format, &mut outputs, &mut depth),
+        0
+    );
+    assert_eq!(
+        (w, h, format, outputs, depth),
+        (4, 4, STONE_CANVAS_RGBA8, 1, false)
+    );
+
+    stone_set_canvas(sibling);
+    stone_clear_canvas(0.75, 0.0, 0.0, 1.0);
+    stone_set_canvas(view);
+    let color = gl.get_framebuffer_attachment_parameter_i32(
+        glow::DRAW_FRAMEBUFFER,
+        glow::COLOR_ATTACHMENT1,
+        glow::FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,
+    );
+    assert_eq!(color as u32, glow::NONE);
+    stone_set_shader(blit);
+    stone_set_blend_mode_i(4);
+    assert!(stone_bind_canvas_texture_to_unit(sibling, 0));
+    (api.draw_fullscreen_quad)();
+    stone_set_shader(0);
+    stone_set_canvas(0);
+    assert!((stone_read_canvas_pixel_channel(target, 1, 2, 0) - 0.75).abs() < 0.01);
+
+    let discarded = (api.target_color_view)(target);
+    assert_ne!(discarded, 0);
+    stone_target_destroy(discarded);
+    assert!(stone_native_handle_valid(STONE_RESOURCE_TARGET, target));
+    stone_set_canvas_active(target, 8, 8);
+    assert!(!stone_native_handle_valid(STONE_RESOURCE_TARGET, view));
+    assert_eq!(stone_read_canvas_pixel_channel(target, 6, 7, 0), 0.0);
+
+    let child_view = (api.target_color_view)(sibling);
+    assert_ne!(child_view, 0);
+    assert!(stone_target_resize(target, 16, 16));
+    assert!(!stone_native_handle_valid(
+        STONE_RESOURCE_TARGET,
+        child_view
+    ));
+    let child_view = (api.target_color_view)(sibling);
+    assert_ne!(child_view, 0);
+    stone_target_destroy(target);
+    assert!(!stone_native_handle_valid(
+        STONE_RESOURCE_TARGET,
+        child_view
+    ));
+    assert_eq!(stone_get_live_canvas_count(), count - 2);
 }
 
 unsafe fn teardown_invalidates_handles_in_the_next_context(target: u64, shader: u64) {

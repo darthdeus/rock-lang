@@ -592,6 +592,15 @@ Resource kinds are typed (`STONE_RESOURCE_TARGET = 1`, `SHADER = 2`,
 
 ### Native-owned multi-attachment render targets
 
+- `stone_target_color_view(source)` borrows the source target's color image as
+  output zero of a separate framebuffer with no other attachments. Pass an
+  attachment handle to borrow a secondary image. The view uses the source's
+  active extent and aliases its pixels. A fullscreen draw to the view can
+  sample sibling images, while sampling the borrowed image itself would cause
+  feedback. Creation returns 0 for an invalid source, a view, or an allocation
+  failure. Release the view with `stone_target_destroy`; destroying or changing
+  the source's generation also releases its views. Views own no texture storage
+  and reject resize and attachment changes.
 - `stone_target_create(w, h, formats, count, with_depth)` allocates a render
   target with `1..=8` colour attachments (`STONE_CANVAS_RGBA8 = 0`,
   `RGBA16F = 1`, `RGBA32F = 2`, `R32I = 3`) and optional depth.
