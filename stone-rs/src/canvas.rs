@@ -1248,7 +1248,9 @@ pub extern "C" fn stone_canvas_attach_color_target(
     if color_handle == 0 || id_handle == 0 {
         return false;
     }
-    if refuse_owned_attachment("stone_canvas_attach_color_target", id_handle) {
+    if refuse_owned_attachment("stone_canvas_attach_color_target", color_handle)
+        || refuse_owned_attachment("stone_canvas_attach_color_target", id_handle)
+    {
         return false;
     }
     if let Some(owned) = with_canvas(color_handle, |c| c.owned_attachments[slot as usize]) {

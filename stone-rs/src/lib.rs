@@ -3283,9 +3283,23 @@ mod tests {
         assert!(with_gl(|_| ()).is_none());
         assert_eq!(off_thread_gl_calls(), before);
         handles::set_context_live(true);
-        assert!(with_gl(|_| ()).is_none());
+        let (active, target, size, after_queries, after_render) = std::thread::spawn(|| {
+            let active = native_renderer::stone_native_frame_active();
+            let target = native_renderer::stone_native_frame_target();
+            let size = native_renderer::stone_native_frame_size(
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+            let after_queries = off_thread_gl_calls();
+            assert!(with_gl(|_| ()).is_none());
+            (active, target, size, after_queries, off_thread_gl_calls())
+        })
+        .join()
+        .unwrap();
         handles::set_context_live(false);
-        assert!(off_thread_gl_calls() > before);
+        assert!(!active && target == 0 && !size);
+        assert_eq!(after_queries, before);
+        assert_eq!(after_render, before + 1);
     }
 
     use super::*;
