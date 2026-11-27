@@ -239,3 +239,41 @@ fn native_scene_context_lifetime_case(_which: int) {
 fn native_scene_discards_on_reload_and_teardown() {
     profiler_test_process("native_scene_context_lifetime_case", 0)
 }
+
+@test
+fn native_scene_records_named_inspector_passes_in_order() {
+    gpu_test_host()
+    let view = resolve_frame_view(v(16,16), iv(16,16), Camera2D {}, RENDER_CONFIG).unwrap()
+    with_scene_render_scope(view, () => {
+        let previous = ENGINE.show_pipeline_inspector
+        let previous_log = PIPELINE_PASS_LOG
+        ENGINE.show_pipeline_inspector = true
+        pipeline_inspector_frame_begin()
+        defer {
+            ENGINE.show_pipeline_inspector = previous
+            PIPELINE_PASS_LOG = previous_log
+        }
+        let callback = scene_test_callback((_current, _partner) => 0)
+        defer { scene_test_free_callback(callback) }
+        let script = scene_test_blit(screen_canvas_2, screen_canvas, BlendMode::Replace)
+        queue_scene_pass(script)
+        assert(queue_named_native_scene_pass("native probe", callback, scene_test_null()))
+        assert(queue_native_scene_pass(callback, scene_test_null()))
+        queue_scene_pass(script)
+
+        run_scene_passes()
+        assert_eq(PIPELINE_PASS_LOG.len(), 4)
+        let names: [string] = []
+        for entry in PIPELINE_PASS_LOG {
+            match entry {
+                PipelinePassInfo::Legacy(p) => { names.push(p.pipeline.shader_name) }
+                PipelinePassInfo::NativeScene(name) => { names.push(name) }
+                PipelinePassInfo::Semantic(_) => { assert(false) }
+            }
+        }
+        assert_eq(names[0], script.pipeline.shader_name)
+        assert_eq(names[1], "native probe")
+        assert_eq(names[2], "native_scene_pass")
+        assert_eq(names[3], script.pipeline.shader_name)
+    })
+}
