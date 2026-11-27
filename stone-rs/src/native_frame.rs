@@ -178,8 +178,9 @@ pub(crate) fn release_all() {
 /// `STONE_FRAME_HOOKS_WROTE` when a hook wrote the scene target and, at
 /// `WORLD_BEGIN`, `STONE_FRAME_HOOKS_WORLD_IMAGE` when a hook supplied the
 /// world image (already copied into the scene target when it is another
-/// target). Returns 0 when no hook ran. GL state and Stone's caches are
-/// restored before return, so the caller's script-side caches stay valid.
+/// target). Returns 0 when no hook ran. Each hook's stage restores GL state
+/// and Stone's caches, and the caller's target is rebound through
+/// `stone_set_canvas`, so the caller's script-side caches stay valid.
 /// rock-ffi stone-rendering private
 #[no_mangle]
 pub extern "C" fn stone_native_frame_hooks_run(
@@ -240,12 +241,12 @@ pub extern "C" fn stone_native_frame_hooks_run(
         WORLD_IMAGE.with(|w| w.set(None));
     }
 
-    let outer = stone_native_stage_begin();
-    if outer == 0 {
-        ::log::error!(target: "STONE", "stone_native_frame_hooks_run: no native stage available; hooks skipped");
-        return 0;
+    // Each hook's own stage restores GL state; the dispatch only binds the
+    // scene target and gives the caller's target back.
+    let previous_target = crate::canvas::current_canvas_handle();
+    if previous_target != scene_target {
+        crate::canvas::stone_set_canvas(scene_target);
     }
-    crate::canvas::stone_set_canvas(scene_target);
     let mut flags = 0;
     DISPATCHING.with(|d| d.set(Some((point, frame, info))));
     for (_, id) in due {
@@ -295,7 +296,9 @@ pub extern "C" fn stone_native_frame_hooks_run(
             flags |= STONE_FRAME_HOOKS_WORLD_IMAGE;
         }
     }
-    flags |= stone_native_stage_end(outer);
+    if previous_target != scene_target {
+        crate::canvas::stone_set_canvas(previous_target);
+    }
     release_removed();
     flags
 }

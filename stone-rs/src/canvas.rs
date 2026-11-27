@@ -1231,8 +1231,9 @@ pub extern "C" fn stone_target_gl_depth_texture(handle: u64) -> u32 {
 }
 
 /// GL name of target `handle`'s framebuffer, or 0. Borrowed: bind it, but never
-/// change its attachments, or its draw or read buffers beyond the stage that
-/// restores them.
+/// change its attachments. Restore any draw or read buffer you change on it
+/// before the stage ends; the stage itself restores only the draw buffers of
+/// the framebuffer bound when it began.
 /// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_target_gl_framebuffer(handle: u64) -> u32 {
@@ -1496,6 +1497,16 @@ pub extern "C" fn stone_read_window_rect(x: c_int, y: c_int, w: c_int, h: c_int,
     read_rows_top_down(None, dh, (x, y, w, h), glow::RGBA, glow::UNSIGNED_BYTE, out);
 }
 
+/// Read colour 0 of the bound read framebuffer when it is a framebuffer object.
+/// The read buffer is framebuffer state native code may change, so readbacks
+/// select it instead of assuming the default. The window's own framebuffer
+/// keeps its default.
+pub(crate) unsafe fn set_color_read_buffer(gl: &crate::DebugGl, fbo: Option<glow::Framebuffer>) {
+    if fbo.is_some() {
+        gl.read_buffer(glow::COLOR_ATTACHMENT0);
+    }
+}
+
 /// Read `w` x `h` texels at top-left `(x, y)` of a framebuffer whose image is
 /// `height` tall (None is the screen) into `out`, rows top-down.
 pub(crate) fn read_rows_top_down(
@@ -1507,7 +1518,9 @@ pub(crate) fn read_rows_top_down(
     out: &mut [u8],
 ) -> bool {
     with_gl(|gl| unsafe {
-        gl.bind_framebuffer(glow::FRAMEBUFFER, resolve_target(fbo));
+        let target = resolve_target(fbo);
+        gl.bind_framebuffer(glow::FRAMEBUFFER, target);
+        set_color_read_buffer(gl, target);
         gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
         gl.read_pixels(
             x,

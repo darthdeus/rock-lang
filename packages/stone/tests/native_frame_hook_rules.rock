@@ -109,3 +109,64 @@ fn frame_hooks_do_not_run_without_a_scene() {
     })
     assert_eq(calls, 0)
 }
+
+inline(lua) fn frame_hook_test_scene_pass(body: fn() -> int) -> PtrU8 = """
+    return ffi.cast("int32_t (*)(void *, uint64_t, uint64_t)", function(_, _, _)
+        return body()
+    end)
+"""
+
+@nomangle
+fn frame_hook_world_image_runner_case(_which: int) {
+    let _ = native_runner_test_boot("frame hook world image")
+    defer { let _ = stone_teardown() }
+    frame_core_resolve_view()
+    let image = new_canvas(16.0, 16.0, "rgba8")
+    set_canvas(image)
+    stone_clear_canvas(0.75, 0.0, 0.0, 1.0)
+    unset_canvas()
+    assert(mrt_id_attached)
+    with_canvas(visible_id_canvas, () => { stone_clear_canvas_int(0, 7) })
+
+    let image_set = false
+    let begin = frame_hook_test_callback(() => {
+        image_set = stone_native_frame_set_world_image(image.handle.0, STONE_WORLD_IMAGE_KEEP_POST)
+        return 0
+    })
+    defer { frame_hook_test_free(begin) }
+    let scene_end_calls = 0
+    let scene_end = frame_hook_test_callback(() => { scene_end_calls += 1; return 0 })
+    defer { frame_hook_test_free(scene_end) }
+    let scene_pass_calls = 0
+    let scene_pass = frame_hook_test_scene_pass(() => { scene_pass_calls += 1; return 0 })
+    defer { frame_hook_test_free(scene_pass) }
+    let begin_hook = frame_hook_test_register(STONE_FRAME_HOOK_WORLD_BEGIN, begin)
+    let end_hook = frame_hook_test_register(STONE_FRAME_HOOK_SCENE_END, scene_end)
+    defer {
+        assert(stone_native_frame_hook_unregister(begin_hook))
+        assert(stone_native_frame_hook_unregister(end_hook))
+    }
+
+    assert(queue_native_scene_pass(scene_pass, frame_hook_test_null()))
+    rect(pixel_screen, v(0.0, 0.0), v(8.0, 16.0), Color { r: 0.0, g: 1.0, b: 0.0, a: 1.0 })
+    frame_core_render_world()
+
+    assert(image_set && WORLD_IMAGE_FRAME)
+    assert_eq(scene_end_calls, 1)
+    assert_eq(scene_pass_calls, 0)
+    assert_eq(SCENE_PASSES.len(), 0)
+    assert_eq(stone_read_canvas_pixel_channel(visible_id_canvas.handle.0, 8, 8, 0), 0.0,
+        "picking must not see ids from before the world image")
+    // Post processing composited the world image and the pixel-screen draw,
+    // and present consumed the composite.
+    assert(COMPOSITE_CANVAS == null)
+    let composite = PRESENTED_SCENE_SAMPLE.unwrap().canvas.handle.0
+    assert(stone_read_canvas_pixel_channel(composite, 12, 8, 0) > 0.2)
+    assert(stone_read_canvas_pixel_channel(composite, 12, 8, 1) < 0.1)
+    assert(stone_read_canvas_pixel_channel(composite, 2, 8, 1) > 0.9)
+}
+
+@test
+fn frame_hooks_world_image_frame_keeps_post_processing_and_present() {
+    profiler_test_process("frame_hook_world_image_runner_case", 0)
+}
