@@ -595,7 +595,7 @@ pub fn stone_gpu_host_window() -> StoneWindow? {
 inline(lua) fn stone_teardown_native() -> bool = "return stone.stone_teardown() ~= 0"
 
 pub fn stone_teardown() -> bool {
-    reset_scene_return_pass()
+    reset_queued_render_passes()
     return stone_teardown_native()
 }
 

@@ -565,6 +565,24 @@ draw-buffer changes made to shared framebuffers other than the entry framebuffer
 before returning. Draws are ordered with the surrounding passes through normal
 GL command ordering.
 
+### Native silhouette mask draws
+
+`queue_native_silhouette_draw(body: PtrU8, userdata: PtrU8, bounds: Rect,
+order: SilhouetteMaskOrder) -> bool` borrows a callback and userdata for the
+current frame. Choose `BeforeScript` or `AfterScript` to place the callback
+before or after the script mask batches. Each group executes in enqueue
+order. Both groups run after the scene's integer mask is cleared and before
+outline sampling. Ad hoc outline passes do not drain this queue.
+
+The `StoneNativeSilhouetteFn` callback takes `(void* userdata, uint64_t target)`
+and returns `int32_t`. The mask is already bound as output zero without depth,
+and a native stage restores its bindings on return. Write integer silhouette
+IDs. Return 1 if the draw contributed to the mask, or 0 for no writes. Each
+reported draw sets the mask's written flag and adds its conservative
+world-space bounds to the outline scan. Supply finite bounds with nonnegative
+width and height. The queue is discarded on frame reset, target rebuild,
+reload, teardown, or suppressed submission.
+
 ### Handle validity, lookup and invalidation
 
 Resource kinds are typed (`STONE_RESOURCE_TARGET = 1`, `SHADER = 2`,

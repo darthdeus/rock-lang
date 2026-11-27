@@ -57,7 +57,73 @@ global OUTLINE_OCCLUDED_SLOTS: NativeBuffer<float> = native_buffer_float(OUTLINE
 // outline_detect_shader.rock.
 global OUTLINE_PARAM_SLOTS: NativeBuffer<float> = native_buffer_float(OUTLINE_MAX_ENTRIES * 4)
 
+pub enum SilhouetteMaskOrder {
+    BeforeScript,
+    AfterScript,
+}
+
+struct NativeSilhouetteDraw {
+    body: PtrU8,
+    userdata: PtrU8,
+    generation: int,
+    bounds: Rect,
+    order: SilhouetteMaskOrder,
+}
+
+global NATIVE_SILHOUETTE_DRAWS: [NativeSilhouetteDraw] = []
+global NATIVE_SILHOUETTE_RUNNING: bool = false
+
+inline(lua) fn silhouette_coordinate_finite(x: float) -> bool = """
+    return x == x and x > -math.huge and x < math.huge
+"""
+
+/// Queues one frame-local draw into the scene's integer silhouette mask.
+pub fn queue_native_silhouette_draw(body: PtrU8, userdata: PtrU8,
+    bounds: Rect, order: SilhouetteMaskOrder) -> bool {
+    if NATIVE_SILHOUETTE_RUNNING || SIM_SKIP_SUBMIT || !native_render_callback_present(body) { return false }
+    let generation = stone_native_context_generation()
+    if generation == 0 { return false }
+    if bounds.w < 0.0 || bounds.h < 0.0
+        || !silhouette_coordinate_finite(bounds.x) || !silhouette_coordinate_finite(bounds.y)
+        || !silhouette_coordinate_finite(bounds.x + bounds.w)
+        || !silhouette_coordinate_finite(bounds.y + bounds.h) { return false }
+    NATIVE_SILHOUETTE_DRAWS.push(NativeSilhouetteDraw { body, userdata, generation, bounds, order })
+    return true
+}
+
+inline(lua) fn call_native_silhouette_draw(body: PtrU8, userdata: PtrU8, target: int) -> int = """
+    local callback = ffi.cast("StoneNativeSilhouetteFn", body)
+    return callback(ffi.cast("void *", userdata), target)
+"""
+
+fn run_native_silhouette_draws(target: int, order: SilhouetteMaskOrder) -> int {
+    if NATIVE_SILHOUETTE_DRAWS.len() == 0 { return 0 }
+    let count = 0
+    let blend = CURRENT_BLEND
+    for draw in NATIVE_SILHOUETTE_DRAWS {
+        if draw.order != order || draw.generation != stone_native_context_generation() { continue }
+        let stage = stone_native_stage_begin()
+        if stage == 0 { continue }
+        defer {
+            if !restore_after_custom_draw(stage, target, DepthMode::Off, blend, outline_target_shader) {
+                stone_set_draw_buffer_mask(1)
+                set_shader(outline_target_shader)
+                set_engine_uniforms(outline_target_shader, camera_y_bounds())
+            }
+        }
+        let writes = call_native_silhouette_draw(draw.body, draw.userdata, target)
+        if writes == 1 {
+            extend_outline_mask_bounds(draw.bounds)
+            count += 1
+        } else if writes != 0 {
+            log_error("RENDER", "native silhouette draw returned invalid result {writes}")
+        }
+    }
+    return count
+}
+
 fn retire_outline_commands(snapshot: bool) {
+    NATIVE_SILHOUETTE_DRAWS.clear()
     let mask_verts = discard_mask_batches(OUTLINE_MASK_BATCHES)
     if snapshot {
         OUTLINE_MASK_VERTS_LAST = mask_verts
@@ -297,6 +363,23 @@ fn stamp_outline_mask_bounds(pool: RenderBatchPool) {
     OUTLINE_MASK_BOUNDS_MIN_Y = min_y
     OUTLINE_MASK_BOUNDS_MAX_X = max_x
     OUTLINE_MASK_BOUNDS_MAX_Y = max_y
+}
+
+fn extend_outline_mask_bounds(bounds: Rect) {
+    let right = bounds.x + bounds.w
+    let bottom = bounds.y + bounds.h
+    if OUTLINE_MASK_BOUNDS_VALID {
+        OUTLINE_MASK_BOUNDS_MIN_X = min(OUTLINE_MASK_BOUNDS_MIN_X, bounds.x)
+        OUTLINE_MASK_BOUNDS_MIN_Y = min(OUTLINE_MASK_BOUNDS_MIN_Y, bounds.y)
+        OUTLINE_MASK_BOUNDS_MAX_X = max(OUTLINE_MASK_BOUNDS_MAX_X, right)
+        OUTLINE_MASK_BOUNDS_MAX_Y = max(OUTLINE_MASK_BOUNDS_MAX_Y, bottom)
+    } else {
+        OUTLINE_MASK_BOUNDS_VALID = true
+        OUTLINE_MASK_BOUNDS_MIN_X = bounds.x
+        OUTLINE_MASK_BOUNDS_MIN_Y = bounds.y
+        OUTLINE_MASK_BOUNDS_MAX_X = right
+        OUTLINE_MASK_BOUNDS_MAX_Y = bottom
+    }
 }
 
 @pure fn outline_scissor_floor_to(value: float, q: int) -> int {

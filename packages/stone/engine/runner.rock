@@ -973,6 +973,7 @@ fn frame_core_render_world() {
     profile_gpu_end("draw_systems")
 
     if SIM_SKIP_SUBMIT {
+        NATIVE_SILHOUETTE_DRAWS.clear()
         run_scene_passes()
         clear_batches()
         draw_list_clear(pixel_screen)

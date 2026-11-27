@@ -273,7 +273,7 @@ global SCENE_PASSES_RUNNING: bool = false
 pub const STONE_SCENE_NO_OUTPUT_CHANGE: int = 0
 pub const STONE_SCENE_OUTPUT_PARTNER: int = 1
 
-inline(lua) fn native_scene_callback_present(body: PtrU8) -> bool = "return body ~= nil"
+inline(lua) fn native_render_callback_present(body: PtrU8) -> bool = "return body ~= nil"
 
 inline(lua) fn call_native_scene_pass(body: PtrU8, userdata: PtrU8, current: int, partner: int) -> int = """
     local callback = ffi.cast("int32_t (*)(void *, uint64_t, uint64_t)", body)
@@ -306,7 +306,7 @@ pub fn queue_native_scene_pass(body: PtrU8, userdata: PtrU8) -> bool {
 
 /// Uses name for the GPU pass scope and pipeline inspector.
 pub fn queue_named_native_scene_pass(name: string, body: PtrU8, userdata: PtrU8) -> bool {
-    if SCENE_PASSES_RUNNING || SIM_SKIP_SUBMIT || !native_scene_callback_present(body) { return false }
+    if SCENE_PASSES_RUNNING || SIM_SKIP_SUBMIT || !native_render_callback_present(body) { return false }
     let generation = stone_native_context_generation()
     if generation == 0 { return false }
     SCENE_PASSES.push(ScenePassEntry::Native(generation, name, body, userdata))
@@ -353,6 +353,7 @@ fn scene_pass_reads_output(p: Pass) -> bool {
 pub global PASSES_DROPPED_ON_REBUILD: int = 0
 
 fn drop_queued_passes_on_target_rebuild() {
+    NATIVE_SILHOUETTE_DRAWS.clear()
     let prepare = WORLD_PREPARE_PASSES.len()
     let scene = SCENE_PASSES.len()
     let final_count = FINAL_PASSES.len()
@@ -371,7 +372,8 @@ global SCENE_RETURN_PASS: Pass? = null
 
 @nomangle
 @on_reload
-fn reset_scene_return_pass() {
+fn reset_queued_render_passes() {
+    NATIVE_SILHOUETTE_DRAWS.clear()
     SCENE_PASSES.clear()
     SCENE_RETURN_PASS = null
 }

@@ -73,6 +73,9 @@ typedef int32_t (*StoneNativeSceneFn)(void* userdata, uint64_t current_scene, ui
 static const int STONE_SCENE_NO_OUTPUT_CHANGE = 0;
 static const int STONE_SCENE_OUTPUT_PARTNER = 1;
 
+// Used by the Rock queue_native_silhouette_draw function. Return 1 after drawing, or 0 for no writes.
+typedef int32_t (*StoneNativeSilhouetteFn)(void* userdata, uint64_t target);
+
 // The table `stone_native_renderer_api(1)` returns. Version 1 only ever
 // appends fields: check `abi_version == 1` and `struct_size >= sizeof` before
 // use. Every entry must be called on the render thread.
