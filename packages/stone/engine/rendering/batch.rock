@@ -1566,6 +1566,16 @@ fn setup_world_pass_shader(shader: string, cam_offset: Vec2, cam_scale: float, y
 }
 
 global POST_SCENE_BATCHES_PENDING: bool = false
+// A native WORLD_BEGIN hook supplied this frame's world image: the engine's
+// scene clear, batches and scene passes are skipped.
+pub global WORLD_IMAGE_FRAME: bool = false
+
+// Hooks run with the scene target bound and leave GL and Stone's caches as
+// they found them, so no script-side cache needs to follow.
+pub fn run_frame_hooks(point: int, cam_offset: Vec2, cam_scale: float) -> int {
+    return stone_native_frame_hooks_run(point, screen_canvas.handle.0, screen_canvas_2.handle.0,
+        cam_offset.x, cam_offset.y, cam_scale)
+}
 
 fn render_scene_overlays() {
     if POST_SCENE_BATCHES_PENDING { render_batches(after_scene:true) }
@@ -1778,11 +1788,23 @@ pub fn render_batches(after_scene: bool = false) {
         // Reset before the view bail-out: a frame that renders nothing wrote no ids.
         outline_ids_written = false
         outline_mask_written = false
+        WORLD_IMAGE_FRAME = false
     }
 
     let view = RENDER_VIEW ?? return
     let cam_scale = view.world_to_scene_scale
     let cam_offset = camera_offset_in(view)
+
+    if !after_scene {
+        let hooks = run_frame_hooks(STONE_FRAME_HOOK_WORLD_BEGIN, cam_offset, cam_scale)
+        if (hooks & STONE_FRAME_HOOKS_WORLD_IMAGE) != 0 {
+            WORLD_IMAGE_FRAME = true
+            if pool_has_pending(RENDER_BATCHES) {
+                log_once("RENDER", "world batches submitted on a frame with a native world image are not drawn")
+            }
+            return
+        }
+    }
 
     let sorted_keys = get_sorted_batch_keys()
 
@@ -1802,6 +1824,7 @@ pub fn render_batches(after_scene: bool = false) {
             stone_clear_depth(1.0)
         }
     ) }
+    if !after_scene { run_frame_hooks(STONE_FRAME_HOOK_WORLD_BATCHES, cam_offset, cam_scale) }
 
     set_shader(sprite_batch_shader)
     {
