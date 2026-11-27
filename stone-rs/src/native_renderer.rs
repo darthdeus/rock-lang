@@ -857,6 +857,7 @@ pub struct StoneNativeRendererApiV1 {
     pub mesh_draw: extern "C" fn(u64, u64, c_int) -> c_int,
     pub mesh_free: extern "C" fn(u64),
     pub target_color_view: extern "C" fn(u64) -> u64,
+    pub get_live_mesh_bytes: extern "C" fn() -> u64,
 }
 
 // Version 1 only appends: each entry keeps its index, so its offset never moves.
@@ -933,6 +934,7 @@ api_v1_layout! {
     mesh_draw = 53,
     mesh_free = 54,
     target_color_view = 55,
+    get_live_mesh_bytes = 56,
 }
 
 static STONE_NATIVE_RENDERER_API_V1: StoneNativeRendererApiV1 = StoneNativeRendererApiV1 {
@@ -1000,6 +1002,7 @@ static STONE_NATIVE_RENDERER_API_V1: StoneNativeRendererApiV1 = StoneNativeRende
     mesh_draw: crate::mesh::stone_mesh_draw,
     mesh_free: crate::mesh::stone_mesh_free,
     target_color_view: crate::canvas::stone_target_color_view,
+    get_live_mesh_bytes: crate::mesh::stone_get_live_mesh_bytes,
 };
 
 /// Return the static function table for `abi_version`, or null if unsupported.

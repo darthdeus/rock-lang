@@ -539,6 +539,18 @@ pub(crate) fn mesh_info(handle: u64) -> Option<(u64, i32, i32, i32)> {
     })
 }
 
+/// Sum the allocated vertex and instance buffer bytes in the live mesh registry.
+/// rock-ffi stone-rendering
+#[no_mangle]
+pub extern "C" fn stone_get_live_mesh_bytes() -> u64 {
+    MESHES.with_borrow(|meshes| {
+        meshes
+            .values()
+            .map(|mesh| mesh.vbo_bytes + mesh.inst_vbo_bytes)
+            .sum()
+    })
+}
+
 /// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_get_live_mesh_count() -> c_int {
@@ -602,6 +614,35 @@ pub(crate) fn clear_all() {
 #[cfg(test)]
 mod layout_tests {
     use super::*;
+
+    #[test]
+    fn live_mesh_bytes_include_vertex_and_instance_buffers() {
+        let object = std::num::NonZeroU32::new(1).unwrap();
+        assert_eq!(stone_get_live_mesh_bytes(), 0);
+        MESHES.with(|meshes| {
+            for (handle, vertex, instance) in [(1, 24, 0), (2, 48, 16)] {
+                meshes.borrow_mut().insert(
+                    handle,
+                    RetainedMesh {
+                        vao: glow::NativeVertexArray(object),
+                        vbo: glow::NativeBuffer(object),
+                        inst_vbo: (instance > 0).then_some(glow::NativeBuffer(object)),
+                        gl_mode: glow::TRIANGLES,
+                        vert_count: 3,
+                        attr_count: 1,
+                        inst_count: 0,
+                        inst_layout: None,
+                        vbo_bytes: vertex,
+                        inst_vbo_bytes: instance,
+                        generation: 1,
+                    },
+                );
+            }
+        });
+        assert_eq!(stone_get_live_mesh_bytes(), 88);
+        MESHES.with(|meshes| meshes.borrow_mut().clear());
+        assert_eq!(stone_get_live_mesh_bytes(), 0);
+    }
 
     #[test]
     fn instance_updates_reject_invalid_state_without_changing_live_count() {

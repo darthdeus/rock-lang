@@ -590,6 +590,10 @@ Resource kinds are typed (`STONE_RESOURCE_TARGET = 1`, `SHADER = 2`,
   `stone_native_shader_info`, `stone_native_texture_info`, and
   `stone_native_mesh_info` read current metadata and generation together.
 
+- `stone_get_live_mesh_bytes()` sums the allocated vertex and instance buffer
+  capacities of all retained meshes in one traversal. The per-index handle
+  query remains available for enumerating individual meshes.
+
 ### Native-owned multi-attachment render targets
 
 - `stone_target_color_view(source)` borrows the source target's color image as
