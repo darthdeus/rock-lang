@@ -303,7 +303,7 @@ mod ffi_array;
 mod file_jobs;
 mod filesystem;
 mod frame_stream;
-mod game_host;
+pub mod game_host;
 mod image_data;
 pub mod image_decode;
 mod image_publication;
