@@ -300,26 +300,49 @@ fn frame_error_recover() {
     let _ = residency_service_uploads()
 }
 
-@nomangle
-fn frame_error_outcome(frame: int, last_time: float, message: string) -> (bool, bool, float) {
+// An error inside a frame entry skips the rest of that frame's work; the frame
+// still closes in stone_game_frame_draw.
+fn game_frame_failed(run: GameRun, message: string) {
     frame_error_recover()
+    run.frame_aborted = true
     if message.contains("interrupted!") {
         log_info("GAME", "Interrupted (Ctrl+C), exiting...")
-        return (true, false, last_time)
+        run.frame_running = false
+        return
     }
+    run.frame_ok = false
     // The traceback and frame number vary even when the same fault repeats.
     let newline = message.find("\n")
     let key = if newline < 0 { message } else { message.substring(0, newline) }
-    log_once("GAME", "Error in frame {frame}:\n{message}", key)
-    return (false, true, last_time)
+    log_once("GAME", "Error in frame {run.frame}:\n{message}", key)
 }
 
-// Forward both result lanes without constructing a callback or a result box per frame.
-@nomangle inline(lua) fn xpcall_run_one_frame(frame: int, last_time: float, window: StoneWindow, config: GameConfig) -> (bool, bool, float) = """
-    local ok, running, time = xpcall(run_one_frame, __rock_traceback, frame, last_time, window, config)
-    if ok then return true, running, time end
-    return frame_error_outcome(frame, last_time, running)
+// Calls one frame part without constructing a callback or a result box per frame.
+@nomangle inline(lua) fn xpcall_game_frame_part(part: int) -> (bool, string) = """
+    local ok, err = xpcall(game_frame_part, __rock_traceback, part)
+    if ok then return true, "" end
+    return false, tostring(err)
 """
+
+@nomangle
+fn game_frame_part(part: int) {
+    let run = GAME_RUN.unwrap()
+    if part == 0 {
+        game_frame_begin_part(run)
+    } else if part == 1 {
+        game_frame_update_part(run)
+    } else if part == 2 {
+        game_frame_draw_part(run)
+    } else {
+        game_frame_close(run)
+    }
+}
+
+fn game_frame_run_part(part: int, run: GameRun) {
+    if run.frame_aborted { return }
+    let (ok, message) = xpcall_game_frame_part(part)
+    if !ok { game_frame_failed(run, message) }
+}
 
 global FRAME_FORCE_ERROR_AT: int = -1
 global TEST_IMAGE_LOAD_AT_FRAME: int = -1
@@ -365,7 +388,121 @@ fn env_flag_override(name: string, fallback: bool) -> bool {
     return collectgarbage("setpause", pause)
 """
 
+// Why a game run ended. Host frame entries report these codes.
+pub const STONE_GAME_RUNNING: int = 0
+// The window closed, esc_quits saw Escape, stone_quit() was called or the run
+// was interrupted.
+pub const STONE_GAME_QUIT: int = 1
+pub const STONE_GAME_SIM_COMPLETE: int = 2
+// FRAME_COUNT frames completed.
+pub const STONE_GAME_FRAME_CAP: int = 3
+// PERF_SECONDS elapsed.
+pub const STONE_GAME_SECONDS_CAP: int = 4
+pub const STONE_GAME_PERF_WINDOW_COMPLETE: int = 5
+pub const STONE_GAME_PERF_GC_WINDOW_INCOMPLETE: int = 6
+// Closing a frame raised, so no next frame could open.
+pub const STONE_GAME_FRAME_ERROR: int = 7
+
+fn game_termination_code(termination: string) -> int {
+    if termination == "window_complete" { return STONE_GAME_PERF_WINDOW_COMPLETE }
+    if termination == "gc_window_incomplete" { return STONE_GAME_PERF_GC_WINDOW_INCOMPLETE }
+    if termination == "seconds_cap" { return STONE_GAME_SECONDS_CAP }
+    if termination == "process_frame_cap" { return STONE_GAME_FRAME_CAP }
+    return STONE_GAME_QUIT
+}
+
+// What stone_game_frame_begin decided for the frame. `draws` and the active
+// size are known only once the update has resolved the view, so
+// stone_game_frame_update completes them.
+pub @lua_named struct FramePlan {
+    running: bool = true,
+    termination: int = 0,
+    // The frame begin opened; the last frame once the run has ended.
+    frame: int = 0,
+    dt: float = 0.0,
+    ticks: bool = false,
+    draws: bool = false,
+    active_width: int = 0,
+    active_height: int = 0,
+}
+
+pub @lua_named struct FrameResult {
+    running: bool = true,
+    termination: int = 0,
+    // The frame drew and the caller must swap; the engine never swaps when the
+    // host drives the frame.
+    present: bool = false,
+}
+
+const GAME_PHASE_IDLE: int = 0
+const GAME_PHASE_BEGUN: int = 1
+const GAME_PHASE_UPDATED: int = 2
+const GAME_PHASE_ENDED: int = 3
+
+// State the frame entries share between frames of one run.
+struct GameRun {
+    window: StoneWindow,
+    config: GameConfig,
+    perf_launch_time: float,
+    max_frames: int,
+    perf_seconds: float,
+    loop_start: float,
+    frame_delay_ms: int,
+    slow_frame_threshold_ms: float,
+    fps_log: bool,
+    fps_window: Metric,
+    fps_window_start_time: float,
+    fps_window_start_frame: int = 0,
+    phase: int = GAME_PHASE_IDLE,
+    frame: int = 0,
+    running: bool = true,
+    termination: int = STONE_GAME_RUNNING,
+    frame_error_count: int = 0,
+    last_time: float = 0.0,
+    t_frame_start: float = 0.0,
+    tick_before_frame: int = 0,
+    host_time: float = 0.0,
+    // Per frame: the frame completed without an error, an error or interrupt
+    // skipped its remaining work, and whether it keeps the game running.
+    frame_ok: bool = true,
+    frame_aborted: bool = false,
+    frame_running: bool = true,
+    ticking: bool = false,
+    skip_draw: bool = false,
+}
+
+global GAME_RUN: GameRun? = null
+// Reused by every frame, so an entry allocates nothing.
+global FRAME_PLAN: FramePlan = FramePlan {}
+global FRAME_RESULT: FrameResult = FrameResult {}
+// The embedding host owns the loop, the event pump and the swap.
+pub global HOST_DRIVES_FRAME: bool = false
+global FRAME_PRESENT_PENDING: bool = false
+
 pub @intrinsic fn stone_run_game(config: GameConfig) {
+    if !stone_game_boot(config) { return }
+    if HOST_DRIVES_FRAME { return }
+    let run = GAME_RUN ?? return
+    let running = true
+    while running {
+        running = false
+        if let plan = stone_game_frame_begin(stone_get_time(), run.frame) {
+            if plan.running {
+                let _ = stone_game_frame_update()
+                if let result = stone_game_frame_draw() { running = result.running }
+            }
+        }
+    }
+    let _ = stone_game_shutdown()
+}
+
+// Everything before the first frame. Returns false when the window could not be
+// created; a checked run exits instead.
+pub @nomangle fn stone_game_boot(config: GameConfig) -> bool {
+    if GAME_RUN != null {
+        log_error("STONE", "stone_game_boot: a game is already running")
+        return false
+    }
     let _ = font_coverage_oversampling_require(
         config.font_coverage_oversampling)
     setup_stone()
@@ -400,7 +537,7 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
     if is_null(window) {
         log_error("STONE", "Failed to initialize")
         fail_bounded_stone_run()
-        return
+        return false
     }
 
     log_info("STONE", "Initialized successfully")
@@ -499,11 +636,7 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
     allocation_activation_begin_if_enabled()
 
     log_debug("GAME", "Starting main loop...")
-    let running = true
-    let frame = 0
-    let frame_error_count = 0
     FRAME_ERROR_COUNT = 0
-    let last_time = stone_get_time()
 
     // Every N seconds, emit "[FPS] avg=X p50=… p99=… max=… (Y frames in Z s)"
     // when FPS_LOG=1. Off by default: the overall line at exit and
@@ -514,128 +647,254 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
     // (GC/retrace/stall) — avg alone hides both. The per-frame ms feed a
     // Metric (the shared windowed-stats type) re-created each interval so the
     // distribution covers that interval's frames; avg is the true throughput.
-    let fps_log = env_var("FPS_LOG") == "1"
-    let fps_window_secs = 5.0
-    let fps_window_start_time = stone_get_time()
-    let fps_window_start_frame = 0
-    let fps_window = metric_new("fps_window", 1024)
-
-    let slow_frame_threshold_ms = get_env_float("SLOW_FRAME_MS", 50.0)
-
-    let frame_delay_ms = get_env_int("STONE_FRAME_DELAY_MS", 0)
-
-    let max_frames = if sim_mode_active() { -1 } else { get_env_int("FRAME_COUNT", -1) }
-    if max_frames > 0 {
-        log_info("GAME", "Will exit after {max_frames} frames")
+    let last_time = stone_get_time()
+    let run = GameRun {
+        window: window,
+        config: config,
+        perf_launch_time: perf_launch_time,
+        max_frames: if sim_mode_active() { -1 } else { get_env_int("FRAME_COUNT", -1) },
+        perf_seconds: get_env_float("PERF_SECONDS", -1.0),
+        loop_start: 0.0,
+        frame_delay_ms: get_env_int("STONE_FRAME_DELAY_MS", 0),
+        slow_frame_threshold_ms: get_env_float("SLOW_FRAME_MS", 50.0),
+        fps_log: env_var("FPS_LOG") == "1",
+        fps_window: metric_new("fps_window", 1024),
+        fps_window_start_time: stone_get_time(),
+        last_time: last_time,
     }
-
-    let perf_seconds = get_env_float("PERF_SECONDS", -1.0)
+    if run.max_frames > 0 {
+        log_info("GAME", "Will exit after {run.max_frames} frames")
+    }
     TEXT_MISSING_GLYPH_POLICY = text_missing_glyph_policy_for_run(
-        sim_mode_active(), max_frames, perf_seconds)
-    let loop_start = stone_get_time()
-    if perf_seconds > 0.0 {
-        log_info("GAME", "Will exit after {perf_seconds}s")
+        sim_mode_active(), run.max_frames, run.perf_seconds)
+    run.loop_start = stone_get_time()
+    if run.perf_seconds > 0.0 {
+        log_info("GAME", "Will exit after {run.perf_seconds}s")
+    }
+    GAME_RUN = run
+    game_frame_open(run)
+    return true
+}
+
+// Start frame `run.frame + 1`, or end the run when a bounded run is complete.
+// The previous frame's outer interval closes here.
+fn game_frame_open(run: GameRun) {
+    run.frame = run.frame + 1
+    if PERF_FRAME_CAPTURE && PERF_RECORDS.ready && PROFILER.warmup_active
+            && PERF_RECORDS.warmup_frames == 0
+            && (PERF_RECORDS.absolute_start_frame < 0 || run.frame >= PERF_RECORDS.absolute_start_frame) {
+        profiler_finish_warmup(false)
+    }
+    run.t_frame_start = stone_get_time()
+    perf_outer_frame_boundary(run.frame, run.t_frame_start)
+    let termination = perf_run_termination(run.frame - 1, run.max_frames,
+        if run.perf_seconds > 0.0 { stone_wall_time() - run.perf_launch_time } else { 0.0 },
+        run.perf_seconds)
+    if termination != "" {
+        PERF_RECORDS.termination = termination
+        PERF_RECORDS.previous_frame = -1
+        run.frame -= 1
+        game_run_end(run, game_termination_code(termination))
+        return
+    }
+    run.phase = GAME_PHASE_IDLE
+}
+
+fn game_run_end(run: GameRun, termination: int) {
+    run.running = false
+    run.termination = termination
+    run.phase = GAME_PHASE_ENDED
+}
+
+fn game_run_for(entry: string, phase: int) -> GameRun? {
+    let run = GAME_RUN ?? {
+        log_error("STONE", "{entry}: no game is running")
+        return null
+    }
+    if run.phase != phase {
+        log_error("STONE", "{entry}: called out of order (frame {run.frame}, phase {run.phase})")
+        return null
+    }
+    return run
+}
+
+// The frame's opening part: event input, dt selection and the timeline. `frame`
+// is the frame to open: 1 for the first, then the previous plan's frame plus
+// one. `time` is the host's `stone_get_time()` for this frame; the default loop
+// ignores it (see game_frame_begin_part). Returns null when called out of order.
+pub @nomangle fn stone_game_frame_begin(time: float, frame: int) -> FramePlan? {
+    let ended = if let current = GAME_RUN { current.phase == GAME_PHASE_ENDED } else { false }
+    let run = game_run_for("stone_game_frame_begin",
+        if ended { GAME_PHASE_ENDED } else { GAME_PHASE_IDLE }) ?? return null
+    let plan = FRAME_PLAN
+    plan.running = run.running
+    plan.termination = run.termination
+    plan.frame = run.frame
+    plan.dt = 0.0
+    plan.ticks = false
+    plan.draws = false
+    plan.active_width = 0
+    plan.active_height = 0
+    if ended { return plan }
+    if frame != run.frame {
+        log_error("STONE", "stone_game_frame_begin: frame {frame} is not the open frame {run.frame}")
+        return null
+    }
+    run.tick_before_frame = current_tick
+    run.frame_ok = true
+    run.frame_aborted = false
+    run.frame_running = true
+    run.ticking = false
+    run.skip_draw = true
+    run.host_time = time
+    FRAME_PRESENT_PENDING = false
+    stone_begin_frame()
+    allocation_activation_frame_begin_if_enabled()
+    game_frame_run_part(0, run)
+    run.phase = GAME_PHASE_BEGUN
+    if !run.frame_aborted {
+        plan.dt = dt
+        plan.ticks = run.ticking
+    }
+    return plan
+}
+
+// Input selection, the update phases, sim advance and view resolution. Returns
+// the frame's plan with `draws` and the active scene size filled in.
+pub @nomangle fn stone_game_frame_update() -> FramePlan? {
+    let run = game_run_for("stone_game_frame_update", GAME_PHASE_BEGUN) ?? return null
+    game_frame_run_part(1, run)
+    run.phase = GAME_PHASE_UPDATED
+    let plan = FRAME_PLAN
+    plan.draws = !run.frame_aborted && run.frame_running && !run.skip_draw
+    if plan.draws {
+        if let view = RENDER_VIEW {
+            plan.active_width = view.scene_size.x
+            plan.active_height = view.scene_size.y
+        }
+    }
+    return plan
+}
+
+// The draw phases, frame end and run termination. Returns null when called out
+// of order.
+pub @nomangle fn stone_game_frame_draw() -> FrameResult? {
+    let run = game_run_for("stone_game_frame_draw", GAME_PHASE_UPDATED) ?? return null
+    game_frame_run_part(2, run)
+    // Closing runs the sim stop checks and the bounded-run boundaries. A raise
+    // there leaves no frame open, so the run ends, and the error still
+    // propagates: out of stone_run_game, or to the host as a failed entry.
+    let (closed, message) = xpcall_game_frame_part(3)
+    if !closed {
+        run.frame_error_count += 1
+        FRAME_ERROR_COUNT += 1
+        game_run_end(run, STONE_GAME_FRAME_ERROR)
+        error(message)
+    }
+    let result = FRAME_RESULT
+    result.running = run.running
+    result.termination = run.termination
+    result.present = FRAME_PRESENT_PENDING
+    FRAME_PRESENT_PENDING = false
+    return result
+}
+
+fn game_frame_close(run: GameRun) {
+    allocation_activation_frame_end_if_enabled()
+    let ok = run.frame_ok
+    if ok {
+        if !run.frame_running { game_run_end(run, STONE_GAME_QUIT) }
+    } else {
+        // The error was logged with its traceback by game_frame_failed. Restart
+        // the clock so dt does not spike on the next frame.
+        run.frame_error_count = run.frame_error_count + 1
+        FRAME_ERROR_COUNT = FRAME_ERROR_COUNT + 1
+        run.last_time = stone_get_time()
+    }
+    let frame = run.frame
+
+    stone_end_frame()
+
+    if env_var("ROCK_FRAME_WATCHDOG") == "1" {
+        log_info("WATCHDOG", "ROCK_FRAME_PROGRESS renderer=gl completed={frame} requested={run.max_frames}")
+        if frame == 1 && env_var("ROCK_PERF_STARTUP_WATCHDOG") == "1" {
+            os_setenv("ROCK_FRAME_WATCHDOG", "0")
+        }
+    }
+    frame_pace_wait(run.frame_delay_ms)
+
+    let frame_ms = (stone_get_time() - run.t_frame_start) * 1000.0
+    if ok && current_tick > run.tick_before_frame && SIM_HANDLE != null {
+        sim_entry_frame_timing(frame_diagnostic_timing())
+    }
+    // Exact complement of the branch above: every frame of an entry counts once.
+    if SIM_HANDLE != null && !(ok && current_tick > run.tick_before_frame) {
+        sim_entry_frame_timing(sim_entry_diagnostic_timing(ok))
     }
 
-    while running {
-        frame = frame + 1
-        if PERF_FRAME_CAPTURE && PERF_RECORDS.ready && PROFILER.warmup_active
-                && PERF_RECORDS.warmup_frames == 0
-                && (PERF_RECORDS.absolute_start_frame < 0 || frame >= PERF_RECORDS.absolute_start_frame) {
-            profiler_finish_warmup(false)
-        }
-        let t_frame_start = stone_get_time()
-        perf_outer_frame_boundary(frame, t_frame_start)
-        let termination = perf_run_termination(frame - 1, max_frames,
-            if perf_seconds > 0.0 { stone_wall_time() - perf_launch_time } else { 0.0 }, perf_seconds)
-        if termination != "" {
-            PERF_RECORDS.termination = termination
-            PERF_RECORDS.previous_frame = -1
-            frame -= 1
-            break
-        }
-        let tick_before_frame = current_tick
-        stone_begin_frame()
+    metric_add(run.fps_window, frame_ms)
 
-        allocation_activation_frame_begin_if_enabled()
-        let (ok, still_running, updated_time) = xpcall_run_one_frame(frame, last_time, window, config)
-        allocation_activation_frame_end_if_enabled()
-        if ok {
-            running = still_running
-            last_time = updated_time
-        } else {
-            // Error was already logged with full traceback by xpcall_run_one_frame.
-            // Update last_time so dt doesn't spike on next frame.
-            frame_error_count = frame_error_count + 1
-            FRAME_ERROR_COUNT = FRAME_ERROR_COUNT + 1
-            last_time = stone_get_time()
-        }
+    if run.slow_frame_threshold_ms > 0.0 && frame_ms > run.slow_frame_threshold_ms {
+        let frame_ms_str = format_float(frame_ms, 0, 1)
+        log_wall_clock_throttled("SLOWFRAME", "frame {frame} took {frame_ms_str}ms", 1.0)
+    }
 
-        stone_end_frame()
-
-        if env_var("ROCK_FRAME_WATCHDOG") == "1" {
-            log_info("WATCHDOG", "ROCK_FRAME_PROGRESS renderer=gl completed={frame} requested={max_frames}")
-            if frame == 1 && env_var("ROCK_PERF_STARTUP_WATCHDOG") == "1" {
-                os_setenv("ROCK_FRAME_WATCHDOG", "0")
+    if run.fps_log || JIT_TRACE_LOG_ENABLED {
+        let elapsed = stone_get_time() - run.fps_window_start_time
+        if elapsed >= 5.0 {
+            if run.fps_log {
+                let fps_window = run.fps_window
+                let frames_in_window = frame - run.fps_window_start_frame
+                let avg_fps = (frames_in_window as float) / elapsed
+                let avg_str = format_float(avg_fps, 0, 1)
+                let p50_str = format_float(fps_window.p50, 0, 1)
+                let p99_str = format_float(fps_window.p99, 0, 1)
+                let max_str = format_float(fps_window.max, 0, 1)
+                log_wall_clock("FPS", "avg={avg_str} p50={p50_str}ms p99={p99_str}ms max={max_str}ms ({frames_in_window} frames in {elapsed}s)")
             }
-        }
-        frame_pace_wait(frame_delay_ms)
-
-
-        let frame_ms = (stone_get_time() - t_frame_start) * 1000.0
-        if ok && current_tick > tick_before_frame && SIM_HANDLE != null {
-            sim_entry_frame_timing(frame_diagnostic_timing())
-        }
-        // Exact complement of the branch above: every frame of an entry counts once.
-        if SIM_HANDLE != null && !(ok && current_tick > tick_before_frame) {
-            sim_entry_frame_timing(sim_entry_diagnostic_timing(ok))
-        }
-
-        metric_add(fps_window, frame_ms)
-        // Seeking suppresses world rendering and presentation even though its
-        // hidden UI phase still evaluates @late_draw.
-
-        if slow_frame_threshold_ms > 0.0 && frame_ms > slow_frame_threshold_ms {
-            let frame_ms_str = format_float(frame_ms, 0, 1)
-            log_wall_clock_throttled("SLOWFRAME", "frame {frame} took {frame_ms_str}ms", 1.0)
-        }
-
-        if fps_log || JIT_TRACE_LOG_ENABLED {
-            let elapsed = stone_get_time() - fps_window_start_time
-            if elapsed >= fps_window_secs {
-                if fps_log {
-                    let frames_in_window = frame - fps_window_start_frame
-                    let avg_fps = (frames_in_window as float) / elapsed
-                    let avg_str = format_float(avg_fps, 0, 1)
-                    let p50_str = format_float(fps_window.p50, 0, 1)
-                    let p99_str = format_float(fps_window.p99, 0, 1)
-                    let max_str = format_float(fps_window.max, 0, 1)
-                    log_wall_clock("FPS", "avg={avg_str} p50={p50_str}ms p99={p99_str}ms max={max_str}ms ({frames_in_window} frames in {elapsed}s)")
-                }
-                if JIT_TRACE_LOG_ENABLED {
-                    let (starts, aborts) = jit_trace_window_delta()
-                    log_info("JIT", "traces +{starts} aborts +{aborts}")
-                    if aborts > 0 {
-                        // Ranked (reason @ source:line) buckets since the
-                        // previous window. Without this, the abort count
-                        // alone tells you JIT is thrashing but not where.
-                        let top = drain_jit_abort_top(JIT_ABORT_TOP_N)
-                        if top != "" {
-                            log_info("JIT", "top aborts: {top}")
-                        }
+            if JIT_TRACE_LOG_ENABLED {
+                let (starts, aborts) = jit_trace_window_delta()
+                log_info("JIT", "traces +{starts} aborts +{aborts}")
+                if aborts > 0 {
+                    // Ranked (reason @ source:line) buckets since the
+                    // previous window. Without this, the abort count
+                    // alone tells you JIT is thrashing but not where.
+                    let top = drain_jit_abort_top(JIT_ABORT_TOP_N)
+                    if top != "" {
+                        log_info("JIT", "top aborts: {top}")
                     }
                 }
-                fps_window_start_time = stone_get_time()
-                fps_window_start_frame = frame
-                fps_window = metric_new("fps_window", 1024)
             }
-        }
-
-        if runner_sim_advance(frame) {
-            log_debug("GAME", "Sim entry queue completed, exiting...")
-            running = false
+            run.fps_window_start_time = stone_get_time()
+            run.fps_window_start_frame = frame
+            run.fps_window = metric_new("fps_window", 1024)
         }
     }
+
+    if runner_sim_advance(frame) {
+        log_debug("GAME", "Sim entry queue completed, exiting...")
+        if run.running { game_run_end(run, STONE_GAME_SIM_COMPLETE) }
+    }
+    if run.running { game_frame_open(run) }
+}
+
+// Everything after the last frame. Returns false when no game is running. A
+// checked run with errors exits instead.
+pub @nomangle fn stone_game_shutdown() -> bool {
+    let run = GAME_RUN ?? {
+        log_error("STONE", "stone_game_shutdown: no game is running")
+        return false
+    }
+    let in_frame = run.phase == GAME_PHASE_BEGUN || run.phase == GAME_PHASE_UPDATED
+    if in_frame {
+        log_error("STONE", "stone_game_shutdown: frame {run.frame} was not finished")
+    }
+    GAME_RUN = null
+    let frame = run.frame
+    let config = run.config
+    let max_frames = run.max_frames
+    let perf_seconds = run.perf_seconds
+    let frame_error_count = run.frame_error_count
 
     perf_outer_frame_close(stone_get_time())
     let churn_report = jit_churn_guard_report()
@@ -644,7 +903,7 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
     if churn_sites != "" { log_debug("JIT", "{churn_sites}") }
     hitch_ledger_flush()
 
-    let total_elapsed = stone_get_time() - loop_start
+    let total_elapsed = stone_get_time() - run.loop_start
     if frame > 0 && total_elapsed > 0.0 {
         let overall_fps = (frame as float) / total_elapsed
         let overall_fps_str = format_float(overall_fps, 0, 1)
@@ -750,6 +1009,7 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
         log_error("RUN", "{logged_errors.len() + overflow} error record(s) logged during the bounded run:{records}")
         os_exit(3)
     }
+    return !in_frame
 }
 
 fn frame_core_begin() {
@@ -1101,9 +1361,14 @@ fn frame_core_present(window: StoneWindow) {
         FRAMES_FINISHED_BEFORE_SWAP += 1
     }
     profile_mark_pre_swap()
-    stone_swap_window(window)
-    // Force the driver back-buffer wait into present_ms, not logic_cpu.
-    present_sync()
+    if HOST_DRIVES_FRAME {
+        // The host swaps after drawing whatever it puts above this frame.
+        FRAME_PRESENT_PENDING = true
+    } else {
+        stone_swap_window(window)
+        // Force the driver back-buffer wait into present_ms, not logic_cpu.
+        present_sync()
+    }
     profile_mark_post_swap()
 }
 
@@ -1250,15 +1515,10 @@ fn frame_core_render_frame(window: StoneWindow, config: GameConfig) {
     residency_cold_arrival_render_end()
 }
 
-// xpcall preserves the traceback and returns the exit flag and time.
-@nomangle
-fn run_one_frame(
-    _frame: int,
-    last_time: float,
-    window: StoneWindow,
-    config: GameConfig
-) -> (bool, float) {
-    if FRAME_FORCE_ERROR_AT >= 0 && _frame >= FRAME_FORCE_ERROR_AT {
+// The frame parts run in order under game_frame_run_part; an error skips the
+// rest of the frame.
+fn game_frame_begin_part(run: GameRun) {
+    if FRAME_FORCE_ERROR_AT >= 0 && run.frame >= FRAME_FORCE_ERROR_AT {
         // No frame number in the message, so the dedupe sees one repeating fault.
         error("forced frame error (STONE_FRAME_FORCE_ERROR)")
     }
@@ -1266,7 +1526,7 @@ fn run_one_frame(
     frame_core_begin()
     screenshot_frame_begin()
 
-    if _frame == TEST_IMAGE_LOAD_AT_FRAME {
+    if run.frame == TEST_IMAGE_LOAD_AT_FRAME {
         let path = env_var("STONE_TEST_IMAGE_LOAD_PATH")
         if path != null { let _ = load_image_asset(path) }
     }
@@ -1276,50 +1536,80 @@ fn run_one_frame(
 
     check_hot_reload()
 
-    let running_init = frame_core_poll(config)
+    let running_init = frame_core_poll(run.config)
 
-    let ticking = timeline_should_tick() && !sim_reload_pending()
+    run.ticking = timeline_should_tick() && !sim_reload_pending()
 
     // Select input after SDL polling and before any game consumer runs.
     input_select_game_authority()
 
-    let running = if config.esc_quits && is_key_pressed("escape") {
+    run.frame_running = if run.config.esc_quits && is_key_pressed("escape") {
         false
     } else {
         running_init
     }
 
-    let current_time = stone_get_time()
-    let delta_time = frame_core_select_dt(ticking, current_time, last_time)
-    last_time = current_time
+    // The default loop samples its clock after the reload check and the poll,
+    // so dt covers them. A host samples before begin and passes the time in,
+    // so its own frame work and the guest's dt read one clock.
+    let current_time = if HOST_DRIVES_FRAME { run.host_time } else { stone_get_time() }
+    let delta_time = frame_core_select_dt(run.ticking, current_time, run.last_time)
+    run.last_time = current_time
 
-    frame_core_commit_time(delta_time, ticking)
+    frame_core_commit_time(delta_time, run.ticking)
+}
 
-    if SIM_DRAW_ON_DEMAND { SIM_DEMAND_CONFIG = config }
+fn game_frame_update_part(run: GameRun) {
+    if SIM_DRAW_ON_DEMAND { SIM_DEMAND_CONFIG = run.config }
     frame_core_pre_update()
-    frame_core_update(ticking)
+    frame_core_update(run.ticking)
 
     frame_core_resolve_view()
 
-    if running && !SIM_SKIP_RENDER { frame_core_prepare_once() }
+    if run.frame_running && !SIM_SKIP_RENDER { frame_core_prepare_once() }
 
+    run.skip_draw = sim_frame_skips_draw()
+}
+
+fn game_frame_draw_part(run: GameRun) {
+    let running = run.frame_running
     // Headless teardown may have removed the window ImGui needs.
-    let skip_draw = sim_frame_skips_draw()
-    let rendered_world = running && !skip_draw
-    if running && !skip_draw {
+    let rendered_world = running && !run.skip_draw
+    if rendered_world {
         SIM_ORDINARY_DRAW_FRAME = RENDER_FRAME
-        frame_core_render_frame(window, config)
+        frame_core_render_frame(run.window, run.config)
     }
     frame_gpu_timer_close()
 
-    frame_core_end(rendered_world || (running && skip_draw))
+    frame_core_end(running)
     perf_phase_frame_complete(rendered_world)
 
-    if ticking { current_tick = current_tick + 1 }
+    if run.ticking { current_tick = current_tick + 1 }
 
     profile_frame_end()
+}
 
-    (running, last_time)
+// One frame outside a game run, for tests that drive the runner directly.
+fn run_one_frame(frame: int, last_time: float, window: StoneWindow, config: GameConfig) -> (bool, float) {
+    let run = GameRun {
+        window: window,
+        config: config,
+        perf_launch_time: 0.0,
+        max_frames: -1,
+        perf_seconds: -1.0,
+        loop_start: 0.0,
+        frame_delay_ms: 0,
+        slow_frame_threshold_ms: 0.0,
+        fps_log: false,
+        fps_window: metric_new("fps_window", 1),
+        fps_window_start_time: 0.0,
+        frame: frame,
+        last_time: last_time,
+    }
+    game_frame_begin_part(run)
+    game_frame_update_part(run)
+    game_frame_draw_part(run)
+    return (run.frame_running, run.last_time)
 }
 
 
