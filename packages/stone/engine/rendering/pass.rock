@@ -262,7 +262,22 @@ pub fn run_passes(passes: [Pass]) {
 
 // Scene passes run after world composition and before the engine post chain.
 // Queue them each frame; use final passes for the tonemapped image.
-pub global SCENE_PASSES: [Pass] = []
+pub(package) enum ScenePassEntry {
+    Script(Pass),
+    Native(PtrU8, PtrU8),
+}
+
+pub(package) global SCENE_PASSES: [ScenePassEntry] = []
+global SCENE_PASSES_RUNNING: bool = false
+
+pub const STONE_SCENE_NO_OUTPUT_CHANGE: int = 0
+pub const STONE_SCENE_OUTPUT_PARTNER: int = 1
+
+inline(lua) fn native_scene_callback_present(body: PtrU8) -> bool = "return body ~= nil"
+
+inline(lua) fn call_native_scene_pass(body: PtrU8, userdata: PtrU8, current: int, partner: int) -> int = """
+    return ffi.cast("int32_t (*)(void *, uint64_t, uint64_t)", body)(userdata, current, partner)
+"""
 
 pub global WORLD_PREPARE_PASSES: [Pass] = []
 
@@ -279,7 +294,35 @@ pub fn run_world_prepare_passes() {
 }
 
 pub fn queue_scene_pass(p: Pass) {
-    SCENE_PASSES.push(p)
+    if SCENE_PASSES_RUNNING { return }
+    SCENE_PASSES.push(ScenePassEntry::Script(p))
+}
+
+/// Borrows callback code and userdata through this frame's scene drain or discard.
+pub fn queue_native_scene_pass(body: PtrU8, userdata: PtrU8) -> bool {
+    if SCENE_PASSES_RUNNING || SIM_SKIP_SUBMIT || !native_scene_callback_present(body)
+        || stone_native_context_generation() == 0 { return false }
+    SCENE_PASSES.push(ScenePassEntry::Native(body, userdata))
+    return true
+}
+
+fn run_native_scene_pass(body: PtrU8, userdata: PtrU8, current: int, partner: int) -> bool {
+    let target = CURRENT_CANVAS_HANDLE
+    let blend = CURRENT_BLEND
+    let shader = WATCHER.current_shader_name
+    let stage = stone_native_stage_begin()
+    if stage == 0 { return false }
+    let result = call_native_scene_pass(body, userdata, current, partner)
+    if !restore_after_custom_draw(stage, target, DepthMode::Off, blend, shader) {
+        if target != 0 { stone_set_draw_buffer_mask(1) }
+        if let name = shader { set_shader(name) } else { end_shader() }
+    }
+    if result != STONE_SCENE_NO_OUTPUT_CHANGE && result != STONE_SCENE_OUTPUT_PARTNER {
+        log_error("RENDER", "native scene pass returned invalid result {result}")
+        return false
+    }
+    SCENE_PASSES_RUN_LAST += 1
+    return result == STONE_SCENE_OUTPUT_PARTNER
 }
 
 fn scene_pass_reads_output(p: Pass) -> bool {
@@ -331,13 +374,34 @@ fn scene_return_pass(source: Canvas, output: Canvas) -> Pass {
 }
 
 pub fn run_scene_passes() {
+    if SCENE_PASSES_RUNNING { return }
     SCENE_PASSES_RUN_LAST = 0
     if SCENE_PASSES.len() == 0 { return }
+    if SIM_SKIP_SUBMIT {
+        SCENE_PASSES.clear()
+        return
+    }
+    SCENE_PASSES_RUNNING = true
+    defer {
+        SCENE_PASSES.clear()
+        SCENE_PASSES_RUNNING = false
+    }
 
     let current = screen_canvas
     let partner = screen_canvas_2
 
-    for p in SCENE_PASSES {
+    for entry in SCENE_PASSES {
+        let p = match entry {
+            ScenePassEntry::Script(pass) => pass,
+            ScenePassEntry::Native(body, userdata) => {
+                if run_native_scene_pass(body, userdata, current.handle.0, partner.handle.0) {
+                    let swap = current
+                    current = partner
+                    partner = swap
+                }
+                continue
+            }
+        }
         if scene_pass_reads_output(p) {
             log_once("RENDER", "scene pass reads and writes the same canvas (GL feedback loop) -- skipping before target binding")
             continue
@@ -371,8 +435,6 @@ pub fn run_scene_passes() {
     if current.handle.0 != screen_canvas.handle.0 {
         run_pass(scene_return_pass(current, screen_canvas))
     }
-
-    SCENE_PASSES.clear()
 }
 
 // Final passes run after tonemapping. Each must output a canvas other than its

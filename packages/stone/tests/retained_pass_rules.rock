@@ -31,10 +31,17 @@ fn retained_pass_input_updates_preserve_queued_records() {
     let changed = original.with_canvas_input(0, retained_pass_canvas(4), TextureFilter::Linear)
     assert(!same_ref(original, changed))
     queue_scene_pass(changed)
-    assert(sampled_texture_matches_canvas(SCENE_PASSES[0].slot_inputs[0].0, canvas))
-    assert(SCENE_PASSES[0].slot_inputs[0].1 == TextureFilter::Nearest)
-    assert(sampled_texture_matches_canvas(SCENE_PASSES[1].slot_inputs[0].0, retained_pass_canvas(4)))
-    assert(SCENE_PASSES[1].slot_inputs[0].1 == TextureFilter::Linear)
+    for i in 0..2 {
+        match SCENE_PASSES[i] {
+            ScenePassEntry::Script(seen) => {
+                assert(same_ref(seen, if i == 0 { original } else { changed }))
+                assert(sampled_texture_matches_canvas(seen.slot_inputs[0].0,
+                    if i == 0 { canvas } else { retained_pass_canvas(4) }))
+                assert_eq(seen.slot_inputs[0].1, if i == 0 { TextureFilter::Nearest } else { TextureFilter::Linear })
+            }
+            ScenePassEntry::Native(_, _) => { error("unexpected native callback") }
+        }
+    }
     assert(same_ref(FINAL_PASSES[0], original))
     match PIPELINE_PASS_LOG[0] {
         PipelinePassInfo::Legacy(seen) => {
