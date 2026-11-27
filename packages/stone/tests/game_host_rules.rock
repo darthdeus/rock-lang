@@ -284,6 +284,46 @@ fn game_host_drives_frame_case(which: int) {
         let (_, draws, swapped, _, _) = game_host_test_drive(1, 0)
         assert_eq(draws, 1)
         presents += swapped
+    } else if which == 7 {
+        // A script reload republishes the entries, and the host's next frames
+        // run the reloaded code through them. The overlay replaces the draw
+        // entry as an incremental reload replaces a changed function.
+        let generation = game_host_test_entries_generation()
+        let (_, _, swapped, _, _) = game_host_test_drive(1, 0)
+        presents = swapped
+        let overlay = test_tmp_dir("rock-game-host") + "/incremental.lua"
+        assert(stone_file_write(overlay, "local previous = stone_game_frame_draw\n"
+            + "stone_game_frame_draw = function()\n"
+            + "    _G.__game_host_test_reloaded_draws = (_G.__game_host_test_reloaded_draws or 0) + 1\n"
+            + "    return previous()\n"
+            + "end\n"))
+        hot_reload_incremental_path = overlay
+        game_host_test_engine_call(true)
+        do_incremental_reload()
+        game_host_test_engine_call(false)
+        assert_eq(game_host_test_entries_generation(), generation + 1)
+        let (frames, _, swapped, _, _) = game_host_test_drive(2, 0)
+        assert_eq((frames, game_host_test_reloaded_draws()), (2, 2))
+        presents += swapped
+    } else if which == 9 {
+        // A full reload re-runs the program chunk, which registers the
+        // republication again, and the host's next frames run the reloaded
+        // entries.
+        let generation = game_host_test_entries_generation()
+        let (_, _, swapped, _, _) = game_host_test_drive(1, 0)
+        presents = swapped
+        let draw_before = game_host_test_published_draw()
+        hot_reload_script_path = game_host_test_reloadable_chunk(
+            test_tmp_dir("rock-game-host") + "/main.lua")
+        hot_reload_boot_source_dir = read_chunk_source_dir(hot_reload_script_path)
+        game_host_test_engine_call(true)
+        do_hot_reload()
+        game_host_test_engine_call(false)
+        assert_eq(game_host_test_entries_generation(), generation + 1)
+        assert(game_host_test_published_draw() != draw_before && game_host_test_draw_is_current())
+        let (frames, draws, more, _, _) = game_host_test_drive(2, 0)
+        assert_eq((frames, draws), (2, 2))
+        presents += more
     } else {
         // The engine reports state the host left outside the baseline, and
         // the host gets the baseline back.
@@ -321,6 +361,33 @@ inline(lua) fn game_host_test_state_before_image() -> string = """
         integer(0x85B5), enabled(0x0BE2) }, ",")
 """
 
+inline(lua) fn game_host_test_entries_generation() -> int =
+    "return tonumber(stone.stone_game_entries().generation)"
+
+inline(lua) fn game_host_test_reloaded_draws() -> int =
+    "return _G.__game_host_test_reloaded_draws or 0"
+
+// This program's chunk, written to `path` as a game build would be. The test
+// harness the chunk ends with declares a C type without a reload guard.
+inline(lua) fn game_host_test_reloadable_chunk(path: string) -> string = """
+    local source = debug.getinfo(1, "S").source:sub(2)
+    local file = assert(io.open(source, "rb"))
+    local chunk = file:read("*a")
+    file:close()
+    local guarded, count = chunk:gsub('ffi%.cdef(%[%[struct __skull_timespec.-%]%])', 'pcall(ffi.cdef, %1)')
+    assert(count == 1, "the harness declaration was not found")
+    file = assert(io.open(path, "wb"))
+    file:write(guarded)
+    file:close()
+    return path
+"""
+
+inline(lua) fn game_host_test_published_draw() -> string =
+    "return tostring(_G.__stone_game_entry_fns.draw)"
+
+inline(lua) fn game_host_test_draw_is_current() -> bool =
+    "return _G.__stone_game_entry_fns.draw == stone_game_frame_draw"
+
 @test
 fn a_host_drives_frames_through_the_entries_until_the_frame_cap() {
     profiler_test_process("game_host_drives_frame_case", 0)
@@ -355,4 +422,14 @@ fn a_frame_that_fails_to_close_ends_the_host_run() {
 @test
 fn state_the_host_leaves_outside_the_baseline_is_reported() {
     profiler_test_process("game_host_drives_frame_case", 6)
+}
+
+@test
+fn the_host_frame_entries_survive_a_script_reload() {
+    profiler_test_process("game_host_drives_frame_case", 7)
+}
+
+@test
+fn the_host_frame_entries_survive_a_full_script_reload() {
+    profiler_test_process("game_host_drives_frame_case", 9)
 }

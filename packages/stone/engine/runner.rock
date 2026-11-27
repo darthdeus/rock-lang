@@ -768,6 +768,16 @@ pub @nomangle fn stone_game_boot(config: GameConfig) -> bool {
     return tonumber(stone.stone_game_entries_publish(cb[1], cb[2], cb[3], cb[4]))
 """
 
+// A script reload republishes the entries so they call the reloaded code; the
+// host reads them through stone_game_entries() every frame.
+@nomangle
+@on_reload
+fn game_entries_republish() {
+    if HOST_DRIVES_FRAME && GAME_RUN != null && game_entries_publish() == 0 {
+        log_error("STONE", "the host frame entries were not republished after the reload")
+    }
+}
+
 @nomangle inline(lua) fn game_entries_withdraw() = """
     stone.stone_game_entries_publish(nil, nil, nil, nil)
 """
