@@ -22,6 +22,7 @@ pub const STONE_ENGINE_SOURCES: &[(&str, &str)] = &[
     ("asset_watcher.rs", "asset_watcher"),
     ("file_jobs.rs", "file_jobs"),
     ("filesystem.rs", "filesystem"),
+    ("game_host.rs", "game_host"),
     ("image_data.rs", "image_data"),
     ("image_publication.rs", "image_publication"),
     ("image_texture.rs", "image_texture"),

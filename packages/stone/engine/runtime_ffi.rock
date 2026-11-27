@@ -55,6 +55,9 @@ pub extern(ffi, "stone") fn stone_file_transaction_write_png(transaction: int, p
 pub extern(ffi, "stone") fn stone_file_write_poll(id: int, wait: bool = false) -> int
 pub extern(ffi, "stone") fn stone_flush_image_uploads()
 extern(ffi, "stone") fn stone_force_vsync_off(force: int)
+pub extern(ffi, "stone") fn stone_frame_event(index: int, event: StoneEvent) -> bool
+pub extern(ffi, "stone") fn stone_frame_event_count() -> int
+extern(ffi, "stone") fn stone_game_entries_publish(frame_begin: PtrU8, frame_update: PtrU8, frame_draw: PtrU8, shutdown: PtrU8) -> int
 extern(ffi, "stone") fn stone_get_config_imgui_scale() -> float
 pub extern(ffi, "stone") fn stone_get_display_count() -> int
 extern(ffi, "stone") fn stone_get_dpi_scale() -> float
@@ -97,6 +100,8 @@ pub extern(ffi, "stone") fn stone_gpu_timed_pass_tag() -> int
 extern(ffi, "stone") fn stone_gpu_timer_begin()
 extern(ffi, "stone") fn stone_gpu_timer_end()
 extern(ffi, "stone") fn stone_gpu_timer_poll_ms() -> float
+pub extern(ffi, "stone") fn stone_host_drives_frame() -> bool
+pub extern(ffi, "stone") fn stone_host_drives_frame_set(enabled: bool)
 pub extern(ffi, "stone") fn stone_image_data_fill_rgba(handle: int, rgba: PtrU8, pixel_count: int)
 extern(ffi, "stone") fn stone_image_data_get_pixel(handle: int, x: int, y: int, r: Ptr<float>, g: Ptr<float>, b: Ptr<float>, a: Ptr<float>)
 pub extern(ffi, "stone") fn stone_image_data_load_png(path: string) -> int
@@ -138,6 +143,7 @@ pub extern(ffi, "stone") fn stone_play_sound(handle: int, bus: int, volume: floa
 pub extern(ffi, "stone") fn stone_poll_changed_assets() -> int
 extern(ffi, "stone") fn stone_poll_event(event: StoneEvent) -> bool
 extern(ffi, "stone") fn stone_probe_image_size(path: string, width: Ptr<int>, height: Ptr<int>) -> bool
+pub extern(ffi, "stone") fn stone_pump_events() -> int
 pub extern(ffi, "stone") fn stone_quit()
 extern(ffi, "stone") fn stone_quit_requested() -> bool
 pub extern(ffi, "stone") fn stone_reload_image(handle: int, path: string) -> bool
