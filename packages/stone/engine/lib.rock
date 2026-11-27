@@ -570,6 +570,10 @@ fn stone_init_window(
         return null
     }
 
+    // Without this, the first frames sometimes render an empty composite on
+    // NVIDIA headless (rock-lang#521); a flush is not enough. The cause is not
+    // known.
+    stone_gl_finish()
     stone_window = window
     mark_stone_initialized()
     return window
