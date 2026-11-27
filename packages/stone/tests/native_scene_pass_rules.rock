@@ -6,7 +6,7 @@ inline(lua) fn scene_test_callback(body: fn(int, int) -> int) -> PtrU8 = """
     end)
 """
 
-inline(lua) fn scene_test_free_callback(callback: PtrU8) { 'callback:free()' }
+inline(lua) fn scene_test_free_callback(callback: PtrU8) = "callback:free()"
 inline(lua) fn scene_test_null() -> PtrU8 = 'return ffi.cast("void *", nil)'
 
 fn scene_test_blit(input: Canvas, output: Canvas, blend: BlendMode) -> Pass {
