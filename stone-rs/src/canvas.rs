@@ -1208,6 +1208,40 @@ pub extern "C" fn stone_target_attachment(handle: u64, slot: c_int) -> u64 {
     }
 }
 
+/// GL texture name of colour attachment `slot` of target `handle` (`0` = the
+/// target's own image), or 0. Borrowed: never delete it or change its
+/// parameters. It stays the same while the attachment's generation does.
+/// rock-ffi stone-rendering
+#[no_mangle]
+pub extern "C" fn stone_target_gl_texture(handle: u64, slot: c_int) -> u32 {
+    if with_gl(|_| ()).is_none() {
+        return 0;
+    }
+    canvas_texture_id(stone_target_attachment(handle, slot)).unwrap_or(0)
+}
+
+/// GL name of target `handle`'s depth texture, or 0 without depth. Borrowed.
+/// rock-ffi stone-rendering
+#[no_mangle]
+pub extern "C" fn stone_target_gl_depth_texture(handle: u64) -> u32 {
+    if handle == 0 || with_gl(|_| ()).is_none() {
+        return 0;
+    }
+    with_canvas(handle, |c| c.depth_texture.map_or(0, |t| t.0.get())).unwrap_or(0)
+}
+
+/// GL name of target `handle`'s framebuffer, or 0. Borrowed: bind it, but never
+/// change its attachments, or its draw or read buffers beyond the stage that
+/// restores them.
+/// rock-ffi stone-rendering
+#[no_mangle]
+pub extern "C" fn stone_target_gl_framebuffer(handle: u64) -> u32 {
+    if handle == 0 || with_gl(|_| ()).is_none() {
+        return 0;
+    }
+    with_canvas(handle, |c| c.fbo.0.get()).unwrap_or(0)
+}
+
 pub(crate) fn canvas_generation(handle: u64) -> u64 {
     if handle == 0 {
         return 0;
@@ -1848,6 +1882,14 @@ pub(crate) fn live_canvas_bytes() -> u64 {
             })
             .sum()
     })
+}
+
+pub(crate) fn canvas_capacity(handle: u64) -> Option<(i32, i32)> {
+    with_canvas(handle, |c| (c.width, c.height))
+}
+
+pub(crate) fn canvas_framebuffer(handle: u64) -> Option<glow::Framebuffer> {
+    with_canvas(handle, |c| c.fbo)
 }
 
 pub(crate) fn lookup_canvas(handle: u64) -> Option<Canvas> {

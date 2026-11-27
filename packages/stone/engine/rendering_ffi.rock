@@ -130,8 +130,13 @@ pub extern(ffi, "stone") fn stone_native_destroy(class: string, handle: int) -> 
 pub extern(ffi, "stone") fn stone_native_find_shader(name: string) -> int
 pub extern(ffi, "stone") fn stone_native_find_texture(path: string) -> int
 pub extern(ffi, "stone") fn stone_native_frame_active() -> bool
+pub extern(ffi, "stone") fn stone_native_frame_hook_register(point: int, order: int, run: PtrU8, release: PtrU8, userdata: PtrU8, name: string) -> int
+pub extern(ffi, "stone") fn stone_native_frame_hook_unregister(hook: int) -> bool
+extern(ffi, "stone") fn stone_native_frame_hooks_run(point: int, scene_target: int, scene_partner: int, offset_x: float, offset_y: float, scale: float) -> int
+pub extern(ffi, "stone") fn stone_native_frame_set_world_image(target: int, flags: int) -> bool
 pub extern(ffi, "stone") fn stone_native_frame_size(width: Ptr<int>, height: Ptr<int>) -> bool
 pub extern(ffi, "stone") fn stone_native_frame_target() -> int
+pub extern(ffi, "stone") fn stone_native_gl_get_proc_address(name: string) -> PtrU8
 pub extern(ffi, "stone") fn stone_native_handle_generation(kind: int, handle: int) -> int
 pub extern(ffi, "stone") fn stone_native_handle_state(class: string, handle: int) -> int
 pub extern(ffi, "stone") fn stone_native_handle_valid(kind: int, handle: int) -> bool
@@ -205,6 +210,9 @@ pub extern(ffi, "stone") fn stone_target_attachment(handle: int, slot: int) -> i
 pub extern(ffi, "stone") fn stone_target_color_view(source: int) -> int
 pub extern(ffi, "stone") fn stone_target_create(width: int, height: int, attachment_formats: Ptr<int>, attachment_count: int, with_depth: bool) -> int
 pub extern(ffi, "stone") fn stone_target_destroy(handle: int)
+pub extern(ffi, "stone") fn stone_target_gl_depth_texture(handle: int) -> int
+pub extern(ffi, "stone") fn stone_target_gl_framebuffer(handle: int) -> int
+pub extern(ffi, "stone") fn stone_target_gl_texture(handle: int, slot: int) -> int
 pub extern(ffi, "stone") fn stone_target_resize(handle: int, width: int, height: int) -> bool
 pub extern(ffi, "stone") fn stone_test_virtual_pad_attach() -> int
 pub extern(ffi, "stone") fn stone_test_virtual_pad_axis(index: int, token: string, value: int) -> bool

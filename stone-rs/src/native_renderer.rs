@@ -24,6 +24,7 @@ pub const STONE_STAGE_TARGET_CHANGED: u32 = 1 << 1;
 pub const STONE_STAGE_SHADER_CHANGED: u32 = 1 << 2;
 pub const STONE_STAGE_DRAW_BUFFERS_CHANGED: u32 = 1 << 3;
 pub const STONE_STAGE_UNWOUND: u32 = 1 << 4;
+pub const STONE_STAGE_GL_ERROR: u32 = 1 << 5;
 
 const SAVED_UBO_SLOTS: usize = 8;
 
@@ -57,6 +58,156 @@ struct NativeStageState {
     polygon_offset_fill: bool,
     sample_alpha_to_coverage: bool,
     rasterizer_discard: bool,
+    // Stone uploads and reads back through client memory with default row
+    // layout and never sets these, so a stage must give them back.
+    pixel_pack_buffer: Option<glow::Buffer>,
+    pixel_unpack_buffer: Option<glow::Buffer>,
+    pixel_store: [i32; PIXEL_STORE.len()],
+    // The present shader encodes sRGB itself.
+    framebuffer_srgb: bool,
+    // Of the read framebuffer bound at entry; readbacks read its colour 0.
+    read_buffer: u32,
+    #[cfg(debug_assertions)]
+    defaults: DefaultState,
+}
+
+const PIXEL_STORE: [u32; 4] = [
+    glow::PACK_ALIGNMENT,
+    glow::UNPACK_ALIGNMENT,
+    glow::PACK_ROW_LENGTH,
+    glow::UNPACK_ROW_LENGTH,
+];
+
+/// Context state Stone leaves at its GL default and never saves. A stage that
+/// changes it is a native-code bug; debug builds report it rather than hide it.
+#[cfg(debug_assertions)]
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct DefaultState {
+    ints: [i32; DEFAULT_INTS.len()],
+    enables: [bool; DEFAULT_ENABLES.len()],
+    polygon_mode: [i32; 2],
+    depth_range: [u32; 2],
+    polygon_offset: [u32; 2],
+    line_width: u32,
+}
+
+#[cfg(debug_assertions)]
+const DEFAULT_INTS: [(u32, &str); 15] = [
+    (glow::FRONT_FACE, "FRONT_FACE"),
+    (glow::CULL_FACE_MODE, "CULL_FACE_MODE"),
+    (glow::PROVOKING_VERTEX, "PROVOKING_VERTEX"),
+    (glow::STENCIL_FUNC, "STENCIL_FUNC"),
+    (glow::STENCIL_REF, "STENCIL_REF"),
+    (glow::STENCIL_VALUE_MASK, "STENCIL_VALUE_MASK"),
+    (glow::STENCIL_WRITEMASK, "STENCIL_WRITEMASK"),
+    (glow::STENCIL_FAIL, "STENCIL_FAIL"),
+    (glow::STENCIL_PASS_DEPTH_FAIL, "STENCIL_PASS_DEPTH_FAIL"),
+    (glow::STENCIL_PASS_DEPTH_PASS, "STENCIL_PASS_DEPTH_PASS"),
+    (glow::PACK_SKIP_ROWS, "PACK_SKIP_ROWS"),
+    (glow::PACK_SKIP_PIXELS, "PACK_SKIP_PIXELS"),
+    (glow::UNPACK_SKIP_ROWS, "UNPACK_SKIP_ROWS"),
+    (glow::UNPACK_SKIP_PIXELS, "UNPACK_SKIP_PIXELS"),
+    (glow::UNPACK_IMAGE_HEIGHT, "UNPACK_IMAGE_HEIGHT"),
+];
+
+#[cfg(debug_assertions)]
+const DEFAULT_ENABLES: [(u32, &str); 12] = [
+    (glow::DEPTH_CLAMP, "DEPTH_CLAMP"),
+    (glow::PRIMITIVE_RESTART, "PRIMITIVE_RESTART"),
+    (glow::COLOR_LOGIC_OP, "COLOR_LOGIC_OP"),
+    (glow::PROGRAM_POINT_SIZE, "PROGRAM_POINT_SIZE"),
+    (glow::CLIP_DISTANCE0, "CLIP_DISTANCE0"),
+    (glow::CLIP_DISTANCE1, "CLIP_DISTANCE1"),
+    (glow::CLIP_DISTANCE2, "CLIP_DISTANCE2"),
+    (glow::CLIP_DISTANCE3, "CLIP_DISTANCE3"),
+    (glow::CLIP_DISTANCE4, "CLIP_DISTANCE4"),
+    (glow::CLIP_DISTANCE5, "CLIP_DISTANCE5"),
+    (glow::CLIP_DISTANCE6, "CLIP_DISTANCE6"),
+    (glow::CLIP_DISTANCE7, "CLIP_DISTANCE7"),
+];
+
+#[cfg(debug_assertions)]
+unsafe fn read_default_state(gl: &DebugGl) -> DefaultState {
+    let mut polygon_mode = [0i32; 2];
+    gl.get_parameter_i32_slice(glow::POLYGON_MODE, &mut polygon_mode);
+    let mut depth_range = [0f32; 2];
+    gl.get_parameter_f32_slice(glow::DEPTH_RANGE, &mut depth_range);
+    let mut factor = [0f32; 1];
+    gl.get_parameter_f32_slice(glow::POLYGON_OFFSET_FACTOR, &mut factor);
+    let mut units = [0f32; 1];
+    gl.get_parameter_f32_slice(glow::POLYGON_OFFSET_UNITS, &mut units);
+    let mut line_width = [0f32; 1];
+    gl.get_parameter_f32_slice(glow::LINE_WIDTH, &mut line_width);
+    DefaultState {
+        ints: DEFAULT_INTS.map(|(param, _)| gl.get_parameter_i32(param)),
+        enables: DEFAULT_ENABLES.map(|(cap, _)| gl.is_enabled(cap)),
+        polygon_mode,
+        depth_range: depth_range.map(f32::to_bits),
+        polygon_offset: [factor[0].to_bits(), units[0].to_bits()],
+        line_width: line_width[0].to_bits(),
+    }
+}
+
+#[cfg(debug_assertions)]
+fn report_default_state_changes(entry: &DefaultState, exit: &DefaultState) {
+    let mut changed: Vec<&str> = Vec::new();
+    for (i, (_, name)) in DEFAULT_INTS.iter().enumerate() {
+        if entry.ints[i] != exit.ints[i] {
+            changed.push(name);
+        }
+    }
+    for (i, (_, name)) in DEFAULT_ENABLES.iter().enumerate() {
+        if entry.enables[i] != exit.enables[i] {
+            changed.push(name);
+        }
+    }
+    if entry.polygon_mode != exit.polygon_mode {
+        changed.push("POLYGON_MODE");
+    }
+    if entry.depth_range != exit.depth_range {
+        changed.push("DEPTH_RANGE");
+    }
+    if entry.polygon_offset != exit.polygon_offset {
+        changed.push("POLYGON_OFFSET_FACTOR/UNITS");
+    }
+    if entry.line_width != exit.line_width {
+        changed.push("LINE_WIDTH");
+    }
+    if !changed.is_empty() {
+        ::log::error!(
+            target: "STONE",
+            "native stage changed GL state Stone neither sets nor restores: {}",
+            changed.join(", ")
+        );
+    }
+}
+
+/// Drain pending GL errors (bounded: a lost context can report one forever)
+/// and report them against `site`. Runs before any checked DebugGl call, which
+/// would otherwise consume the error and blame its own operation.
+unsafe fn drain_gl_errors(gl: &DebugGl, site: &str) -> bool {
+    let mut codes = [0u32; 8];
+    let mut count = 0;
+    while count < codes.len() {
+        let code = gl.get_error();
+        if code == glow::NO_ERROR {
+            break;
+        }
+        codes[count] = code;
+        count += 1;
+    }
+    if count == 0 {
+        return false;
+    }
+    stone_gl::GL_ERROR_COUNT.fetch_add(count as u64, std::sync::atomic::Ordering::Relaxed);
+    if crate::rock_log_reexport::once_should_emit_for(
+        concat!(file!(), ":", line!()),
+        codes[0] as u64,
+    ) {
+        let list: Vec<String> = codes[..count].iter().map(|c| format!("0x{c:X}")).collect();
+        ::log::error!(target: "GL", "gl error {site}: {}", list.join(", "));
+    }
+    true
 }
 
 #[derive(Clone, Copy)]
@@ -233,6 +384,13 @@ unsafe fn capture_stage_state(gl: &DebugGl) -> NativeStageState {
         polygon_offset_fill: gl.is_enabled(glow::POLYGON_OFFSET_FILL),
         sample_alpha_to_coverage: gl.is_enabled(glow::SAMPLE_ALPHA_TO_COVERAGE),
         rasterizer_discard: gl.is_enabled(glow::RASTERIZER_DISCARD),
+        pixel_pack_buffer: read_buffer(gl, glow::PIXEL_PACK_BUFFER_BINDING),
+        pixel_unpack_buffer: read_buffer(gl, glow::PIXEL_UNPACK_BUFFER_BINDING),
+        pixel_store: PIXEL_STORE.map(|param| gl.get_parameter_i32(param)),
+        framebuffer_srgb: gl.is_enabled(glow::FRAMEBUFFER_SRGB),
+        read_buffer: gl.get_parameter_i32(glow::READ_BUFFER) as u32,
+        #[cfg(debug_assertions)]
+        defaults: read_default_state(gl),
     }
 }
 
@@ -259,6 +417,10 @@ unsafe fn restore_stage_state(gl: &DebugGl, saved: &NativeStageState) -> u32 {
         flags |= STONE_STAGE_TARGET_CHANGED;
     } else if crate::canvas::current_target_size_raw() != saved.target_size {
         crate::canvas::restore_target_cache(saved.canvas_handle, saved.fbo, saved.target_size);
+    }
+
+    if gl.get_parameter_i32(glow::READ_BUFFER) as u32 != saved.read_buffer {
+        gl.read_buffer(saved.read_buffer);
     }
 
     let limits = gl_limits(gl);
@@ -355,6 +517,23 @@ unsafe fn restore_stage_state(gl: &DebugGl, saved: &NativeStageState) -> u32 {
     );
     gl.set_enabled(glow::RASTERIZER_DISCARD, saved.rasterizer_discard);
 
+    if read_buffer(gl, glow::PIXEL_PACK_BUFFER_BINDING) != saved.pixel_pack_buffer {
+        gl.bind_buffer(glow::PIXEL_PACK_BUFFER, saved.pixel_pack_buffer);
+    }
+    if read_buffer(gl, glow::PIXEL_UNPACK_BUFFER_BINDING) != saved.pixel_unpack_buffer {
+        gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, saved.pixel_unpack_buffer);
+    }
+    for (param, value) in PIXEL_STORE.into_iter().zip(saved.pixel_store) {
+        if gl.get_parameter_i32(param) != value {
+            gl.pixel_store_i32(param, value);
+        }
+    }
+    if gl.is_enabled(glow::FRAMEBUFFER_SRGB) != saved.framebuffer_srgb {
+        gl.set_enabled(glow::FRAMEBUFFER_SRGB, saved.framebuffer_srgb);
+    }
+    #[cfg(debug_assertions)]
+    report_default_state_changes(&saved.defaults, &read_default_state(gl));
+
     flags
 }
 
@@ -365,7 +544,14 @@ unsafe fn restore_stage_state(gl: &DebugGl, saved: &NativeStageState) -> u32 {
 /// rock-ffi stone-rendering
 #[no_mangle]
 pub extern "C" fn stone_native_stage_begin() -> u32 {
-    let Some(state) = with_gl(|gl| unsafe { capture_stage_state(gl) }) else {
+    let Some(state) = with_gl(|gl| unsafe {
+        drain_gl_errors(gl, "pending before a native stage");
+        let state = capture_stage_state(gl);
+        // Native attribute calls without their own VAO then fail instead of
+        // rewriting the VAO a Stone draw left bound.
+        gl.bind_vertex_array(None);
+        state
+    }) else {
         return 0;
     };
     let token = next_stage_token();
@@ -395,7 +581,15 @@ pub extern "C" fn stone_native_stage_end(scope: u32) -> u32 {
         );
         return 0;
     };
-    let Some(mut flags) = with_gl(|gl| unsafe { restore_stage_state(gl, &saved) }) else {
+    let Some(mut flags) = with_gl(|gl| unsafe {
+        let errored = drain_gl_errors(gl, "raised inside a native stage");
+        let flags = restore_stage_state(gl, &saved);
+        if errored {
+            flags | STONE_STAGE_GL_ERROR
+        } else {
+            flags
+        }
+    }) else {
         return 0;
     };
     NATIVE_STAGE_STACK.with(|stack| stack.borrow_mut().truncate(index));
@@ -407,6 +601,26 @@ pub extern "C" fn stone_native_stage_end(scope: u32) -> u32 {
         flags |= STONE_STAGE_UNWOUND;
     }
     flags
+}
+
+/// Address of the GL function `name` in Stone's context, for a native library
+/// that issues GL itself inside a stage. Null for an unknown name, off the
+/// render thread, or without a context. Valid until the context generation
+/// changes.
+/// rock-ffi stone-rendering
+#[no_mangle]
+pub extern "C" fn stone_native_gl_get_proc_address(name: *const c_char) -> *const c_void {
+    if name.is_null() {
+        ::log::error!(target: "STONE", "stone_native_gl_get_proc_address: null name");
+        return std::ptr::null();
+    }
+    let Ok(name) = unsafe { CStr::from_ptr(name) }.to_str() else {
+        return std::ptr::null();
+    };
+    if with_gl(|_| ()).is_none() {
+        return std::ptr::null();
+    }
+    crate::with_window(|w| w.gl_proc_address(name)).unwrap_or(std::ptr::null())
 }
 
 /// True only on the render thread while a native stage / custom draw scope is active.
@@ -858,6 +1072,37 @@ pub struct StoneNativeRendererApiV1 {
     pub mesh_free: extern "C" fn(u64),
     pub target_color_view: extern "C" fn(u64) -> u64,
     pub get_live_mesh_bytes: extern "C" fn() -> u64,
+
+    pub gl_get_proc_address: extern "C" fn(*const c_char) -> *const c_void,
+    pub image_gl_texture: extern "C" fn(u64) -> u32,
+    pub target_gl_texture: extern "C" fn(u64, c_int) -> u32,
+    pub target_gl_depth_texture: extern "C" fn(u64) -> u32,
+    pub target_gl_framebuffer: extern "C" fn(u64) -> u32,
+    pub image_import_gl_texture: extern "C" fn(u32, c_int, c_int, u32) -> u64,
+    pub image_import_update: extern "C" fn(u64, c_int, c_int) -> bool,
+    pub image_release_import: extern "C" fn(u64) -> bool,
+    pub frame_hook_register:
+        extern "C" fn(u32, c_int, *const c_void, *const c_void, *mut c_void, *const c_char) -> u64,
+    pub frame_hook_unregister: extern "C" fn(u64) -> bool,
+    pub frame_set_world_image: extern "C" fn(u64, u32) -> bool,
+    pub gpu_scope_begin: unsafe extern "C" fn(*const c_char),
+    pub gpu_scope_end: extern "C" fn(),
+    pub pixel_readback_new: extern "C" fn(c_int) -> u64,
+    pub pixel_readback_area_new: extern "C" fn(c_int) -> u64,
+    pub pixel_readback_submit: extern "C" fn(u64, u64, c_int, c_int),
+    pub pixel_readback_submit_area: extern "C" fn(u64, u64, c_int, c_int, c_int),
+    pub pixel_readback_poll_id: extern "C" fn(u64) -> c_int,
+    pub pixel_readback_poll_rgba: extern "C" fn(u64, *mut c_float, c_int) -> c_int,
+    pub pixel_readback_consume: extern "C" fn(u64) -> c_float,
+    pub pixel_readback_in_flight: extern "C" fn(u64) -> c_int,
+    pub pixel_readback_answer_x: extern "C" fn(u64) -> c_int,
+    pub pixel_readback_answer_y: extern "C" fn(u64) -> c_int,
+    pub pixel_readback_reset_contents: extern "C" fn(u64) -> bool,
+    pub pixel_readback_destroy: extern "C" fn(u64),
+    pub image_load: extern "C" fn(*const c_char, c_int, c_int, c_int, c_int) -> u64,
+    pub image_require: extern "C" fn(u64) -> bool,
+    pub image_ready: extern "C" fn(u64) -> bool,
+    pub image_unload: extern "C" fn(u64),
 }
 
 // Version 1 only appends: each entry keeps its index, so its offset never moves.
@@ -935,6 +1180,35 @@ api_v1_layout! {
     mesh_free = 54,
     target_color_view = 55,
     get_live_mesh_bytes = 56,
+    gl_get_proc_address = 57,
+    image_gl_texture = 58,
+    target_gl_texture = 59,
+    target_gl_depth_texture = 60,
+    target_gl_framebuffer = 61,
+    image_import_gl_texture = 62,
+    image_import_update = 63,
+    image_release_import = 64,
+    frame_hook_register = 65,
+    frame_hook_unregister = 66,
+    frame_set_world_image = 67,
+    gpu_scope_begin = 68,
+    gpu_scope_end = 69,
+    pixel_readback_new = 70,
+    pixel_readback_area_new = 71,
+    pixel_readback_submit = 72,
+    pixel_readback_submit_area = 73,
+    pixel_readback_poll_id = 74,
+    pixel_readback_poll_rgba = 75,
+    pixel_readback_consume = 76,
+    pixel_readback_in_flight = 77,
+    pixel_readback_answer_x = 78,
+    pixel_readback_answer_y = 79,
+    pixel_readback_reset_contents = 80,
+    pixel_readback_destroy = 81,
+    image_load = 82,
+    image_require = 83,
+    image_ready = 84,
+    image_unload = 85,
 }
 
 static STONE_NATIVE_RENDERER_API_V1: StoneNativeRendererApiV1 = StoneNativeRendererApiV1 {
@@ -1003,6 +1277,36 @@ static STONE_NATIVE_RENDERER_API_V1: StoneNativeRendererApiV1 = StoneNativeRende
     mesh_free: crate::mesh::stone_mesh_free,
     target_color_view: crate::canvas::stone_target_color_view,
     get_live_mesh_bytes: crate::mesh::stone_get_live_mesh_bytes,
+
+    gl_get_proc_address: stone_native_gl_get_proc_address,
+    image_gl_texture: crate::image_texture::stone_get_image_texture,
+    target_gl_texture: crate::canvas::stone_target_gl_texture,
+    target_gl_depth_texture: crate::canvas::stone_target_gl_depth_texture,
+    target_gl_framebuffer: crate::canvas::stone_target_gl_framebuffer,
+    image_import_gl_texture: crate::image_texture::stone_image_import_gl_texture,
+    image_import_update: crate::image_texture::stone_image_import_update,
+    image_release_import: crate::image_texture::stone_image_release_import,
+    frame_hook_register: crate::native_frame::stone_native_frame_hook_register,
+    frame_hook_unregister: crate::native_frame::stone_native_frame_hook_unregister,
+    frame_set_world_image: crate::native_frame::stone_native_frame_set_world_image,
+    gpu_scope_begin: crate::stone_gpu_scope_begin,
+    gpu_scope_end: crate::stone_gpu_scope_end,
+    pixel_readback_new: crate::pixel_readback::stone_pixel_readback_new,
+    pixel_readback_area_new: crate::pixel_readback::stone_pixel_readback_area_new,
+    pixel_readback_submit: crate::pixel_readback::stone_pixel_readback_submit,
+    pixel_readback_submit_area: crate::pixel_readback::stone_pixel_readback_submit_area,
+    pixel_readback_poll_id: crate::pixel_readback::stone_pixel_readback_poll_id,
+    pixel_readback_poll_rgba: crate::pixel_readback::stone_pixel_readback_poll_rgba,
+    pixel_readback_consume: crate::pixel_readback::stone_pixel_readback_consume,
+    pixel_readback_in_flight: crate::pixel_readback::stone_pixel_readback_in_flight,
+    pixel_readback_answer_x: crate::pixel_readback::stone_pixel_readback_answer_x,
+    pixel_readback_answer_y: crate::pixel_readback::stone_pixel_readback_answer_y,
+    pixel_readback_reset_contents: crate::pixel_readback::stone_pixel_readback_reset_contents,
+    pixel_readback_destroy: crate::pixel_readback::stone_pixel_readback_destroy,
+    image_load: crate::image_texture::stone_load_image,
+    image_require: crate::image_publication::stone_image_require,
+    image_ready: crate::image_publication::stone_image_ready,
+    image_unload: crate::image_texture::stone_unload_image,
 };
 
 /// Return the static function table for `abi_version`, or null if unsupported.

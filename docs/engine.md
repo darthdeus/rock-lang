@@ -491,8 +491,9 @@ through a single versioned C function-pointer table:
   field's offset at compile time and a test checks the header against the
   Rust field order.
 - Every entry in `StoneNativeRendererApiV1` is also exported directly in
-  `packages/stone/engine/rendering_ffi.h` and `rendering_ffi.rock` via
-  `stone-rs/build.rs`.
+  `packages/stone/engine/rendering_ffi.h` or `runtime_ffi.h` (and their `.rock`
+  bindings) via `stone-rs/build.rs`. Native code should use the table rather
+  than receiving export addresses from script code.
 
 ### Stage scope and GL state save/restore
 
@@ -502,16 +503,27 @@ through a single versioned C function-pointer table:
   shader program, indexed uniform-buffer bindings (`0..8`) and generic UBO
   binding, active texture and the texture/sampler bindings of every unit a
   registered shader samples, vertex array,
-  blend state, depth state, color mask, clear color/depth, and rasterizer
+  blend state, depth state, color mask, clear color/depth, rasterizer
   toggles (`CULL_FACE`, `STENCIL_TEST`, `POLYGON_OFFSET_FILL`,
-  `SAMPLE_ALPHA_TO_COVERAGE`, `RASTERIZER_DISCARD`). It returns a non-zero
+  `SAMPLE_ALPHA_TO_COVERAGE`, `RASTERIZER_DISCARD`), pixel pack/unpack buffer
+  bindings, pack/unpack alignment and row length, `FRAMEBUFFER_SRGB`, and the
+  read buffer. It then binds vertex array 0, so attribute calls made before
+  native code binds its own VAO cannot modify Stone's. It returns a non-zero
   token that identifies this scope, or `0` without a live GL context on the
   calling thread.
+- Begin and end each drain pending GL errors and log them at error level, so a
+  native error never fails Stone's next checked call. Errors raised inside the
+  stage add `STONE_STAGE_GL_ERROR = 32` to the end result.
+- Debug builds also log an error when a stage leaves changed state that Stone
+  assumes is at its default and never sets: front face, cull face mode,
+  provoking vertex, polygon mode and offset values, depth range, line width,
+  stencil function/mask/ops, pack/unpack skip and image height, depth clamp,
+  primitive restart, logic op, program point size and clip distances.
 - `stone_native_stage_end(uint32_t scope) -> uint32_t` restores the state saved
   by `scope` (re-binding the framebuffer or shader program only when the stage
   changed them), closes it, and returns a `STONE_STAGE_*` bitmask
   (`RESTORED = 1`, `TARGET_CHANGED = 2`, `SHADER_CHANGED = 4`,
-  `DRAW_BUFFERS_CHANGED = 8`, `UNWOUND = 16`). Scopes opened inside `scope` and
+  `DRAW_BUFFERS_CHANGED = 8`, `UNWOUND = 16`, `GL_ERROR = 32`). Scopes opened inside `scope` and
   still open are closed with it (`UNWOUND`). It returns `0` and restores
   nothing when `scope` is not open: never begun, already closed (tokens are not
   reused), or dropped at frame start.
@@ -524,6 +536,79 @@ through a single versioned C function-pointer table:
 - `stone_native_frame_active()`, `stone_native_frame_target()`, and
   `stone_native_frame_size(&w, &h)` are valid only on the render thread while a
   stage scope is open; off-thread or outside a stage they report inactive.
+
+### Native GL inside a stage
+
+A native library may issue OpenGL itself inside a stage, in Stone's context:
+
+- `gl_get_proc_address(name)` returns Stone's loader result for `name` (null
+  for an unknown name or without a context). Reload function pointers when
+  the context generation changes.
+- `image_gl_texture(image)`, `target_gl_texture(target, slot)`,
+  `target_gl_depth_texture(target)` and `target_gl_framebuffer(target)`
+  return borrowed GL names, or 0 for an invalid handle, an unpublished image
+  or a missing attachment. A name stays the same while its handle's generation
+  does.
+- `image_import_gl_texture(name, w, h, flags)` registers a native
+  `GL_TEXTURE_2D` as an image handle that Stone samples like any image
+  (`STONE_IMAGE_IMPORT_REPEAT = 1` selects repeat wrap). Stone never deletes
+  the texture or changes its parameters, does not count its bytes, and
+  refuses unload, reload, wrap changes and writes on it.
+  `image_import_update(image, w, h)` records new storage and advances the
+  generation; `image_release_import(image)` forgets the handle.
+- `gpu_scope_*`, `pixel_readback_*` and `image_load/require/ready/unload` are
+  the existing exports of those names.
+
+Rules for native GL:
+
+- Bind your own VAO before attribute calls.
+- Do not modify Stone-owned textures, samplers or framebuffer attachments,
+  and never delete names Stone returned, or your own names after the context
+  generation changed.
+- Leave no open queries, transform feedback, mapped buffers or debug groups,
+  and no pending GL error.
+- Leave state outside the stage snapshot at its default.
+- The baseline is GL 3.3 core; on a 4.1 core context KHR_debug, timer
+  queries, `glClipControl`, `layout(binding)`, SSBOs, compute and buffer
+  storage are unavailable.
+- Stone's uniform blocks use bindings `0..4`; the stage snapshots `0..8`.
+
+### Frame hooks and the native world image
+
+`frame_hook_register(point, order, run, release, userdata, name)` registers
+a `StoneFrameHookFn` to run every frame at `point`, in ascending `order` and
+then registration order, and returns a hook id (0 with a logged error).
+`frame_hook_unregister(hook)` removes it; during dispatch the hook stops at
+once and `release` runs when the dispatch ends. `stone_teardown` runs every
+`release` first, while the context is still live. Points, in frame order:
+
+- `STONE_FRAME_HOOK_WORLD_BEGIN = 1`: after draw systems and world prepare
+  passes, before the scene clear.
+- `STONE_FRAME_HOOK_WORLD_BATCHES = 2`: after the scene clear, before script
+  batches flush, so native output composes with them through the depth
+  buffer.
+- `STONE_FRAME_HOOK_SCENE_END = 3`: after scene passes and after-scene
+  batches, before post processing.
+
+Each hook runs inside its own stage and a GPU scope named `name`, with the
+scene target bound. `StoneFrameInfo` gives the frame number, context
+generation, scene target and partner with their sizes and generation, and
+the camera script batches use (`stone_set_camera(offset, scale)`). A hook
+returns 0 for no writes, 1 after writing the scene target, or a negative
+value, which is logged. Hooks do not run when submission is suppressed.
+
+`frame_set_world_image(target, STONE_WORLD_IMAGE_KEEP_POST)`, called from a
+`WORLD_BEGIN` hook, makes `target` this frame's world image. `target` must
+be a live non-integer engine target whose active size covers the scene's;
+Stone copies its colour 0 into the scene target unless it is the scene
+target. The frame then skips the scene clear, script batches, outline mask,
+scene passes and after-scene batches, and still runs post processing,
+pixel-screen draws, present and UI. Depth and other attachments of the scene
+target hold whatever the hooks left. Pending world batches or scene passes
+are dropped with a warning. The setting lasts one frame. An invalid target,
+any other flags, or a call outside `WORLD_BEGIN` logs an error and returns
+false, and the frame renders normally. `STONE_WORLD_IMAGE_SKIP_POST = 2` is
+reserved.
 
 ### Native scene passes
 

@@ -262,6 +262,9 @@ pub(crate) struct LoadedImage {
     decode_failed: bool,
     generation: u64,
     asset_path: Option<String>,
+    /// A native library's texture: Stone samples it but never writes, deletes or
+    /// changes its parameters, and does not count its bytes.
+    imported: bool,
 }
 
 impl LoadedImage {
@@ -316,6 +319,7 @@ pub(crate) fn insert_image(
         decode_failed: false,
         generation: crate::handles::next_generation(),
         asset_path: None,
+        imported: false,
     };
     IMAGES.with(|images| images.borrow_mut().insert(id, image));
 }
@@ -574,6 +578,9 @@ fn stored_texel_bytes(
 }
 
 fn image_byte_len(image: &LoadedImage) -> u64 {
+    if image.imported {
+        return 0;
+    }
     let stored = image.stored_size();
     stored_texel_bytes(stored.0, stored.1, image.format, image.mipmapped)
 }
@@ -1194,6 +1201,10 @@ pub extern "C" fn stone_image_set_wrap(handle: u64, repeat: bool) -> bool {
         crate::log_once!("IMAGE", "stone_image_set_wrap: invalid handle {}", handle);
         return false;
     };
+    if is_imported(handle) {
+        ::log::error!(target: "IMAGE", "stone_image_set_wrap: image {handle} is an imported native texture; its owner sets wrap");
+        return false;
+    }
     with_image_mut(handle, |img| img.repeat = repeat);
     with_gl(|gl| unsafe {
         gl.bind_texture(glow::TEXTURE_2D, Some(texture));
@@ -1227,8 +1238,13 @@ pub(crate) fn image_write_target_stored(
     stored: (u32, u32),
     data: &[u8],
 ) -> Option<(glow::Texture, bool)> {
-    let (texture, current, format) =
-        with_image(handle, |img| (img.texture, img.stored_size(), img.format))?;
+    let (texture, current, format, imported) = with_image(handle, |img| {
+        (img.texture, img.stored_size(), img.format, img.imported)
+    })?;
+    if imported {
+        ::log::error!(target: "IMAGE", "image {handle} is an imported native texture; Stone does not write it");
+        return None;
+    }
     if current == stored {
         return Some((texture, false));
     }
@@ -1367,6 +1383,18 @@ pub(crate) fn sample_image_texture(handle: u64) -> Option<u32> {
 /// rock-ffi stone
 #[no_mangle]
 pub extern "C" fn stone_unload_image(handle: u64) {
+    if is_imported(handle) {
+        ::log::error!(target: "IMAGE", "stone_unload_image: image {handle} is an imported native texture; release it with stone_image_release_import");
+        return;
+    }
+    remove_image(handle);
+}
+
+fn is_imported(handle: u64) -> bool {
+    with_image(handle, |img| img.imported).unwrap_or(false)
+}
+
+fn remove_image(handle: u64) {
     crate::image_publication::retire(handle);
     let removed = IMAGES.with(|images| images.borrow_mut().remove(&handle));
     if let Some(img) = removed {
@@ -1374,16 +1402,101 @@ pub extern "C" fn stone_unload_image(handle: u64) {
             remap_image_path(path);
         }
         crate::handles::retire(Class::Image, handle);
-        with_gl(|gl| unsafe {
-            gl.delete_texture(img.texture);
-        });
+        if !img.imported {
+            with_gl(|gl| unsafe {
+                gl.delete_texture(img.texture);
+            });
+        }
     }
+}
+
+pub const STONE_IMAGE_IMPORT_REPEAT: u32 = 1;
+
+/// Register a native library's live `GL_TEXTURE_2D` `name` as an image handle
+/// that Stone samples like any other. The native library keeps ownership:
+/// Stone never deletes the texture or changes its parameters, and
+/// `stone_unload_image`, `stone_reload_image` and image writes refuse it.
+/// `STONE_IMAGE_IMPORT_REPEAT` selects repeat wrap when Stone binds a sampler
+/// for it. Returns 0 with a logged error for a name that is not a texture, a
+/// size outside `1..=GL_MAX_TEXTURE_SIZE`, or unknown flags.
+/// rock-ffi stone
+#[no_mangle]
+pub extern "C" fn stone_image_import_gl_texture(
+    name: u32,
+    width: c_int,
+    height: c_int,
+    flags: u32,
+) -> u64 {
+    if flags & !STONE_IMAGE_IMPORT_REPEAT != 0 {
+        ::log::error!(target: "IMAGE", "stone_image_import_gl_texture: unknown flags 0x{flags:X}");
+        return 0;
+    }
+    let Some(texture) = std::num::NonZeroU32::new(name).map(glow::NativeTexture) else {
+        ::log::error!(target: "IMAGE", "stone_image_import_gl_texture: texture name 0");
+        return 0;
+    };
+    let valid = with_gl(|gl| unsafe {
+        let max = gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE);
+        let size_ok = (1..=max).contains(&width) && (1..=max).contains(&height);
+        (size_ok, gl.is_texture(texture))
+    });
+    let Some((size_ok, is_texture)) = valid else {
+        return 0;
+    };
+    if !size_ok || !is_texture {
+        ::log::error!(
+            target: "IMAGE",
+            "stone_image_import_gl_texture: rejected name {name} ({width}x{height}, texture={is_texture})"
+        );
+        return 0;
+    }
+    let id = crate::handles::mint(Class::Image);
+    insert_image(
+        id,
+        texture,
+        (width as u32, height as u32),
+        ImageFormat::Rgba8,
+        false,
+    );
+    with_image_mut(id, |img| {
+        img.imported = true;
+        img.repeat = flags & STONE_IMAGE_IMPORT_REPEAT != 0;
+    });
+    id
+}
+
+/// Record a new size after the owner re-specified an imported texture's storage,
+/// advancing the handle generation. False for a handle that is not an import.
+/// rock-ffi stone
+#[no_mangle]
+pub extern "C" fn stone_image_import_update(handle: u64, width: c_int, height: c_int) -> bool {
+    if !is_imported(handle) || width <= 0 || height <= 0 {
+        ::log::error!(target: "IMAGE", "stone_image_import_update: {handle} is not an imported texture or {width}x{height} is empty");
+        return false;
+    }
+    with_image_mut(handle, |img| {
+        img.set_storage((width as u32, height as u32), (width as u32, height as u32));
+        img.generation = crate::handles::next_generation();
+    });
+    true
+}
+
+/// Forget an imported texture's handle without deleting the texture.
+/// rock-ffi stone
+#[no_mangle]
+pub extern "C" fn stone_image_release_import(handle: u64) -> bool {
+    if !is_imported(handle) {
+        ::log::error!(target: "IMAGE", "stone_image_release_import: {handle} is not an imported texture");
+        return false;
+    }
+    remove_image(handle);
+    true
 }
 
 pub(crate) fn unload_all() {
     let handles: Vec<u64> = IMAGES.with(|i| i.borrow().keys().copied().collect());
     for handle in handles {
-        stone_unload_image(handle);
+        remove_image(handle);
     }
     IMAGE_BY_PATH.with(|by_path| by_path.borrow_mut().clear());
     WHITE_IMAGE.with(|white| *white.borrow_mut() = None);
@@ -1402,6 +1515,10 @@ pub extern "C" fn stone_reload_image(handle: u64, path: *const c_char) -> bool {
     // A pending upload would land after the reload and restore the old pixels.
     stone_flush_image_uploads();
 
+    if is_imported(handle) {
+        ::log::error!(target: "IMAGE", "stone_reload_image: image {handle} is an imported native texture");
+        return false;
+    }
     let Some((format, exact)) = with_image(handle, |img| {
         (
             img.format,
@@ -1494,6 +1611,7 @@ pub(crate) fn live_image_bytes() -> u64 {
         images
             .borrow()
             .values()
+            .filter(|img| !img.imported)
             .map(|img| {
                 let (width, height) = img.stored_size();
                 img.format.level_bytes(width, height)

@@ -17,6 +17,7 @@ pub const STONE_RENDERING_SOURCES: &[(&str, &str)] = &[
     ("input.rs", "input"),
     ("mesh.rs", "mesh"),
     ("mesh_capture.rs", "mesh_capture"),
+    ("native_frame.rs", "native_frame"),
     ("native_ledger.rs", "native_ledger"),
     ("native_renderer.rs", "native_renderer"),
     ("pixel_readback.rs", "pixel_readback"),
