@@ -326,13 +326,6 @@ impl GpuTimer {
             return;
         };
         self.slots[self.write].entries[entry].end = Some(end);
-        // Without a flush the end timestamp can wait in the driver's command
-        // buffer until the next flush, so GPU idle time while the CPU builds
-        // later work is billed to this scope. Flushed, that idle time falls
-        // between scopes: the parent minus its children.
-        if self.mode == ScopeMode::Queries {
-            unsafe { gl.flush() };
-        }
         if self.debug_groups && self.open_groups > 0 {
             unsafe { gl.pop_debug_group() };
             self.open_groups -= 1;
@@ -476,8 +469,7 @@ impl GpuTimer {
             self.timed_free.push(begin);
             return;
         };
-        // As for scopes: unflushed, the end timestamp waits in the driver's
-        // command buffer and bills later CPU time to the pass.
+        // Tagged work can be polled before the next frame is submitted.
         unsafe { gl.flush() };
         self.timed.push_back(TimedPass { tag, begin, end });
     }
@@ -753,6 +745,57 @@ fn metric_percentile_index(p: usize, n: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{scope_mode_from_env, ScopeAggregator, ScopeMode, ScopeSample};
+
+    #[test]
+    fn named_query_scopes_record_timestamps_without_flushing() {
+        use std::cell::Cell;
+        use std::ffi::c_void;
+
+        thread_local! {
+            static STAMPS: Cell<u32> = const { Cell::new(0) };
+            static FLUSHES: Cell<u32> = const { Cell::new(0) };
+        }
+        unsafe extern "system" fn get_string(_: u32) -> *const u8 {
+            c"3.3".as_ptr().cast()
+        }
+        unsafe extern "system" fn get_integer(_: u32, value: *mut i32) {
+            *value = 0;
+        }
+        unsafe extern "system" fn get_error() -> u32 {
+            glow::NO_ERROR
+        }
+        unsafe extern "system" fn gen_queries(_: i32, query: *mut u32) {
+            *query = STAMPS.with(Cell::get) + 1;
+        }
+        unsafe extern "system" fn query_counter(_: u32, _: u32) {
+            STAMPS.with(|stamps| stamps.set(stamps.get() + 1));
+        }
+        unsafe extern "system" fn flush() {
+            FLUSHES.with(|flushes| flushes.set(flushes.get() + 1));
+        }
+
+        let gl = crate::DebugGl::new(unsafe {
+            glow::Context::from_loader_function(|name| match name {
+                "glGetString" => get_string as *const c_void,
+                "glGetIntegerv" => get_integer as *const c_void,
+                "glGetError" => get_error as *const c_void,
+                "glGenQueries" => gen_queries as *const c_void,
+                "glQueryCounter" => query_counter as *const c_void,
+                "glFlush" => flush as *const c_void,
+                _ => std::ptr::null(),
+            })
+        });
+        let mut timer = super::GpuTimer::new();
+        timer.mode = ScopeMode::Queries;
+        timer.initialized = true;
+        timer.begin(&gl);
+        timer.scope_begin(&gl, "pass:probe");
+        timer.scope_end(&gl);
+        timer.end(&gl);
+
+        assert_eq!(STAMPS.with(Cell::get), 4);
+        assert_eq!(FLUSHES.with(Cell::get), 0);
+    }
 
     fn sample(path: super::PathId, ns: u64) -> ScopeSample {
         ScopeSample { path, ns }
