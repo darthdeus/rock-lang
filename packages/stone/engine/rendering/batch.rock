@@ -1577,6 +1577,14 @@ pub fn run_frame_hooks(point: int, cam_offset: Vec2, cam_scale: float) -> int {
         cam_offset.x, cam_offset.y, cam_scale)
 }
 
+// Native output under script UI, drawn into the target script UI is about to
+// draw into: the UI raster canvas on scaled-UI frames, otherwise the window.
+fn run_ui_begin_hooks() {
+    if let view = RENDER_VIEW {
+        run_frame_hooks(STONE_FRAME_HOOK_UI_BEGIN, camera_offset_in(view), view.world_to_scene_scale)
+    }
+}
+
 fn render_scene_overlays() {
     if POST_SCENE_BATCHES_PENDING { render_batches(after_scene:true) }
 }

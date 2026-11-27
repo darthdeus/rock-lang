@@ -596,19 +596,23 @@ once and `release` runs when the dispatch ends. `stone_teardown` runs every
 - `STONE_FRAME_HOOK_SCENE_END = 3`: after scene passes and after-scene
   batches, before post processing.
 - `STONE_FRAME_HOOK_UI_BEGIN = 4`: after post processing, pixel-screen
-  draws and present, before the script UI flush, so native output lies above
-  the post-processed world and below script UI and imgui. The window
-  framebuffer is bound instead of the scene target, also on the frames whose
-  script UI is drawn into the UI raster canvas and composited over the
-  window afterwards.
+  draws and present, just before the script UI batches draw, so native
+  output lies above the post-processed world and below script UI and imgui.
+  World overlay commands draw with the script UI batches, above the hook.
+  The bound target is the one script UI draws into: the UI raster canvas when
+  `ui.raster_scale` makes it smaller than the window (it is cleared first and
+  upscaled over the window with nearest filtering afterwards), otherwise the
+  window. The viewport is that target's full extent.
 
 Each hook runs inside its own stage and a GPU scope named `name`, with the
 scene target bound unless its point says otherwise. `StoneFrameInfo` gives
-the frame number, context generation, scene target and partner with their
-sizes and generation, and the camera script batches use
-(`stone_set_camera(offset, scale)`). A hook returns 0 for no writes, 1 after
-writing the target it drew into, or a negative value, which is logged.
-Hooks do not run when submission is suppressed.
+the frame number, context generation, the bound target and its partner with
+their sizes and generation, the GL framebuffer bound, and the camera script
+batches use (`stone_set_camera(offset, scale)`). The bound target is the
+scene target, or at `UI_BEGIN` the UI raster canvas, or 0 for the window,
+with no partner. A hook returns 0 for no writes, 1 after writing the target
+it drew into, or a negative value, which is logged. Hooks do not run when
+submission is suppressed.
 
 `frame_set_world_image(target, STONE_WORLD_IMAGE_KEEP_POST)`, called from a
 `WORLD_BEGIN` hook, makes `target` this frame's world image. `target` must
