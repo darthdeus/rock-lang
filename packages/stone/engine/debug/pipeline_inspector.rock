@@ -31,6 +31,7 @@ global PIPELINE_SNAPSHOT: [BatchInfo] = []
 pub enum PipelinePassInfo {
     Legacy(Pass),
     Semantic(GpuPass),
+    NativeScene(string),
 }
 pub global PIPELINE_PASS_LOG: [PipelinePassInfo] = []
 
@@ -102,6 +103,7 @@ fn draw_pipeline_inspector() {
                     let out = if p.output != null { "canvas" } else { "screen" }
                     imgui_text("{i}: {p.pipeline.shader_name}   in:{p.slot_inputs.len()}  -> {out}")
                 }
+                PipelinePassInfo::NativeScene(name) => { imgui_text("{i}: {name}   native scene") }
                 PipelinePassInfo::Semantic(p) => {
                     let out = match p.target {
                         GpuTarget::Window => "screen",

@@ -264,7 +264,7 @@ pub fn run_passes(passes: [Pass]) {
 // Queue them each frame; use final passes for the tonemapped image.
 pub(package) enum ScenePassEntry {
     Script(Pass),
-    Native(int, PtrU8, PtrU8),
+    Native(int, string, PtrU8, PtrU8),
 }
 
 pub(package) global SCENE_PASSES: [ScenePassEntry] = []
@@ -301,14 +301,19 @@ pub fn queue_scene_pass(p: Pass) {
 
 /// Borrows callback code and userdata through this frame's scene drain or discard.
 pub fn queue_native_scene_pass(body: PtrU8, userdata: PtrU8) -> bool {
+    return queue_named_native_scene_pass("native_scene_pass", body, userdata)
+}
+
+/// Uses name for the GPU pass scope and pipeline inspector.
+pub fn queue_named_native_scene_pass(name: string, body: PtrU8, userdata: PtrU8) -> bool {
     if SCENE_PASSES_RUNNING || SIM_SKIP_SUBMIT || !native_scene_callback_present(body) { return false }
     let generation = stone_native_context_generation()
     if generation == 0 { return false }
-    SCENE_PASSES.push(ScenePassEntry::Native(generation, body, userdata))
+    SCENE_PASSES.push(ScenePassEntry::Native(generation, name, body, userdata))
     return true
 }
 
-fn run_native_scene_pass(body: PtrU8, userdata: PtrU8, current: int, partner: int) -> bool {
+fn run_native_scene_pass(name: string, body: PtrU8, userdata: PtrU8, current: int, partner: int) -> bool {
     let target = CURRENT_CANVAS_HANDLE
     let blend = CURRENT_BLEND
     let shader = WATCHER.current_shader_name
@@ -320,6 +325,11 @@ fn run_native_scene_pass(body: PtrU8, userdata: PtrU8, current: int, partner: in
             if let name = shader { set_shader(name) } else { end_shader() }
         }
     }
+    if ENGINE.show_pipeline_inspector {
+        PIPELINE_PASS_LOG.push(PipelinePassInfo::NativeScene(name))
+    }
+    gpu_pass_scope_begin(name)
+    defer { gpu_scope_end() }
     let result = call_native_scene_pass(body, userdata, current, partner)
     if result != STONE_SCENE_NO_OUTPUT_CHANGE && result != STONE_SCENE_OUTPUT_PARTNER {
         log_error("RENDER", "native scene pass returned invalid result {result}")
@@ -398,9 +408,9 @@ pub fn run_scene_passes() {
     for entry in SCENE_PASSES {
         let p = match entry {
             ScenePassEntry::Script(pass) => pass,
-            ScenePassEntry::Native(generation, body, userdata) => {
+            ScenePassEntry::Native(generation, name, body, userdata) => {
                 if generation != stone_native_context_generation() { continue }
-                if run_native_scene_pass(body, userdata, current.handle.0, partner.handle.0) {
+                if run_native_scene_pass(name, body, userdata, current.handle.0, partner.handle.0) {
                     let swap = current
                     current = partner
                     partner = swap

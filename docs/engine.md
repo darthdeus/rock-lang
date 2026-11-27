@@ -545,6 +545,10 @@ callback, an unavailable render context, suppressed submission, or an active
 scene drain. The scene queue cannot be modified or drained recursively during
 dispatch.
 
+`queue_named_native_scene_pass(name: string, body: PtrU8, userdata: PtrU8) -> bool`
+sets the GPU pass scope and pipeline inspector name for a dispatched callback.
+The original enqueue function uses `native_scene_pass`.
+
 Both canvas handles are in logical order at the entry's position in the queue.
 Return `STONE_SCENE_NO_OUTPUT_CHANGE` (0) when the result remains in the
 incoming current target, or `STONE_SCENE_OUTPUT_PARTNER` (1) when it lives in
