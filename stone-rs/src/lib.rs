@@ -345,6 +345,7 @@ mod graphics_capture;
 mod handles;
 mod mesh;
 mod mesh_capture;
+pub mod native_frame;
 mod native_ledger;
 pub mod native_renderer;
 mod pixel_readback;
@@ -865,6 +866,12 @@ pub struct StoneWindow {
     gl_context_raw: *mut c_void,
 }
 
+impl StoneWindow {
+    pub(crate) fn gl_proc_address(&self, name: &str) -> *const c_void {
+        self._video.gl_get_proc_address(name) as *const c_void
+    }
+}
+
 fn apply_gl_context_request(gl_attr: &sdl2::video::gl_attr::GLAttr<'_>, request: GlContextRequest) {
     gl_attr.set_context_profile(match request.profile {
         GlProfile::Core => GLProfile::Core,
@@ -1170,6 +1177,8 @@ pub extern "C" fn stone_quit_requested() -> bool {
 #[no_mangle]
 pub extern "C" fn stone_teardown() -> bool {
     crate::relight_jobs::shutdown();
+    // Native releases may delete their own GL objects, so the context is still live.
+    native_frame::release_all();
     input::test_virtual_pad_cleanup();
     // ImGui's OpenGL3 backend shutdown needs the live GL context. Idempotent:
     // early-returns if ImGui was never initialized.

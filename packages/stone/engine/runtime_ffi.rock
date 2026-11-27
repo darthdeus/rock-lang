@@ -108,10 +108,13 @@ extern(ffi, "stone") fn stone_image_data_size(handle: int, width: Ptr<int>, heig
 extern(ffi, "stone") fn stone_image_decode_failed(handle: int) -> bool
 pub extern(ffi, "stone") fn stone_image_decode_failed_count() -> int
 extern(ffi, "stone") fn stone_image_exists(handle: int) -> bool
+pub extern(ffi, "stone") fn stone_image_import_gl_texture(name: int, width: int, height: int, flags: int) -> int
+pub extern(ffi, "stone") fn stone_image_import_update(handle: int, width: int, height: int) -> bool
 extern(ffi, "stone") fn stone_image_is_stub(handle: int) -> bool
 extern(ffi, "stone") fn stone_image_pending_bytes() -> int
 pub extern(ffi, "stone") fn stone_image_read_texel(handle: int, x: int, y: int) -> int
 extern(ffi, "stone") fn stone_image_ready(handle: int) -> bool
+pub extern(ffi, "stone") fn stone_image_release_import(handle: int) -> bool
 extern(ffi, "stone") fn stone_image_require(handle: int) -> bool
 pub extern(ffi, "stone") fn stone_image_set_wrap(handle: int, repeat: bool) -> bool
 extern(ffi, "stone") fn stone_image_storage_size(handle: int, width: Ptr<int>, height: Ptr<int>)

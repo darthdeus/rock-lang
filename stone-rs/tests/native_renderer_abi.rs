@@ -38,6 +38,12 @@ const STONE_STAGE_TARGET_CHANGED: u32 = 1 << 1;
 const STONE_STAGE_SHADER_CHANGED: u32 = 1 << 2;
 const STONE_STAGE_DRAW_BUFFERS_CHANGED: u32 = 1 << 3;
 const STONE_STAGE_UNWOUND: u32 = 1 << 4;
+const STONE_STAGE_GL_ERROR: u32 = 1 << 5;
+
+const STONE_FRAME_HOOK_WORLD_BEGIN: u32 = 1;
+const STONE_FRAME_HOOK_WORLD_BATCHES: u32 = 2;
+const STONE_FRAME_HOOKS_WROTE: u32 = 1 << 8;
+const STONE_FRAME_HOOKS_WORLD_IMAGE: u32 = 1 << 9;
 
 const STONE_CANVAS_RGBA8: c_int = 0;
 
@@ -155,6 +161,63 @@ extern "C" {
         attr_count: c_int,
     ) -> u64;
     fn stone_mesh_free(handle: u64);
+    fn stone_get_canvas_texture(handle: u64) -> u32;
+    fn stone_native_frame_hooks_run(
+        point: u32,
+        scene: u64,
+        partner: u64,
+        offset_x: c_float,
+        offset_y: c_float,
+        scale: c_float,
+    ) -> u32;
+}
+
+/// Mirrors `HookProbe` in the second library.
+#[repr(C)]
+struct HookProbe {
+    api: *const c_void,
+    tag: u32,
+    mode: u32,
+    world_image: u64,
+    scene: u64,
+}
+
+struct ProbeLib {
+    hook: *const c_void,
+    release: *const c_void,
+    take_order: unsafe extern "C" fn(*mut u32, u32) -> u32,
+    released: unsafe extern "C" fn() -> u32,
+    failures: unsafe extern "C" fn() -> u32,
+}
+
+impl ProbeLib {
+    unsafe fn load(lib: *mut c_void) -> Self {
+        let sym = |name: &std::ffi::CStr| {
+            let ptr = libc::dlsym(lib, name.as_ptr());
+            assert!(!ptr.is_null(), "dlsym {name:?}");
+            ptr as *const c_void
+        };
+        Self {
+            hook: sym(c"probe_frame_hook"),
+            release: sym(c"probe_release"),
+            take_order: std::mem::transmute::<
+                *const c_void,
+                unsafe extern "C" fn(*mut u32, u32) -> u32,
+            >(sym(c"probe_take_order")),
+            released: std::mem::transmute::<*const c_void, unsafe extern "C" fn() -> u32>(sym(
+                c"probe_released",
+            )),
+            failures: std::mem::transmute::<*const c_void, unsafe extern "C" fn() -> u32>(sym(
+                c"probe_failures",
+            )),
+        }
+    }
+
+    unsafe fn order(&self) -> Vec<u32> {
+        let mut out = [0u32; 16];
+        let len = (self.take_order)(out.as_mut_ptr(), 16);
+        out[..len as usize].to_vec()
+    }
 }
 
 const MRT_SHADER: &str = r#"#version 330 core
@@ -277,6 +340,153 @@ struct ApiV1 {
     mesh_update_instances: extern "C" fn(u64, *const c_float, c_int) -> c_int,
     mesh_draw: extern "C" fn(u64, u64, c_int) -> c_int,
     mesh_free: extern "C" fn(u64),
+    target_color_view: extern "C" fn(u64) -> u64,
+    get_live_mesh_bytes: extern "C" fn() -> u64,
+
+    gl_get_proc_address: extern "C" fn(*const c_char) -> *const c_void,
+    image_gl_texture: extern "C" fn(u64) -> u32,
+    target_gl_texture: extern "C" fn(u64, c_int) -> u32,
+    target_gl_depth_texture: extern "C" fn(u64) -> u32,
+    target_gl_framebuffer: extern "C" fn(u64) -> u32,
+    image_import_gl_texture: extern "C" fn(u32, c_int, c_int, u32) -> u64,
+    image_import_update: extern "C" fn(u64, c_int, c_int) -> bool,
+    image_release_import: extern "C" fn(u64) -> bool,
+    frame_hook_register: extern "C" fn(u32, c_int, *const c_void, *const c_void, *mut c_void, *const c_char) -> u64,
+    frame_hook_unregister: extern "C" fn(u64) -> bool,
+    frame_set_world_image: extern "C" fn(u64, u32) -> bool,
+}
+
+#[repr(C)]
+pub struct FrameInfo {
+    struct_size: u32,
+    point: u32,
+    frame: u64,
+    context_generation: u64,
+    scene_target: u64,
+    scene_partner: u64,
+    scene_generation: u64,
+    target_width: c_int,
+    target_height: c_int,
+    active_width: c_int,
+    active_height: c_int,
+    offset_x: c_float,
+    offset_y: c_float,
+    scale: c_float,
+    _reserved: u32,
+}
+
+/// One registered hook. `mode`: 0 records only, 1 writes the scene target
+/// with raw GL and leaves state dirty, 2 sets `world_image`, 3 sets it with
+/// the reserved SKIP_POST flag.
+#[repr(C)]
+pub struct HookProbe {
+    pub api: *const c_void,
+    pub tag: u32,
+    pub mode: u32,
+    pub world_image: u64,
+    pub scene: u64,
+}
+
+use std::sync::atomic::{AtomicU32, Ordering};
+static ORDER: [AtomicU32; 16] = [const { AtomicU32::new(0) }; 16];
+static ORDER_LEN: AtomicU32 = AtomicU32::new(0);
+static RELEASED: AtomicU32 = AtomicU32::new(0);
+static FAILURES: AtomicU32 = AtomicU32::new(0);
+
+#[no_mangle]
+pub extern "C" fn probe_take_order(out: *mut u32, cap: u32) -> u32 {
+    let len = ORDER_LEN.swap(0, Ordering::SeqCst).min(cap).min(16);
+    for i in 0..len as usize {
+        unsafe { *out.add(i) = ORDER[i].load(Ordering::SeqCst) };
+    }
+    len
+}
+
+#[no_mangle]
+pub extern "C" fn probe_released() -> u32 {
+    RELEASED.load(Ordering::SeqCst)
+}
+
+#[no_mangle]
+pub extern "C" fn probe_failures() -> u32 {
+    FAILURES.load(Ordering::SeqCst)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn probe_release(userdata: *mut c_void) {
+    if !userdata.is_null() {
+        RELEASED.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+unsafe fn gl_fn<T>(api: &ApiV1, name: &std::ffi::CStr) -> Option<T> {
+    let ptr = (api.gl_get_proc_address)(name.as_ptr());
+    (!ptr.is_null()).then(|| std::mem::transmute_copy(&ptr))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn probe_frame_hook(userdata: *mut c_void, info: *const FrameInfo) -> i32 {
+    let probe = &*(userdata as *const HookProbe);
+    let api = &*(probe.api.cast::<ApiV1>());
+    let info = &*info;
+    let slot = ORDER_LEN.fetch_add(1, Ordering::SeqCst) as usize;
+    if slot < 16 {
+        ORDER[slot].store(probe.tag, Ordering::SeqCst);
+    }
+    if info.struct_size as usize != std::mem::size_of::<FrameInfo>()
+        || info.scene_target != probe.scene
+        || info.context_generation != (api.context_generation)()
+        || !(api.frame_active)()
+        || (api.frame_target)() != probe.scene
+    {
+        FAILURES.fetch_add(1, Ordering::SeqCst);
+        return -1;
+    }
+    match probe.mode {
+        1 => {
+            type Enable = extern "C" fn(u32);
+            type PixelStore = extern "C" fn(u32, i32);
+            type ClearColor = extern "C" fn(f32, f32, f32, f32);
+            type GenBuffers = extern "C" fn(i32, *mut u32);
+            type BindBuffer = extern "C" fn(u32, u32);
+            type BindVertexArray = extern "C" fn(u32);
+            type GetInt = extern "C" fn(u32, *mut i32);
+            let (Some(enable), Some(pixel_store), Some(clear_color), Some(clear), Some(gen_buffers), Some(bind_buffer), Some(read_buffer), Some(get_int), Some(_bind_vao)) = (
+                gl_fn::<Enable>(api, c"glEnable"),
+                gl_fn::<PixelStore>(api, c"glPixelStorei"),
+                gl_fn::<ClearColor>(api, c"glClearColor"),
+                gl_fn::<Enable>(api, c"glClear"),
+                gl_fn::<GenBuffers>(api, c"glGenBuffers"),
+                gl_fn::<BindBuffer>(api, c"glBindBuffer"),
+                gl_fn::<Enable>(api, c"glReadBuffer"),
+                gl_fn::<GetInt>(api, c"glGetIntegerv"),
+                gl_fn::<BindVertexArray>(api, c"glBindVertexArray"),
+            ) else {
+                FAILURES.fetch_add(1, Ordering::SeqCst);
+                return -1;
+            };
+            // The stage bound vertex array 0 before the hook ran.
+            let mut vao = -1;
+            get_int(0x85B5, &mut vao);
+            if vao != 0 {
+                FAILURES.fetch_add(1, Ordering::SeqCst);
+            }
+            clear_color(0.0, 1.0, 0.0, 1.0);
+            clear(0x4000);
+            pixel_store(0x0CF5, 1); // UNPACK_ALIGNMENT
+            pixel_store(0x0D02, 7); // PACK_ROW_LENGTH
+            let mut buffer = 0;
+            gen_buffers(1, &mut buffer);
+            bind_buffer(0x88EC, buffer); // PIXEL_UNPACK_BUFFER
+            enable(0x8DB9); // FRAMEBUFFER_SRGB
+            read_buffer(0); // GL_NONE
+            enable(0xFFFF); // INVALID_ENUM, left pending
+            1
+        }
+        2 => if (api.frame_set_world_image)(probe.world_image, 1) { 0 } else { -2 },
+        3 => if (api.frame_set_world_image)(probe.world_image, 2) { -3 } else { 0 },
+        _ => 0,
+    }
 }
 
 #[no_mangle]
@@ -772,6 +982,10 @@ fn second_native_library_renders_multi_attachment_target_restores_state_and_inva
         stage_restores_every_texture_unit_a_shader_samples(gl);
         texture_lookup_follows_every_live_load_of_a_path();
         target_create_rejects_bad_requests_without_leaking();
+        stage_binds_no_vertex_array_and_drains_gl_errors(gl);
+        gl_names_follow_handles_and_imports_stay_native_owned(gl);
+        let probe = ProbeLib::load(lib);
+        let hook_data = frame_hooks_run_in_order_inside_stages_and_set_the_world_image(gl, &probe);
 
         assert!(stone_native_renderer_api(999).is_null());
         let api_ptr = stone_native_renderer_api(STONE_NATIVE_RENDERER_ABI_VERSION);
@@ -1062,6 +1276,12 @@ fn second_native_library_renders_multi_attachment_target_restores_state_and_inva
 
         stone_destroy_shader(blit);
         teardown_invalidates_handles_in_the_next_context(host_canvas, reloaded_shader);
+        assert_eq!(
+            (probe.released)(),
+            7,
+            "teardown released the remaining hooks"
+        );
+        drop(hook_data);
     });
 
     unsafe { libc::dlclose(lib) };
@@ -1142,6 +1362,268 @@ unsafe fn color_view_samples_siblings_and_tracks_source_lifetime(gl: &glow::Cont
         child_view
     ));
     assert_eq!(stone_get_live_canvas_count(), count - 2);
+}
+
+fn api() -> &'static stone_rs::native_renderer::StoneNativeRendererApiV1 {
+    unsafe {
+        &*stone_native_renderer_api(1).cast::<stone_rs::native_renderer::StoneNativeRendererApiV1>()
+    }
+}
+
+unsafe fn stage_binds_no_vertex_array_and_drains_gl_errors(gl: &glow::Context) {
+    let vao = gl.create_vertex_array().unwrap();
+    gl.bind_vertex_array(Some(vao));
+    // An error pending before the stage is drained, not attributed to it.
+    gl.enable(0xFFFF);
+    let scope = stone_native_stage_begin();
+    assert_eq!(gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING), 0);
+    assert_eq!(gl.get_error(), glow::NO_ERROR);
+    let flags = stone_native_stage_end(scope);
+    assert_ne!(flags & STONE_STAGE_RESTORED, 0);
+    assert_eq!(flags & STONE_STAGE_GL_ERROR, 0);
+    assert_eq!(
+        gl.get_parameter_i32(glow::VERTEX_ARRAY_BINDING) as u32,
+        vao.0.get()
+    );
+
+    let scope = stone_native_stage_begin();
+    gl.enable(0xFFFF);
+    assert_ne!(stone_native_stage_end(scope) & STONE_STAGE_GL_ERROR, 0);
+    assert_eq!(gl.get_error(), glow::NO_ERROR);
+    gl.bind_vertex_array(None);
+    gl.delete_vertex_array(vao);
+}
+
+unsafe fn gl_names_follow_handles_and_imports_stay_native_owned(gl: &glow::Context) {
+    let api = api();
+    assert!(!(api.gl_get_proc_address)(c"glClear".as_ptr()).is_null());
+    assert!((api.gl_get_proc_address)(std::ptr::null()).is_null());
+
+    let formats = [STONE_CANVAS_RGBA8; 2];
+    let target = stone_target_create(8, 8, formats.as_ptr(), 2, true);
+    assert_ne!(target, 0);
+    let color = (api.target_gl_texture)(target, 0);
+    assert_ne!(color, 0);
+    assert_eq!(color, stone_get_canvas_texture(target));
+    let second = (api.target_gl_texture)(target, 1);
+    assert!(second != 0 && second != color);
+    assert_eq!((api.target_gl_texture)(target, 2), 0);
+    assert_ne!((api.target_gl_depth_texture)(target), 0);
+    stone_set_canvas(target);
+    assert_eq!(
+        (api.target_gl_framebuffer)(target) as i32,
+        gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING)
+    );
+    stone_set_canvas(0);
+    stone_target_destroy(target);
+    assert_eq!((api.target_gl_texture)(target, 0), 0);
+    assert_eq!((api.target_gl_framebuffer)(target), 0);
+    let plain = stone_create_canvas(4, 4, STONE_CANVAS_RGBA8, false);
+    assert_eq!((api.target_gl_depth_texture)(plain), 0);
+    stone_destroy_canvas(plain);
+    let white = stone_get_white_image();
+    assert_ne!((api.image_gl_texture)(white), 0);
+
+    let texture = gl.create_texture().unwrap();
+    gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+    let texels = [255u8; 2 * 2 * 4];
+    gl.tex_image_2d(
+        glow::TEXTURE_2D,
+        0,
+        glow::RGBA8 as i32,
+        2,
+        2,
+        0,
+        glow::RGBA,
+        glow::UNSIGNED_BYTE,
+        glow::PixelUnpackData::Slice(Some(&texels)),
+    );
+    gl.bind_texture(glow::TEXTURE_2D, None);
+    let name = texture.0.get();
+    assert_eq!((api.image_import_gl_texture)(0, 2, 2, 0), 0);
+    assert_eq!((api.image_import_gl_texture)(name, 2, 2, 0x80), 0);
+    assert_eq!((api.image_import_gl_texture)(name, 0, 2, 0), 0);
+    let image = (api.image_import_gl_texture)(name, 2, 2, 1);
+    assert_ne!(image, 0);
+    assert!(stone_native_handle_valid(STONE_RESOURCE_TEXTURE, image));
+    assert_eq!((api.image_gl_texture)(image), name);
+    let generation = stone_native_handle_generation(STONE_RESOURCE_TEXTURE, image);
+    stone_unload_image(image);
+    assert!(stone_native_handle_valid(STONE_RESOURCE_TEXTURE, image));
+    assert!((api.image_import_update)(image, 4, 4));
+    assert_ne!(
+        stone_native_handle_generation(STONE_RESOURCE_TEXTURE, image),
+        generation
+    );
+    assert!(!(api.image_import_update)(white, 4, 4));
+    assert!(!(api.image_release_import)(white));
+    assert!((api.image_release_import)(image));
+    assert!(!stone_native_handle_valid(STONE_RESOURCE_TEXTURE, image));
+    assert!(gl.is_texture(texture));
+    gl.delete_texture(texture);
+
+    let off_thread = std::thread::spawn(move || {
+        let api = self::api();
+        (
+            (api.image_gl_texture)(white),
+            (api.gl_get_proc_address)(c"glClear".as_ptr()).is_null(),
+            (api.frame_hook_register)(
+                1,
+                0,
+                std::ptr::dangling::<c_void>(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            ),
+        )
+    })
+    .join()
+    .unwrap();
+    assert_eq!(off_thread, (0, true, 0));
+}
+
+unsafe fn frame_hooks_run_in_order_inside_stages_and_set_the_world_image(
+    gl: &glow::Context,
+    probe: &ProbeLib,
+) -> [Box<HookProbe>; 3] {
+    let api = api();
+    let api_ptr = stone_native_renderer_api(1);
+    let scene = stone_create_canvas(16, 16, STONE_CANVAS_RGBA8, true);
+    let partner = stone_create_canvas(16, 16, STONE_CANVAS_RGBA8, true);
+    let ambient = stone_create_canvas(8, 8, STONE_CANVAS_RGBA8, false);
+    let image = stone_create_canvas(16, 16, STONE_CANVAS_RGBA8, false);
+    let small = stone_create_canvas(8, 8, STONE_CANVAS_RGBA8, false);
+    stone_set_canvas(image);
+    stone_clear_canvas(1.0, 0.0, 0.0, 1.0);
+    stone_set_canvas(scene);
+    stone_clear_canvas(0.0, 0.0, 0.0, 1.0);
+
+    let probe_for = |tag, mode, world_image| {
+        Box::new(HookProbe {
+            api: api_ptr,
+            tag,
+            mode,
+            world_image,
+            scene,
+        })
+    };
+    let register = |point, order, data: &HookProbe| {
+        (api.frame_hook_register)(
+            point,
+            order,
+            probe.hook,
+            probe.release,
+            data as *const HookProbe as *mut c_void,
+            c"probe".as_ptr(),
+        )
+    };
+    let writer = probe_for(1, 1, 0);
+    let early = probe_for(2, 0, 0);
+    let same_order = probe_for(3, 0, 0);
+    let a = register(STONE_FRAME_HOOK_WORLD_BATCHES, 10, &writer);
+    let b = register(STONE_FRAME_HOOK_WORLD_BATCHES, -5, &early);
+    let c = register(STONE_FRAME_HOOK_WORLD_BATCHES, 10, &same_order);
+    assert!(a != 0 && b != 0 && c != 0);
+    assert_eq!(
+        (api.frame_hook_register)(
+            9,
+            0,
+            probe.hook,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null()
+        ),
+        0
+    );
+    assert_eq!(
+        (api.frame_hook_register)(
+            1,
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null()
+        ),
+        0
+    );
+
+    stone_set_canvas(ambient);
+    let ambient_fbo = gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING);
+    let read_buffer = gl.get_parameter_i32(glow::READ_BUFFER);
+    let unpack_alignment = gl.get_parameter_i32(glow::UNPACK_ALIGNMENT);
+    let flags = stone_native_frame_hooks_run(
+        STONE_FRAME_HOOK_WORLD_BATCHES,
+        scene,
+        partner,
+        1.0,
+        2.0,
+        1.0,
+    );
+    assert_eq!(probe.order(), [2, 1, 3]);
+    assert_eq!((probe.failures)(), 0);
+    assert_ne!(flags & STONE_STAGE_RESTORED, 0);
+    assert_ne!(flags & STONE_FRAME_HOOKS_WROTE, 0);
+    assert_ne!(flags & STONE_STAGE_GL_ERROR, 0);
+    assert_eq!(flags & STONE_FRAME_HOOKS_WORLD_IMAGE, 0);
+    assert_eq!(gl.get_error(), glow::NO_ERROR);
+    assert_eq!(
+        gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING),
+        ambient_fbo
+    );
+    assert_eq!(gl.get_parameter_i32(glow::READ_BUFFER), read_buffer);
+    assert_eq!(
+        gl.get_parameter_i32(glow::UNPACK_ALIGNMENT),
+        unpack_alignment
+    );
+    assert_eq!(gl.get_parameter_i32(glow::PACK_ROW_LENGTH), 0);
+    assert_eq!(gl.get_parameter_i32(glow::PIXEL_UNPACK_BUFFER_BINDING), 0);
+    assert!(!gl.is_enabled(glow::FRAMEBUFFER_SRGB));
+    assert!((stone_read_canvas_pixel_channel(scene, 3, 3, 1) - 1.0).abs() < 0.01);
+
+    assert!((api.frame_hook_unregister)(b));
+    assert!(!(api.frame_hook_unregister)(b));
+    assert_eq!((probe.released)(), 1);
+    assert_eq!(
+        stone_native_frame_hooks_run(STONE_FRAME_HOOK_WORLD_BEGIN, scene, partner, 0.0, 0.0, 1.0),
+        0
+    );
+    probe.order();
+
+    // Outside WORLD_BEGIN dispatch the world image is refused.
+    assert!(!(api.frame_set_world_image)(image, 1));
+
+    let supplies = probe_for(4, 2, image);
+    let d = register(STONE_FRAME_HOOK_WORLD_BEGIN, 0, &supplies);
+    let flags =
+        stone_native_frame_hooks_run(STONE_FRAME_HOOK_WORLD_BEGIN, scene, partner, 0.0, 0.0, 1.0);
+    assert_ne!(flags & STONE_FRAME_HOOKS_WORLD_IMAGE, 0);
+    assert!((stone_read_canvas_pixel_channel(scene, 3, 3, 0) - 1.0).abs() < 0.01);
+    assert!(stone_read_canvas_pixel_channel(scene, 3, 3, 1) < 0.01);
+    assert!((api.frame_hook_unregister)(d));
+
+    for (tag, mode, target) in [(5, 3, image), (6, 2, small), (7, 2, 0)] {
+        let rejected = probe_for(tag, mode, target);
+        let hook = register(STONE_FRAME_HOOK_WORLD_BEGIN, 0, &rejected);
+        let flags = stone_native_frame_hooks_run(
+            STONE_FRAME_HOOK_WORLD_BEGIN,
+            scene,
+            partner,
+            0.0,
+            0.0,
+            1.0,
+        );
+        assert_eq!(flags & STONE_FRAME_HOOKS_WORLD_IMAGE, 0, "hook {tag}");
+        assert!((api.frame_hook_unregister)(hook));
+    }
+    assert_eq!(probe.order(), [4, 5, 6, 7]);
+    assert_eq!((probe.released)(), 5);
+
+    stone_set_canvas(0);
+    for canvas in [scene, partner, ambient, image, small] {
+        stone_destroy_canvas(canvas);
+    }
+    // `writer` and `same_order` stay registered for teardown to release.
+    [writer, early, same_order]
 }
 
 unsafe fn teardown_invalidates_handles_in_the_next_context(target: u64, shader: u64) {

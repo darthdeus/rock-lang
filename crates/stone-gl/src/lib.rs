@@ -287,6 +287,8 @@ impl DebugGl {
         fn disable_vertex_attrib_array(index: u32);
         fn clear_depth_f32(depth: f32);
         fn color_mask(red: bool, green: bool, blue: bool, alpha: bool);
+        fn read_buffer(src: u32);
+        fn is_texture(texture: glow::Texture) -> bool;
 
         fn get_active_uniforms(program: glow::Program) -> u32;
         fn get_active_uniform(program: glow::Program, index: u32) -> Option<glow::ActiveUniform>;
