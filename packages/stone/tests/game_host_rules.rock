@@ -1,10 +1,70 @@
 use stone::*
 
+global GAME_HOST_TEST_DRAWS: bool = false
+
+// A script batch the guest draws above the world image.
+@draw
+fn game_host_test_draw() {
+    if !GAME_HOST_TEST_DRAWS { return }
+    rect(pixel_screen, v(0.0, 0.0), v(8.0, 16.0), Color { r: 0.0, g: 1.0, b: 0.0, a: 1.0 })
+}
+
+// The host's own GL texture, registered as an image of `size` (a size the
+// texture does not have tests the mismatch). Each drawn frame the host clears it
+// red with its own GL calls before handing it to the guest.
+inline(lua) fn game_host_test_image(size: int) -> int = """
+    pcall(ffi.cdef, "void* SDL_GL_GetProcAddress(const char* proc);")
+    local function gl(name, signature)
+        return ffi.cast(signature, stone.SDL_GL_GetProcAddress(name))
+    end
+    local host = {
+        gen_textures = gl("glGenTextures", "void (*)(int, uint32_t*)"),
+        bind_texture = gl("glBindTexture", "void (*)(uint32_t, uint32_t)"),
+        tex_image = gl("glTexImage2D", "void (*)(uint32_t, int, int, int, int, int, uint32_t, uint32_t, const void*)"),
+        tex_parameter = gl("glTexParameteri", "void (*)(uint32_t, uint32_t, int)"),
+        gen_framebuffers = gl("glGenFramebuffers", "void (*)(int, uint32_t*)"),
+        bind_framebuffer = gl("glBindFramebuffer", "void (*)(uint32_t, uint32_t)"),
+        framebuffer_texture = gl("glFramebufferTexture2D", "void (*)(uint32_t, uint32_t, uint32_t, uint32_t, int)"),
+        get_integer = gl("glGetIntegerv", "void (*)(uint32_t, int*)"),
+        viewport = gl("glViewport", "void (*)(int, int, int, int)"),
+        clear_color = gl("glClearColor", "void (*)(float, float, float, float)"),
+        clear = gl("glClear", "void (*)(uint32_t)"),
+    }
+    local name = ffi.new("uint32_t[1]")
+    host.gen_textures(1, name)
+    host.texture = name[0]
+    host.bind_texture(0x0DE1, host.texture)
+    host.tex_image(0x0DE1, 0, 0x8058, 16, 16, 0, 0x1908, 0x1401, nil)
+    host.tex_parameter(0x0DE1, 0x2801, 0x2600)
+    host.tex_parameter(0x0DE1, 0x2800, 0x2600)
+    host.bind_texture(0x0DE1, 0)
+    host.gen_framebuffers(1, name)
+    host.fbo = name[0]
+    host.bind_framebuffer(0x8D40, host.fbo)
+    host.framebuffer_texture(0x8D40, 0x8CE0, 0x0DE1, host.texture, 0)
+    host.bind_framebuffer(0x8D40, 0)
+    host.paint = function()
+        local viewport, framebuffer = ffi.new("int[4]"), ffi.new("int[1]")
+        host.get_integer(0x0BA2, viewport)
+        host.get_integer(0x8CA6, framebuffer)
+        host.bind_framebuffer(0x8D40, host.fbo)
+        host.viewport(0, 0, 16, 16)
+        host.clear_color(0.75, 0, 0, 1)
+        host.clear(0x4000)
+        host.bind_framebuffer(0x8D40, framebuffer[0])
+        host.viewport(viewport[0], viewport[1], viewport[2], viewport[3])
+    end
+    _G.__game_host_test_gl = host
+    return tonumber(stone.stone_image_import_gl_texture(host.texture, size, size, 0))
+"""
+
 // Drives the game the way an embedding host does, through the C entries, the
 // event pump and the swap only. profiler_test_process runs it with the JIT off,
 // which LuaJIT requires when Lua code enters a callback through C. A quit
-// event pushed before frame `quit_at` (0 for none) reaches both sides.
-inline(lua) fn game_host_test_drive(max_frames: int, quit_at: int) -> (int, int, int, int, int) = """
+// event pushed before frame `quit_at` (0 for none) reaches both sides. A
+// non-zero `image` is set as the host world image of every drawn frame.
+inline(lua) fn game_host_test_drive(max_frames: int, quit_at: int, image: int, image_valid: bool)
+        -> (int, int, int, int, int) = """
     pcall(ffi.cdef, "int SDL_PushEvent(void* event);")
     local entries = stone.stone_game_entries()
     assert(entries.frame_begin ~= nil, "the frame entries were not published")
@@ -33,6 +93,10 @@ inline(lua) fn game_host_test_drive(max_frames: int, quit_at: int) -> (int, int,
         if plan.draws ~= 0 then
             assert(plan.active_width == 16 and plan.active_height == 16)
             draws = draws + 1
+            if image ~= 0 then
+                if _G.__game_host_test_gl then _G.__game_host_test_gl.paint() end
+                assert((stone.stone_frame_set_host_world_image(image, 1) ~= 0) == image_valid)
+            end
         end
         assert(entries.frame_draw(result) == 1)
         frames = frames + 1
@@ -46,10 +110,18 @@ inline(lua) fn game_host_test_drive(max_frames: int, quit_at: int) -> (int, int,
     if termination >= 0 then
         assert(entries.frame_begin(info, plan) == 1 and plan.running == 0)
     end
-    assert(entries.shutdown() == 1)
-    assert(stone.stone_game_entries().frame_begin == nil, "shutdown withdraws the entries")
     return frames, draws, presents, quits, termination
 """
+
+inline(lua) fn game_host_test_shutdown() = """
+    assert(stone.stone_game_entries().shutdown() == 1)
+    assert(stone.stone_game_entries().frame_begin == nil, "shutdown withdraws the entries")
+"""
+
+fn game_host_test_composite(x: int, channel: int) -> float {
+    let composite = PRESENTED_SCENE_SAMPLE.unwrap().canvas.handle.0
+    return stone_read_canvas_pixel_channel(composite, x, 8, channel)
+}
 
 @nomangle
 fn game_host_drives_frame_case(which: int) {
@@ -59,17 +131,52 @@ fn game_host_drives_frame_case(which: int) {
     stone_run_game(GameConfig { title: "game host", width: 16, height: 16,
         font_path: project_asset_path("@engine/assets/fonts/DroidSans.ttf"), vsync: 0 })
     assert(HOST_DRIVES_FRAME)
-    let (frames, draws, presents, quits, termination) =
-        game_host_test_drive(10, if which == 1 { 2 } else { 0 })
+    let presents = 0
     if which == 0 {
         // A bounded run ends on its frame cap, as through stone_run_game.
-        assert_eq((frames, draws, presents, termination), (3, 3, 3, STONE_GAME_FRAME_CAP))
+        let (frames, draws, swapped, _, termination) = game_host_test_drive(10, 0, 0, false)
+        assert_eq((frames, draws, swapped, termination), (3, 3, 3, STONE_GAME_FRAME_CAP))
+        presents = swapped
+    } else if which == 1 {
+        // The guest saw the quit the host pumped and ended that frame without
+        // drawing it.
+        let (frames, draws, swapped, quits, termination) = game_host_test_drive(10, 2, 0, false)
+        assert_eq((frames, draws, swapped, quits, termination), (2, 1, 1, 1, STONE_GAME_QUIT))
+        presents = swapped
     } else {
-        // The guest saw the quit the host pumped and ended after that frame.
-        assert_eq((frames, quits, termination), (2, 1, STONE_GAME_QUIT))
+        GAME_HOST_TEST_DRAWS = true
+        let image = game_host_test_image(if which == 4 { 8 } else { 16 })
+        assert(image != 0)
+        if which == 2 {
+            let (frames, draws, swapped, _, _) = game_host_test_drive(2, 0, image, true)
+            assert_eq((frames, draws, swapped), (2, 2, 2))
+            presents = swapped
+            // Post processing composited the host's world image and the script
+            // batch above it.
+            assert(game_host_test_composite(12, 0) > 0.2)
+            assert(game_host_test_composite(12, 1) < 0.1)
+            assert(game_host_test_composite(2, 1) > 0.9)
+        } else {
+            let (set_image, message) = if which == 3 {
+                (image + 1, "[STONE] stone_frame_set_host_world_image: image {image + 1} is not an imported GL texture")
+            } else {
+                (image, "[STONE] host world image {image} is 8x8, not the 16x16 scene")
+            }
+            // An invalid image logs, and the frame renders the engine's world.
+            assert_error_logs([message], () => {
+                let (_, _, swapped, _, _) = game_host_test_drive(1, 0, set_image, which == 4)
+                presents = swapped
+            })
+            let red = game_host_test_composite(12, 0)
+            let green = game_host_test_composite(2, 1)
+            assert(red < 0.1, "fallback red {red}")
+            assert(green > 0.9, "fallback green {green}")
+        }
     }
+    game_host_test_shutdown()
     // The guest never swaps when the host drives the frame.
     assert_eq(stone_gl_swap_count() - swaps_before, presents)
+    assert(presents > 0)
 }
 
 @test
@@ -80,4 +187,15 @@ fn a_host_drives_frames_through_the_entries_until_the_frame_cap() {
 @test
 fn a_quit_event_the_host_pumps_ends_the_guest_run() {
     profiler_test_process("game_host_drives_frame_case", 1)
+}
+
+@test
+fn a_host_world_image_is_post_processed_under_the_script_batches() {
+    profiler_test_process("game_host_drives_frame_case", 2)
+}
+
+@test
+fn an_invalid_host_world_image_falls_back_to_the_engine_world() {
+    profiler_test_process("game_host_drives_frame_case", 3)
+    profiler_test_process("game_host_drives_frame_case", 4)
 }

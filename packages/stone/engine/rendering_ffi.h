@@ -226,6 +226,7 @@ int stone_draw_mesh(const float* vertex_data, int vertex_count, int vertex_strid
 int stone_font_atlas_instance_count(unsigned int font_id);
 int64_t stone_font_data_len(unsigned int font_id);
 uint8_t stone_font_release_coverage(unsigned int font_id);
+uint8_t stone_frame_set_host_world_image(uint64_t image, uint32_t flags);
 uint8_t stone_frame_stream_begin(const char* path);
 uint8_t stone_frame_stream_finish(int* out_frames, int* out_width, int* out_height);
 uint8_t stone_frame_stream_record(int w, int h);

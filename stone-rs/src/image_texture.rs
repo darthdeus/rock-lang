@@ -1390,7 +1390,7 @@ pub extern "C" fn stone_unload_image(handle: u64) {
     remove_image(handle);
 }
 
-fn is_imported(handle: u64) -> bool {
+pub(crate) fn is_imported(handle: u64) -> bool {
     with_image(handle, |img| img.imported).unwrap_or(false)
 }
 
