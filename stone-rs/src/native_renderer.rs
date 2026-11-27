@@ -58,25 +58,9 @@ struct NativeStageState {
     polygon_offset_fill: bool,
     sample_alpha_to_coverage: bool,
     rasterizer_discard: bool,
-    // Stone uploads and reads back through client memory with default row
-    // layout and never sets these, so a stage must give them back.
-    pixel_pack_buffer: Option<glow::Buffer>,
-    pixel_unpack_buffer: Option<glow::Buffer>,
-    pixel_store: [i32; PIXEL_STORE.len()],
-    // The present shader encodes sRGB itself.
-    framebuffer_srgb: bool,
-    // Of the read framebuffer bound at entry; readbacks read its colour 0.
-    read_buffer: u32,
     #[cfg(debug_assertions)]
     defaults: DefaultState,
 }
-
-const PIXEL_STORE: [u32; 4] = [
-    glow::PACK_ALIGNMENT,
-    glow::UNPACK_ALIGNMENT,
-    glow::PACK_ROW_LENGTH,
-    glow::UNPACK_ROW_LENGTH,
-];
 
 /// Context state Stone leaves at its GL default and never saves. A stage that
 /// changes it is a native-code bug; debug builds report it rather than hide it.
@@ -384,11 +368,6 @@ unsafe fn capture_stage_state(gl: &DebugGl) -> NativeStageState {
         polygon_offset_fill: gl.is_enabled(glow::POLYGON_OFFSET_FILL),
         sample_alpha_to_coverage: gl.is_enabled(glow::SAMPLE_ALPHA_TO_COVERAGE),
         rasterizer_discard: gl.is_enabled(glow::RASTERIZER_DISCARD),
-        pixel_pack_buffer: read_buffer(gl, glow::PIXEL_PACK_BUFFER_BINDING),
-        pixel_unpack_buffer: read_buffer(gl, glow::PIXEL_UNPACK_BUFFER_BINDING),
-        pixel_store: PIXEL_STORE.map(|param| gl.get_parameter_i32(param)),
-        framebuffer_srgb: gl.is_enabled(glow::FRAMEBUFFER_SRGB),
-        read_buffer: gl.get_parameter_i32(glow::READ_BUFFER) as u32,
         #[cfg(debug_assertions)]
         defaults: read_default_state(gl),
     }
@@ -417,10 +396,6 @@ unsafe fn restore_stage_state(gl: &DebugGl, saved: &NativeStageState) -> u32 {
         flags |= STONE_STAGE_TARGET_CHANGED;
     } else if crate::canvas::current_target_size_raw() != saved.target_size {
         crate::canvas::restore_target_cache(saved.canvas_handle, saved.fbo, saved.target_size);
-    }
-
-    if gl.get_parameter_i32(glow::READ_BUFFER) as u32 != saved.read_buffer {
-        gl.read_buffer(saved.read_buffer);
     }
 
     let limits = gl_limits(gl);
@@ -517,20 +492,18 @@ unsafe fn restore_stage_state(gl: &DebugGl, saved: &NativeStageState) -> u32 {
     );
     gl.set_enabled(glow::RASTERIZER_DISCARD, saved.rasterizer_discard);
 
-    if read_buffer(gl, glow::PIXEL_PACK_BUFFER_BINDING) != saved.pixel_pack_buffer {
-        gl.bind_buffer(glow::PIXEL_PACK_BUFFER, saved.pixel_pack_buffer);
-    }
-    if read_buffer(gl, glow::PIXEL_UNPACK_BUFFER_BINDING) != saved.pixel_unpack_buffer {
-        gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, saved.pixel_unpack_buffer);
-    }
-    for (param, value) in PIXEL_STORE.into_iter().zip(saved.pixel_store) {
-        if gl.get_parameter_i32(param) != value {
-            gl.pixel_store_i32(param, value);
-        }
-    }
-    if gl.is_enabled(glow::FRAMEBUFFER_SRGB) != saved.framebuffer_srgb {
-        gl.set_enabled(glow::FRAMEBUFFER_SRGB, saved.framebuffer_srgb);
-    }
+    // Outside its own save/restore scopes Stone keeps these at fixed values, so
+    // they are reset rather than captured. Alignment 1 is correct for every
+    // tightly packed transfer Stone makes, and its text and canvas paths set it
+    // and leave it.
+    gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, None);
+    gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+    gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+    gl.pixel_store_i32(glow::PACK_ROW_LENGTH, 0);
+    gl.pixel_store_i32(glow::UNPACK_ROW_LENGTH, 0);
+    // The present shader encodes sRGB itself.
+    gl.disable(glow::FRAMEBUFFER_SRGB);
     #[cfg(debug_assertions)]
     report_default_state_changes(&saved.defaults, &read_default_state(gl));
 

@@ -529,6 +529,7 @@ pub extern "C" fn stone_canvas_capture_begin(canvas_handle: u64) -> u64 {
         let previous_skip_pixels = gl.get_parameter_i32(glow::PACK_SKIP_PIXELS);
 
         gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(info.fbo));
+        crate::canvas::set_color_read_buffer(gl, Some(info.fbo));
         gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pbo));
         if gl
             .buffer_data_size(glow::PIXEL_PACK_BUFFER, gl_bytes, glow::STREAM_READ)
@@ -1059,6 +1060,7 @@ fn pixel_readback_submit(id: u64, canvas_handle: u64, x: c_int, y: c_int, reques
             let gl_y = info.active_h - rect.y - rect.height;
             let prev_fbo = current_fbo();
             gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(info.fbo));
+            crate::canvas::set_color_read_buffer(gl, Some(info.fbo));
             gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(slot.pbos[idx]));
             gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
             let (gl_format, gl_type) = match fmt {

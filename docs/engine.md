@@ -505,10 +505,9 @@ through a single versioned C function-pointer table:
   registered shader samples, vertex array,
   blend state, depth state, color mask, clear color/depth, rasterizer
   toggles (`CULL_FACE`, `STENCIL_TEST`, `POLYGON_OFFSET_FILL`,
-  `SAMPLE_ALPHA_TO_COVERAGE`, `RASTERIZER_DISCARD`), pixel pack/unpack buffer
-  bindings, pack/unpack alignment and row length, `FRAMEBUFFER_SRGB`, and the
-  read buffer. It then binds vertex array 0, so attribute calls made before
-  native code binds its own VAO cannot modify Stone's. It returns a non-zero
+  `SAMPLE_ALPHA_TO_COVERAGE`, `RASTERIZER_DISCARD`). It then binds vertex
+  array 0, so attribute calls made before native code binds its own VAO cannot
+  modify Stone's. It returns a non-zero
   token that identifies this scope, or `0` without a live GL context on the
   calling thread.
 - Begin and end each drain pending GL errors and log them at error level, so a
@@ -521,7 +520,10 @@ through a single versioned C function-pointer table:
   primitive restart, logic op, program point size and clip distances.
 - `stone_native_stage_end(uint32_t scope) -> uint32_t` restores the state saved
   by `scope` (re-binding the framebuffer or shader program only when the stage
-  changed them), closes it, and returns a `STONE_STAGE_*` bitmask
+  changed them), resets the pixel pack/unpack buffer bindings to 0,
+  pack/unpack alignment to 1, row length to 0 and `FRAMEBUFFER_SRGB` to off
+  (Stone keeps them at those values outside its own scopes), closes it, and
+  returns a `STONE_STAGE_*` bitmask
   (`RESTORED = 1`, `TARGET_CHANGED = 2`, `SHADER_CHANGED = 4`,
   `DRAW_BUFFERS_CHANGED = 8`, `UNWOUND = 16`, `GL_ERROR = 32`). Scopes opened inside `scope` and
   still open are closed with it (`UNWOUND`). It returns `0` and restores
@@ -565,6 +567,8 @@ Rules for native GL:
 - Do not modify Stone-owned textures, samplers or framebuffer attachments,
   and never delete names Stone returned, or your own names after the context
   generation changed.
+- Restore any read or draw buffer you change on a framebuffer. The stage
+  restores only the draw buffers of the framebuffer bound when it began.
 - Leave no open queries, transform feedback, mapped buffers or debug groups,
   and no pending GL error.
 - Leave state outside the stage snapshot at its default.
@@ -586,7 +590,8 @@ once and `release` runs when the dispatch ends. `stone_teardown` runs every
   passes, before the scene clear.
 - `STONE_FRAME_HOOK_WORLD_BATCHES = 2`: after the scene clear, before script
   batches flush, so native output composes with them through the depth
-  buffer.
+  buffer. Only colour 0 is a draw buffer; a hook that writes the id or other
+  attachments selects them itself.
 - `STONE_FRAME_HOOK_SCENE_END = 3`: after scene passes and after-scene
   batches, before post processing.
 
@@ -603,9 +608,10 @@ be a live non-integer engine target whose active size covers the scene's;
 Stone copies its colour 0 into the scene target unless it is the scene
 target. The frame then skips the scene clear, script batches, outline mask,
 scene passes and after-scene batches, and still runs post processing,
-pixel-screen draws, present and UI. Depth and other attachments of the scene
-target hold whatever the hooks left. Pending world batches or scene passes
-are dropped with a warning. The setting lasts one frame. An invalid target,
+pixel-screen draws, present and UI. Stone clears the scene target's id,
+owner and depth attachments after the hooks, so picking finds nothing on such
+a frame. Pending world and after-scene batches and scene passes are dropped
+with a warning. The setting lasts one frame. An invalid target,
 any other flags, or a call outside `WORLD_BEGIN` logs an error and returns
 false, and the frame renders normally. `STONE_WORLD_IMAGE_SKIP_POST = 2` is
 reserved.

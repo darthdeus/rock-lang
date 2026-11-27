@@ -1772,6 +1772,26 @@ macro flush_batch_keys(Pool: expr, Keys: expr, World: expr, Ui: expr, AfterScene
     if !Ui || !UI_SUBMISSION_PROBE_WINDOWLESS { reset_camera() }
 }
 
+// Clears the scene's id, owner and depth attachments, and colour unless the
+// world image already holds it, then leaves only colour as a draw buffer:
+// native WORLD_BATCHES hooks and batches that write ids select them again.
+fn clear_scene_target(color: bool) {
+    with_canvas(screen_canvas, () => {
+        let owner_attached = mrt_id_attached && world_surface_owner_canvas != null
+        if mrt_id_attached {
+            stone_set_draw_buffer_mask(
+                if owner_attached { DRAW_BUFFERS_CLEAR_WITH_OWNER } else { DRAW_BUFFERS_COLOR_AND_ID })
+        }
+        if color { clear_screen(0, 0, 0, 0) }
+        // glClear is undefined on integer (R32I) attachments; clear them with glClearBufferiv.
+        if mrt_id_attached { stone_clear_canvas_int(1, 0) }
+        // Draw buffer 4: the mask leaves 2 and 3 as GL_NONE and the index is positional.
+        if owner_attached { stone_clear_canvas_int(4, 0) }
+        stone_clear_depth(1.0)
+        if mrt_id_attached { stone_set_draw_buffer_mask(DRAW_BUFFERS_COLOR_ONLY) }
+    })
+}
+
 pub fn render_batches(after_scene: bool = false) {
     let previous_canvas = CURRENT_CANVAS_HANDLE
     RENDER_BATCH_FLUSHES = RENDER_BATCH_FLUSHES + 1
@@ -1799,32 +1819,24 @@ pub fn render_batches(after_scene: bool = false) {
         let hooks = run_frame_hooks(STONE_FRAME_HOOK_WORLD_BEGIN, cam_offset, cam_scale)
         if (hooks & STONE_FRAME_HOOKS_WORLD_IMAGE) != 0 {
             WORLD_IMAGE_FRAME = true
+            // The pool holds after-scene batches too; only a flush would tell them apart.
             if pool_has_pending(RENDER_BATCHES) {
-                log_once("RENDER", "world batches submitted on a frame with a native world image are not drawn")
+                log_once("RENDER", "world and after-scene batches submitted on a frame with a native world image are not drawn")
             }
+            // Nothing runs the silhouette mask this frame; its userdata may not outlive it.
+            NATIVE_SILHOUETTE_DRAWS.clear()
+            // Colour holds the world image. Picking must not see last frame's ids.
+            clear_scene_target(color: false)
             return
         }
     }
 
     let sorted_keys = get_sorted_batch_keys()
 
-    if !after_scene { with_canvas(
-        screen_canvas,
-        () => {
-            let owner_attached = mrt_id_attached && world_surface_owner_canvas != null
-            if mrt_id_attached {
-                stone_set_draw_buffer_mask(
-                    if owner_attached { DRAW_BUFFERS_CLEAR_WITH_OWNER } else { DRAW_BUFFERS_COLOR_AND_ID })
-            }
-            clear_screen(0, 0, 0, 0)
-            // glClear is undefined on integer (R32I) attachments; clear them with glClearBufferiv.
-            if mrt_id_attached { stone_clear_canvas_int(1, 0) }
-            // Draw buffer 4: the mask leaves 2 and 3 as GL_NONE and the index is positional.
-            if owner_attached { stone_clear_canvas_int(4, 0) }
-            stone_clear_depth(1.0)
-        }
-    ) }
-    if !after_scene { run_frame_hooks(STONE_FRAME_HOOK_WORLD_BATCHES, cam_offset, cam_scale) }
+    if !after_scene {
+        clear_scene_target(color: true)
+        run_frame_hooks(STONE_FRAME_HOOK_WORLD_BATCHES, cam_offset, cam_scale)
+    }
 
     set_shader(sprite_batch_shader)
     {

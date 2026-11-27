@@ -473,13 +473,15 @@ pub unsafe extern "C" fn probe_frame_hook(userdata: *mut c_void, info: *const Fr
             }
             clear_color(0.0, 1.0, 0.0, 1.0);
             clear(0x4000);
-            pixel_store(0x0CF5, 1); // UNPACK_ALIGNMENT
+            pixel_store(0x0CF5, 4); // UNPACK_ALIGNMENT
             pixel_store(0x0D02, 7); // PACK_ROW_LENGTH
             let mut buffer = 0;
             gen_buffers(1, &mut buffer);
             bind_buffer(0x88EC, buffer); // PIXEL_UNPACK_BUFFER
             enable(0x8DB9); // FRAMEBUFFER_SRGB
-            read_buffer(0); // GL_NONE
+            // GL_NONE on the scene target, left changed: Stone's readbacks
+            // select their own read buffer.
+            read_buffer(0);
             enable(0xFFFF); // INVALID_ENUM, left pending
             1
         }
@@ -1550,7 +1552,6 @@ unsafe fn frame_hooks_run_in_order_inside_stages_and_set_the_world_image(
     stone_set_canvas(ambient);
     let ambient_fbo = gl.get_parameter_i32(glow::DRAW_FRAMEBUFFER_BINDING);
     let read_buffer = gl.get_parameter_i32(glow::READ_BUFFER);
-    let unpack_alignment = gl.get_parameter_i32(glow::UNPACK_ALIGNMENT);
     let flags = stone_native_frame_hooks_run(
         STONE_FRAME_HOOK_WORLD_BATCHES,
         scene,
@@ -1571,10 +1572,7 @@ unsafe fn frame_hooks_run_in_order_inside_stages_and_set_the_world_image(
         ambient_fbo
     );
     assert_eq!(gl.get_parameter_i32(glow::READ_BUFFER), read_buffer);
-    assert_eq!(
-        gl.get_parameter_i32(glow::UNPACK_ALIGNMENT),
-        unpack_alignment
-    );
+    assert_eq!(gl.get_parameter_i32(glow::UNPACK_ALIGNMENT), 1);
     assert_eq!(gl.get_parameter_i32(glow::PACK_ROW_LENGTH), 0);
     assert_eq!(gl.get_parameter_i32(glow::PIXEL_UNPACK_BUFFER_BINDING), 0);
     assert!(!gl.is_enabled(glow::FRAMEBUFFER_SRGB));
