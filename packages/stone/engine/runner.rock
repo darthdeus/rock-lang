@@ -675,6 +675,9 @@ pub @nomangle fn stone_game_boot(config: GameConfig) -> bool {
     GAME_RUN = run
     game_frame_open(run)
     if HOST_DRIVES_FRAME {
+        // `main` may return before the first frame; stone_game_shutdown then
+        // runs the main wrapper's logged-error check.
+        logged_errors_finish_defer()
         if game_entries_publish() == 0 {
             log_error("STONE", "stone_game_boot: the host frame entries were not published")
         }
@@ -1116,8 +1119,35 @@ pub @nomangle fn stone_game_shutdown() -> bool {
         log_error("RUN", "{logged_errors.len() + overflow} error record(s) logged during the bounded run:{records}")
         os_exit(3)
     }
+    logged_errors_finish_after_host_run()
     return !in_frame
 }
+
+inline(lua) fn logged_errors_finish_defer() = """
+    _G.__rock_logged_errors_finish_deferred = true
+"""
+
+// The main wrapper's logged-error check, when `main` returned during this
+// host-driven run. A raise would reach the host as a failed shutdown entry, so
+// the run exits with the status an uncaught error after `main` gives.
+fn logged_errors_finish_after_host_run() {
+    let failure = logged_errors_finish()
+    if failure != "" {
+        log_error("RUN", failure)
+        os_exit(1)
+    }
+}
+
+inline(lua) fn logged_errors_finish() -> string = """
+    _G.__rock_logged_errors_finish_deferred = nil
+    if not _G.__rock_logged_errors_finish_owed then return "" end
+    _G.__rock_logged_errors_finish_owed = nil
+    local errors = _G.__rock_logged_errors
+    if not (errors and errors.finish) then return "" end
+    collectgarbage("collect")
+    local ok, err = pcall(errors.finish)
+    return ok and "" or tostring(err)
+"""
 
 fn frame_core_begin() {
     // Monotonic; not PROFILER.frame_count, which resets after warmup.

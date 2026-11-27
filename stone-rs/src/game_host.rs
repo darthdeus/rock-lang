@@ -6,6 +6,8 @@
 //! entries in `stone_game_entries()` (begin, update, draw), then
 //! `stone_swap_window` when the draw result asks for a present. The host reads
 //! the entries again each frame: a script reload publishes new ones.
+//! `shutdown` ends the run and runs the logged-error check the program's
+//! `main` returning would otherwise run; a failed check exits the process.
 //! Everything here is main-thread only.
 
 use crate::{StoneEvent, StoneEventType};
