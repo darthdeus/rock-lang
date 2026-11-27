@@ -986,9 +986,19 @@ fn frame_core_render_world() {
     profile_gpu_end("render_batches")
 
     profile_gpu_begin("scene_passes")
-    run_scene_passes()
-    render_scene_overlays()
+    if WORLD_IMAGE_FRAME {
+        if SCENE_PASSES.len() > 0 {
+            log_once("RENDER", "scene passes queued on a frame with a native world image are not run")
+            SCENE_PASSES.clear()
+        }
+    } else {
+        run_scene_passes()
+        render_scene_overlays()
+    }
     clear_batches()
+    if let view = RENDER_VIEW {
+        run_frame_hooks(STONE_FRAME_HOOK_SCENE_END, camera_offset_in(view), view.world_to_scene_scale)
+    }
     profile_gpu_end("scene_passes")
 
     profile_gpu_begin("post_processing")

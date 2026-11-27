@@ -1,0 +1,111 @@
+use stone::*
+
+inline(lua) fn frame_hook_test_callback(body: fn() -> int) -> PtrU8 = """
+    return ffi.cast("int32_t (*)(void *, const void *)", function(_, _)
+        return body()
+    end)
+"""
+
+inline(lua) fn frame_hook_test_free(callback: PtrU8) = "callback:free()"
+inline(lua) fn frame_hook_test_null() -> PtrU8 = 'return ffi.cast("void *", nil)'
+
+fn frame_hook_test_register(point: int, body: PtrU8) -> int {
+    let hook = stone_native_frame_hook_register(point, 0, body, frame_hook_test_null(),
+        frame_hook_test_null(), "frame_hook_test")
+    assert(hook != 0)
+    return hook
+}
+
+fn frame_hook_test_red(canvas: int) -> float {
+    return stone_read_canvas_pixel_channel(canvas, 2, 2, 0)
+}
+
+@test
+fn frame_hooks_run_around_the_scene_clear_and_supply_the_world_image() {
+    gpu_test_host()
+    let view = resolve_frame_view(v(16,16), iv(16,16), Camera2D {}, RENDER_CONFIG).unwrap()
+    with_scene_render_scope(view, () => {
+        let image = new_canvas(16.0, 16.0, "rgba8")
+        defer { unset_canvas(); destroy_canvas(image) }
+        set_canvas(image)
+        stone_clear_canvas(0.75, 0.0, 0.0, 1.0)
+        unset_canvas()
+        let scene = screen_canvas.handle.0
+
+        let set_image = false
+        let world_image_target = 0
+        let world_image_flags = STONE_WORLD_IMAGE_KEEP_POST
+        let order: [string] = []
+        let begin = frame_hook_test_callback(() => {
+            order.push("begin")
+            if set_image {
+                let _ = stone_native_frame_set_world_image(world_image_target, world_image_flags)
+            }
+            return 0
+        })
+        defer { frame_hook_test_free(begin) }
+        let scene_at_batches = -1.0
+        let batches = frame_hook_test_callback(() => {
+            order.push("batches")
+            scene_at_batches = frame_hook_test_red(scene)
+            stone_clear_canvas(0.5, 0.0, 0.0, 1.0)
+            return 1
+        })
+        defer { frame_hook_test_free(batches) }
+        let begin_hook = frame_hook_test_register(STONE_FRAME_HOOK_WORLD_BEGIN, begin)
+        let batches_hook = frame_hook_test_register(STONE_FRAME_HOOK_WORLD_BATCHES, batches)
+        defer {
+            assert(stone_native_frame_hook_unregister(begin_hook))
+            assert(stone_native_frame_hook_unregister(batches_hook))
+        }
+
+        // The batches hook runs after the engine cleared the scene and writes it.
+        set_canvas(screen_canvas)
+        stone_clear_canvas(0.25, 0.0, 0.0, 1.0)
+        unset_canvas()
+        render_batches()
+        assert_eq(order, ["begin", "batches"])
+        assert_eq(scene_at_batches, 0.0)
+        assert(!WORLD_IMAGE_FRAME)
+        assert(abs(frame_hook_test_red(scene) - 0.5) < 0.01)
+
+        // A world image replaces the engine's world rendering for the frame.
+        order = []
+        set_image = true
+        world_image_target = image.handle.0
+        stone_reset_frame_stats()
+        render_batches()
+        assert_eq(order, ["begin"])
+        assert(WORLD_IMAGE_FRAME)
+        assert(abs(frame_hook_test_red(scene) - 0.75) < 0.01)
+
+        // An invalid image or the reserved flag logs and renders normally.
+        for (target, flags, message) in [
+            (0, STONE_WORLD_IMAGE_KEEP_POST, "[STONE] stone_native_frame_set_world_image: target 0 is not live"),
+            (image.handle.0, 2, "[STONE] stone_native_frame_set_world_image: unsupported flags 0x2 (only KEEP_POST)"),
+        ] {
+            order = []
+            world_image_target = target
+            world_image_flags = flags
+            stone_reset_frame_stats()
+            assert_error_logs([message], () => { render_batches() })
+            assert_eq(order, ["begin", "batches"])
+            assert(!WORLD_IMAGE_FRAME)
+            assert(abs(frame_hook_test_red(scene) - 0.5) < 0.01)
+        }
+    })
+}
+
+@test
+fn frame_hooks_do_not_run_without_a_scene() {
+    gpu_test_host()
+    let calls = 0
+    let body = frame_hook_test_callback(() => { calls += 1; return 0 })
+    defer { frame_hook_test_free(body) }
+    let hook = frame_hook_test_register(STONE_FRAME_HOOK_SCENE_END, body)
+    defer { assert(stone_native_frame_hook_unregister(hook)) }
+    assert_error_logs(["[STONE] stone_native_frame_hooks_run: scene target 0 is not live"], () => {
+        assert_eq(run_frame_hooks(STONE_FRAME_HOOK_SCENE_END, v(0.0, 0.0), 1.0), 0)
+    })
+    assert_eq(calls, 0)
+}
