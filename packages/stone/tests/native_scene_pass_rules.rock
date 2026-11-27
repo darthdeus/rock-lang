@@ -160,7 +160,7 @@ fn native_scene_restores_clipped_viewport_shader_ubo_and_sampler() {
             return 0
         })
         defer { scene_test_free_callback(callback) }
-        assert(queue_native_scene_pass(callback, scene_test_null()))
+        assert(queue_native_scene_pass(callback, stone_native_renderer_api(STONE_NATIVE_RENDERER_ABI_VERSION)))
         run_scene_passes()
         assert(!requeued)
         assert_eq(SCENE_PASSES_RUN_LAST, 1)
