@@ -37,6 +37,7 @@ struct SceneRenderSaved1 {
     outline_mask_bounds_min_y: float,
     outline_mask_bounds_max_x: float,
     outline_mask_bounds_max_y: float,
+    native_outline: NativeOutlineState,
     frame_uniform_blocks: [OwnedUniformBlock],
     frame_uniform_block_frame: int,
     frame_uniform_block_cursor: int,
@@ -287,6 +288,7 @@ fn scene_render_save1() -> SceneRenderSaved1 {
         outline_mask_bounds_min_y: OUTLINE_MASK_BOUNDS_MIN_Y,
         outline_mask_bounds_max_x: OUTLINE_MASK_BOUNDS_MAX_X,
         outline_mask_bounds_max_y: OUTLINE_MASK_BOUNDS_MAX_Y,
+        native_outline: NATIVE_OUTLINE,
         frame_uniform_blocks: FRAME_UNIFORM_BLOCKS,
         frame_uniform_block_frame: FRAME_UNIFORM_BLOCK_FRAME,
         frame_uniform_block_cursor: FRAME_UNIFORM_BLOCK_CURSOR,
@@ -310,7 +312,7 @@ fn scene_render_restore1(saved1: SceneRenderSaved1) {
     OUTLINE_MASK_BOUNDS_MIN_Y = saved1.outline_mask_bounds_min_y
     OUTLINE_MASK_BOUNDS_MAX_X = saved1.outline_mask_bounds_max_x
     OUTLINE_MASK_BOUNDS_MAX_Y = saved1.outline_mask_bounds_max_y
-    sync_native_outline_state()
+    publish_native_outline_state(saved1.native_outline)
     FRAME_UNIFORM_BLOCKS = saved1.frame_uniform_blocks
     FRAME_UNIFORM_BLOCK_FRAME = saved1.frame_uniform_block_frame
     FRAME_UNIFORM_BLOCK_CURSOR = saved1.frame_uniform_block_cursor

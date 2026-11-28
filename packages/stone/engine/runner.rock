@@ -858,7 +858,7 @@ pub @nomangle fn stone_game_frame_begin(time: float, frame: int) -> FramePlan? {
     run.host_time = time
     FRAME_PRESENT_PENDING = false
     stone_begin_frame()
-    reset_outline_frame_state()
+    clear_native_outline_state()
     allocation_activation_frame_begin_if_enabled()
     game_frame_run_part(0, run)
     run.phase = GAME_PHASE_BEGUN
@@ -1243,7 +1243,7 @@ fn render_commands_begin_frame() {
     WORLD_PREPARE_PASSES.clear()
     SCENE_PASSES.clear()
     FINAL_PASSES.clear()
-    reset_outline_frame_state()
+    clear_native_outline_state()
 
     // Without idle eviction an abandoned key pins its vertex buffer and uniform refs.
     if RENDER_FRAME % BATCH_EVICT_INTERVAL == 0 {
@@ -1373,7 +1373,7 @@ fn frame_core_render_world() {
 
     if SIM_SKIP_SUBMIT {
         NATIVE_SILHOUETTE_DRAWS.clear()
-        reset_outline_frame_state()
+        clear_native_outline_state()
         let _ = stone_native_frame_take_present_target()
         run_scene_passes()
         clear_batches()
