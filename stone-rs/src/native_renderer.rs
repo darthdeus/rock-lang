@@ -1079,6 +1079,10 @@ pub struct StoneNativeRendererApiV1 {
     pub gpu_scope_begin: unsafe extern "C" fn(*const c_char),
     pub gpu_scope_end: extern "C" fn(),
     pub asset_read: extern "C" fn(*const c_char, *mut u8, usize) -> i64,
+    pub frame_set_present_target: extern "C" fn(u64) -> bool,
+    pub frame_outline_mask_bounds:
+        extern "C" fn(*mut c_float, *mut c_float, *mut c_float, *mut c_float) -> bool,
+    pub frame_outline_written: extern "C" fn(*mut bool, *mut bool) -> bool,
 }
 
 // Version 1 only appends: each entry keeps its index, so its offset never moves.
@@ -1170,6 +1174,9 @@ api_v1_layout! {
     gpu_scope_begin = 68,
     gpu_scope_end = 69,
     asset_read = 70,
+    frame_set_present_target = 71,
+    frame_outline_mask_bounds = 72,
+    frame_outline_written = 73,
 }
 
 static STONE_NATIVE_RENDERER_API_V1: StoneNativeRendererApiV1 = StoneNativeRendererApiV1 {
@@ -1253,6 +1260,9 @@ static STONE_NATIVE_RENDERER_API_V1: StoneNativeRendererApiV1 = StoneNativeRende
     gpu_scope_begin: crate::stone_gpu_scope_begin,
     gpu_scope_end: crate::stone_gpu_scope_end,
     asset_read,
+    frame_set_present_target: crate::native_frame::stone_native_frame_set_present_target,
+    frame_outline_mask_bounds: crate::native_frame::stone_native_frame_outline_mask_bounds,
+    frame_outline_written: crate::native_frame::stone_native_frame_outline_written,
 };
 
 /// Return the static function table for `abi_version`, or null if unsupported.

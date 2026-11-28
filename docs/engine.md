@@ -638,6 +638,21 @@ any other flags, or a call outside `WORLD_BEGIN` logs an error and returns
 false, and the frame renders normally. `STONE_WORLD_IMAGE_SKIP_POST = 2` is
 reserved.
 
+`frame_set_present_target(target)` tells Stone to skip its world composition
+(bloom, tonemap, final passes and the outline overlay) for the current frame
+and present `target` as the composite instead; pixel-screen draws (if queued),
+`PRESENTED_SCENE_SAMPLE`, presentation and UI still run. `target` must be a
+live non-integer render target; pass `0` to clear the override and keep Stone's
+default composition. Any queued final passes are dropped with a warning. The
+setting lasts one frame; an invalid target logs an error and returns false.
+
+`frame_outline_written(&ids_written, &mask_written)` reports whether world
+geometry wrote entity IDs and whether silhouette geometry wrote the outline
+mask this frame. `frame_outline_mask_bounds(&min_x, &min_y, &max_x, &max_y)`
+reports the conservative world-space bounds of the outline mask and returns
+true only when valid bounds were recorded. Both return false without a live GL
+context.
+
 ### Native scene passes
 
 Call `queue_native_scene_pass(body: PtrU8, userdata: PtrU8) -> bool` from

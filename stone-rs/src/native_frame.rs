@@ -74,11 +74,32 @@ struct WorldImage {
     frame: u64,
 }
 
+#[derive(Clone, Copy, Default)]
+struct OutlineState {
+    ids_written: bool,
+    mask_written: bool,
+    bounds_valid: bool,
+    min_x: c_float,
+    min_y: c_float,
+    max_x: c_float,
+    max_y: c_float,
+}
+
 thread_local! {
     static HOOKS: RefCell<Vec<Hook>> = const { RefCell::new(Vec::new()) };
     static LAST_HOOK_ID: Cell<u64> = const { Cell::new(0) };
     static DISPATCHING: Cell<Option<(u32, u64, StoneFrameInfo)>> = const { Cell::new(None) };
     static WORLD_IMAGE: Cell<Option<WorldImage>> = const { Cell::new(None) };
+    static PRESENT_TARGET: Cell<Option<WorldImage>> = const { Cell::new(None) };
+    static OUTLINE_STATE: Cell<OutlineState> = const { Cell::new(OutlineState {
+        ids_written: false,
+        mask_written: false,
+        bounds_valid: false,
+        min_x: 0.0,
+        min_y: 0.0,
+        max_x: 0.0,
+        max_y: 0.0,
+    }) };
     // `target` is an imported image handle here, not an engine target.
     static HOST_WORLD_IMAGE: Cell<Option<WorldImage>> = const { Cell::new(None) };
     // The read framebuffer the host image is attached to for its copy, with
@@ -180,6 +201,8 @@ pub(crate) fn release_all() {
     HOOKS.with(|hooks| hooks.borrow_mut().iter_mut().for_each(|h| h.removed = true));
     release_removed();
     WORLD_IMAGE.with(|w| w.set(None));
+    PRESENT_TARGET.with(|p| p.set(None));
+    OUTLINE_STATE.with(|s| s.set(OutlineState::default()));
     HOST_WORLD_IMAGE.with(|w| w.set(None));
     if let Some((_, fbo)) = HOST_IMAGE_FBO.with(Cell::take) {
         with_gl(|gl| unsafe { gl.delete_framebuffer(fbo) });
@@ -408,6 +431,135 @@ pub extern "C" fn stone_frame_set_host_world_image(image: u64, flags: u32) -> bo
             frame,
         }))
     });
+    true
+}
+
+/// Skip Stone's world composition (bloom, tonemap, final passes, outline
+/// overlay) for the current frame and present `target` instead. Pass 0 to
+/// clear the override and keep Stone's default composition. `target` must be a
+/// live non-integer render target. Lasts one frame.
+/// rock-ffi stone-rendering
+#[no_mangle]
+pub extern "C" fn stone_native_frame_set_present_target(target: u64) -> bool {
+    if with_gl(|_| ()).is_none() {
+        return false;
+    }
+    if target == 0 {
+        PRESENT_TARGET.with(|p| p.set(None));
+        return true;
+    }
+    let Some((_, w, h, format, _, _)) = crate::canvas::canvas_info(target) else {
+        ::log::error!(target: "STONE", "stone_native_frame_set_present_target: target {target} is not live");
+        return false;
+    };
+    if format == 3 || w <= 0 || h <= 0 {
+        ::log::error!(
+            target: "STONE",
+            "stone_native_frame_set_present_target: target {target} ({w}x{h}, format {format}) cannot be presented as colour"
+        );
+        return false;
+    }
+    let frame = crate::stream_buffer::frame();
+    PRESENT_TARGET.with(|p| p.set(Some(WorldImage { target, frame })));
+    true
+}
+
+/// Consume the current frame's native present target override, or return 0.
+/// rock-ffi stone-rendering private
+#[no_mangle]
+pub extern "C" fn stone_native_frame_take_present_target() -> u64 {
+    let frame = crate::stream_buffer::frame();
+    let Some(entry) = PRESENT_TARGET.with(Cell::take) else {
+        return 0;
+    };
+    if entry.frame != frame {
+        return 0;
+    }
+    if crate::canvas::canvas_generation(entry.target) == 0 {
+        ::log::error!(
+            target: "STONE",
+            "stone_native_frame_take_present_target: target {} is no longer live",
+            entry.target
+        );
+        return 0;
+    }
+    entry.target
+}
+
+/// Publish the current frame's outline mask bounds and written flags for
+/// native code to read.
+/// rock-ffi stone-rendering private
+#[no_mangle]
+pub extern "C" fn stone_native_set_outline_state(
+    ids_written: bool,
+    mask_written: bool,
+    bounds_valid: bool,
+    min_x: c_float,
+    min_y: c_float,
+    max_x: c_float,
+    max_y: c_float,
+) {
+    OUTLINE_STATE.with(|s| {
+        s.set(OutlineState {
+            ids_written,
+            mask_written,
+            bounds_valid,
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+        })
+    });
+}
+
+/// Read the current frame's conservative world-space outline mask bounds.
+/// Returns true when the bounds are valid and writes them to any non-null out
+/// pointers; returns false and writes 0.0 when no valid bounds were recorded
+/// or when called without a live GL context.
+/// rock-ffi stone-rendering
+#[no_mangle]
+pub extern "C" fn stone_native_frame_outline_mask_bounds(
+    min_x: *mut c_float,
+    min_y: *mut c_float,
+    max_x: *mut c_float,
+    max_y: *mut c_float,
+) -> bool {
+    let state = if with_gl(|_| ()).is_some() {
+        OUTLINE_STATE.with(Cell::get)
+    } else {
+        OutlineState::default()
+    };
+    if !state.bounds_valid {
+        crate::write_out(min_x, 0.0);
+        crate::write_out(min_y, 0.0);
+        crate::write_out(max_x, 0.0);
+        crate::write_out(max_y, 0.0);
+        return false;
+    }
+    crate::write_out(min_x, state.min_x);
+    crate::write_out(min_y, state.min_y);
+    crate::write_out(max_x, state.max_x);
+    crate::write_out(max_y, state.max_y);
+    true
+}
+
+/// Read whether world geometry wrote entity IDs and whether silhouette
+/// geometry wrote the outline mask this frame. Returns false and writes false
+/// when called without a live GL context.
+/// rock-ffi stone-rendering
+#[no_mangle]
+pub extern "C" fn stone_native_frame_outline_written(
+    ids_written: *mut bool,
+    mask_written: *mut bool,
+) -> bool {
+    if with_gl(|_| ()).is_none() {
+        crate::write_out(ids_written, false);
+        crate::write_out(mask_written, false);
+        return false;
+    }
+    let state = OUTLINE_STATE.with(Cell::get);
+    crate::write_out(ids_written, state.ids_written);
+    crate::write_out(mask_written, state.mask_written);
     true
 }
 

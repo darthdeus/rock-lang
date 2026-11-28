@@ -990,6 +990,7 @@ fn second_native_library_renders_multi_attachment_target_restores_state_and_inva
         gl_names_follow_handles_and_imports_stay_native_owned(gl);
         let probe = ProbeLib::load(lib);
         let hook_data = frame_hooks_run_in_order_inside_stages_and_set_the_world_image(gl, &probe);
+        present_target_and_outline_readers_work_through_the_api_table();
 
         assert!(stone_native_renderer_api(999).is_null());
         let api_ptr = stone_native_renderer_api(STONE_NATIVE_RENDERER_ABI_VERSION);
@@ -1660,6 +1661,85 @@ unsafe fn frame_hooks_run_in_order_inside_stages_and_set_the_world_image(
     }
     // `writer` and `same_order` stay registered for teardown to release.
     [writer, early, same_order]
+}
+
+unsafe fn present_target_and_outline_readers_work_through_the_api_table() {
+    let api = api();
+    let rgba = stone_create_canvas(16, 16, STONE_CANVAS_RGBA8, false);
+    let r32i = stone_create_canvas(16, 16, 3, false);
+    assert_ne!(rgba, 0);
+    assert_ne!(r32i, 0);
+
+    // Invalid handles and integer targets are rejected.
+    assert!(!(api.frame_set_present_target)(999_999));
+    assert!(!(api.frame_set_present_target)(r32i));
+    assert_eq!(
+        stone_rs::native_frame::stone_native_frame_take_present_target(),
+        0
+    );
+
+    // A live colour target is accepted and consumed once.
+    assert!((api.frame_set_present_target)(rgba));
+    assert_eq!(
+        stone_rs::native_frame::stone_native_frame_take_present_target(),
+        rgba
+    );
+    assert_eq!(
+        stone_rs::native_frame::stone_native_frame_take_present_target(),
+        0
+    );
+
+    // Passing 0 clears a pending present target.
+    assert!((api.frame_set_present_target)(rgba));
+    assert!((api.frame_set_present_target)(0));
+    assert_eq!(
+        stone_rs::native_frame::stone_native_frame_take_present_target(),
+        0
+    );
+
+    // Advancing the frame invalidates an unconsumed present target.
+    assert!((api.frame_set_present_target)(rgba));
+    stone_rs::stone_reset_frame_stats();
+    assert_eq!(
+        stone_rs::native_frame::stone_native_frame_take_present_target(),
+        0
+    );
+
+    // Outline written flags and mask bounds round-trip through the table.
+    stone_rs::native_frame::stone_native_set_outline_state(false, false, false, 1.0, 2.0, 3.0, 4.0);
+    let (mut ids, mut mask) = (true, true);
+    assert!((api.frame_outline_written)(&mut ids, &mut mask));
+    assert!(!ids && !mask);
+    let (mut x0, mut y0, mut x1, mut y1) = (9.0f32, 9.0, 9.0, 9.0);
+    assert!(!(api.frame_outline_mask_bounds)(
+        &mut x0, &mut y0, &mut x1, &mut y1
+    ));
+    assert_eq!((x0, y0, x1, y1), (0.0, 0.0, 0.0, 0.0));
+
+    stone_rs::native_frame::stone_native_set_outline_state(
+        true, true, true, -4.5, 1.25, 12.0, 8.75,
+    );
+    assert!((api.frame_outline_written)(&mut ids, &mut mask));
+    assert!(ids && mask);
+    assert!((api.frame_outline_mask_bounds)(
+        &mut x0, &mut y0, &mut x1, &mut y1
+    ));
+    assert_eq!((x0, y0, x1, y1), (-4.5, 1.25, 12.0, 8.75));
+    // Null out-pointers are safe.
+    assert!((api.frame_outline_written)(
+        std::ptr::null_mut(),
+        std::ptr::null_mut()
+    ));
+    assert!((api.frame_outline_mask_bounds)(
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut()
+    ));
+
+    stone_rs::native_frame::stone_native_set_outline_state(false, false, false, 0.0, 0.0, 0.0, 0.0);
+    stone_destroy_canvas(rgba);
+    stone_destroy_canvas(r32i);
 }
 
 unsafe fn teardown_invalidates_handles_in_the_next_context(target: u64, shader: u64) {

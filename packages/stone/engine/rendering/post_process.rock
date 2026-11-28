@@ -1,6 +1,7 @@
 // Hoisted so no Pipeline is allocated per frame.
 global BLUR_PIPELINE: Pipeline = pipeline(bloom_blur_shader)
 pub global POST_BLOOM_RUNS: int = 0
+pub global POST_TONEMAP_RUNS: int = 0
 pub global BLOOM_PREFILTER_PIPELINE: Pipeline = pipeline(bloom_prefilter_shader)
 pub global BLOOM_DOWN_PIPELINE: Pipeline = pipeline(bloom_down_shader)
 global BLOOM_UP_PIPELINE: Pipeline = pipeline(bloom_up_shader)
@@ -430,6 +431,7 @@ fn post_processing() {
 
     if ENGINE.use_bloom && !fx_disabled("bloom") {
         POST_BLOOM_RUNS += 1
+        POST_TONEMAP_RUNS += 1
         profile_gpu_begin("post.bloom")
         run_passes(
             bloom_passes_cached(
@@ -439,6 +441,7 @@ fn post_processing() {
             ENGINE.bloom_intensity)
         profile_gpu_end("post.bloom")
     } else {
+        POST_TONEMAP_RUNS += 1
         profile_gpu_begin("post.tonemap")
         submit_tonemap(screen_canvas, bloom_output(), tonemap_out, ENGINE.exposure,
             0.0)
@@ -495,17 +498,37 @@ fn presented_scene_sample_capture() {
     }
 }
 
-fn present_composite(target: GpuTarget = GpuTarget::Window) {
+fn present_composite(target: GpuTarget = GpuTarget::Window, native_present: bool = false) {
     let src = COMPOSITE_CANVAS ?? return
-    let view = RENDER_VIEW ?? return
+    let view = RENDER_VIEW ?? {
+        COMPOSITE_CANVAS = null
+        return
+    }
 
     profile_begin("present_blit")
     let r = view.scene_source_rect
-    let cap = view.scene_capacity
     let vp = view.scene_output_viewport
     // The source rect arrives top-left/Y-down; the pass samples GL bottom-up,
     // so the origin is the margin BELOW the rect.
     let origin = v(r.x, (view.scene_size.y as float) - r.y - r.h)
+    let extent = v(r.w, r.h)
+    let tex_size = v(view.scene_capacity.x as float, view.scene_capacity.y as float)
+    let active_size = v(view.scene_size.x as float, view.scene_size.y as float)
+    if native_present {
+        let cap_w = stone_canvas_capacity_w(src.handle.0)
+        let cap_h = stone_canvas_capacity_h(src.handle.0)
+        let act_w = stone_canvas_active_w(src.handle.0)
+        let act_h = stone_canvas_active_h(src.handle.0)
+        if cap_w > 0 && cap_h > 0 { tex_size = v(cap_w as float, cap_h as float) }
+        let quad_uv = canvas_active_uv(src)
+        active_size = v(tex_size.x * quad_uv.x, tex_size.y * quad_uv.y)
+        if act_w > 0 && act_h > 0 {
+            let sx = (act_w as float) / (view.scene_size.x as float)
+            let sy = (act_h as float) / (view.scene_size.y as float)
+            origin = v(r.x * sx, ((view.scene_size.y as float) - r.y - r.h) * sy)
+            extent = v(r.w * sx, r.h * sy)
+        }
+    }
 
     let pass = present_composite_command(target, src,
         GpuRect { x: vp.x, y: vp.y, w: vp.w, h: vp.h })
@@ -513,10 +536,10 @@ fn present_composite(target: GpuTarget = GpuTarget::Window) {
     gpu_draw_uniform_payload(draw, PRESENT_PIPELINE.shader_name, PresentU {
         encode_srgb: ENGINE.linear_world,
         src_origin: origin,
-        src_extent: v(r.w, r.h),
-        tex_size: v(cap.x as float, cap.y as float),
-        active_size: v(view.scene_size.x as float, view.scene_size.y as float),
-        dst_scale: v((vp.w as float) / r.w, (vp.h as float) / r.h),
+        src_extent: extent,
+        tex_size: tex_size,
+        active_size: active_size,
+        dst_scale: v((vp.w as float) / extent.x, (vp.h as float) / extent.y),
     })
 
     let submitted = submit_pass(pass)

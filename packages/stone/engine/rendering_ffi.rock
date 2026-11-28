@@ -134,8 +134,12 @@ pub extern(ffi, "stone") fn stone_native_frame_active() -> bool
 pub extern(ffi, "stone") fn stone_native_frame_hook_register(point: int, order: int, run: PtrU8, release: PtrU8, userdata: PtrU8, name: string) -> int
 pub extern(ffi, "stone") fn stone_native_frame_hook_unregister(hook: int) -> bool
 extern(ffi, "stone") fn stone_native_frame_hooks_run(point: int, scene_target: int, scene_partner: int, offset_x: float, offset_y: float, scale: float) -> int
+pub extern(ffi, "stone") fn stone_native_frame_outline_mask_bounds(min_x: Ptr<float>, min_y: Ptr<float>, max_x: Ptr<float>, max_y: Ptr<float>) -> bool
+pub extern(ffi, "stone") fn stone_native_frame_outline_written(ids_written: Ptr<bool>, mask_written: Ptr<bool>) -> bool
+pub extern(ffi, "stone") fn stone_native_frame_set_present_target(target: int) -> bool
 pub extern(ffi, "stone") fn stone_native_frame_set_world_image(target: int, flags: int) -> bool
 pub extern(ffi, "stone") fn stone_native_frame_size(width: Ptr<int>, height: Ptr<int>) -> bool
+extern(ffi, "stone") fn stone_native_frame_take_present_target() -> int
 pub extern(ffi, "stone") fn stone_native_frame_target() -> int
 pub extern(ffi, "stone") fn stone_native_gl_get_proc_address(name: string) -> PtrU8
 pub extern(ffi, "stone") fn stone_native_handle_generation(kind: int, handle: int) -> int
@@ -143,6 +147,7 @@ pub extern(ffi, "stone") fn stone_native_handle_state(class: string, handle: int
 pub extern(ffi, "stone") fn stone_native_handle_valid(kind: int, handle: int) -> bool
 pub extern(ffi, "stone") fn stone_native_mesh_info(handle: int, vert_count: Ptr<int>, attr_count: Ptr<int>, inst_count: Ptr<int>) -> int
 pub extern(ffi, "stone") fn stone_native_renderer_api(abi_version: int) -> PtrU8
+extern(ffi, "stone") fn stone_native_set_outline_state(ids_written: bool, mask_written: bool, bounds_valid: bool, min_x: float, min_y: float, max_x: float, max_y: float)
 pub extern(ffi, "stone") fn stone_native_shader_info(handle: int, block_count: Ptr<int>, texture_slot_count: Ptr<int>) -> int
 pub extern(ffi, "stone") fn stone_native_stage_begin() -> int
 pub extern(ffi, "stone") fn stone_native_stage_end(scope: int) -> int
