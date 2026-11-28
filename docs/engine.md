@@ -613,14 +613,19 @@ once and `release` runs when the dispatch ends. `stone_teardown` runs every
   `ui.raster_scale` makes it smaller than the window (it is cleared first and
   upscaled over the window with nearest filtering afterwards), otherwise the
   window. The viewport is that target's full extent.
+- `STONE_FRAME_HOOK_UI_END = 5`: after the guest UI, ImGui and the
+  post-ImGui overlay flush, before capture readback and present. This runs
+  once per submitted frame in both guest- and host-driven frames. It draws
+  directly into the window output at drawable size, including the headless
+  output framebuffer when one is active.
 
 Each hook runs inside its own stage and a GPU scope named `name`, with the
 scene target bound unless its point says otherwise. `StoneFrameInfo` gives
 the frame number, context generation, the bound target and its partner with
 their sizes and generation, the GL framebuffer bound, and the camera script
 batches use (`stone_set_camera(offset, scale)`). The bound target is the
-scene target, or at `UI_BEGIN` the UI raster canvas, or 0 for the window,
-with no partner. A hook returns 0 for no writes, 1 after writing the target
+scene target, the UI raster canvas at scaled `UI_BEGIN`, or 0 when a UI
+hook draws into the window output. The UI targets have no partner. A hook returns 0 for no writes, 1 after writing the target
 it drew into, or a negative value, which is logged. Hooks do not run when
 submission is suppressed.
 

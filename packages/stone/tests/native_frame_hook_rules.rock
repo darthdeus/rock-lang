@@ -307,6 +307,68 @@ fn a_ui_begin_hook_layers_the_same_way_through_the_ui_raster_canvas() {
     profiler_test_process("frame_hook_ui_begin_raster_runner_case", 0)
 }
 
+global FRAME_HOOK_TEST_UPPER_UI: bool = false
+
+@late_draw
+fn frame_hook_test_panel() {
+    if FRAME_HOOK_TEST_UPPER_UI {
+        rect(screen, v(0.0, 0.0), v(16.0, 16.0), Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 })
+    }
+}
+
+@post_imgui_draw
+fn frame_hook_test_overlay() {
+    if FRAME_HOOK_TEST_UPPER_UI {
+        rect(screen, v(0.0, 0.0), v(8.0, 16.0), Color { r: 0.0, g: 1.0, b: 0.0, a: 1.0 })
+    }
+}
+
+@nomangle
+fn frame_hook_ui_end_runner_case(_which: int) {
+    let (window, config) = native_runner_test_boot("frame hook ui end")
+    defer { let _ = stone_teardown() }
+    let render = RENDER_CONFIG
+    render.ui.raster_scale = 0.5
+    RENDER_CONFIG = render
+    frame_core_resolve_view()
+    assert(UI_RASTER_CANVAS != null)
+    FRAME_HOOK_TEST_UPPER_UI = true
+
+    let probe = window_probe_new(0, 0, 16, 16)
+    let calls = 0
+    let viewport = ""
+    let bound = -1
+    let ui_end = frame_hook_test_info_callback(() => {
+        calls += 1
+        viewport = frame_hook_test_viewport()
+        bound = frame_hook_test_draw_framebuffer()
+        frame_hook_test_mark(2, 7)
+        frame_hook_test_mark(12, 7)
+        return 1
+    })
+    defer { frame_hook_test_free(ui_end) }
+    let hook = frame_hook_test_register(STONE_FRAME_HOOK_UI_END, ui_end)
+    defer { assert(stone_native_frame_hook_unregister(hook)) }
+    for frame in 0..2 {
+        frame_core_render_frame(window, config)
+        assert_eq(calls, frame + 1)
+        assert_eq(viewport, "0,0,16,16")
+        if env_var("STONE_HEADLESS") != null { assert(bound > 0) }
+        assert_eq(frame_hook_test_info(), "{bound},16,16,16,16")
+        let output = probe.borrow().unwrap()
+        assert_eq(output.captures, frame + 1)
+        assert_eq((output.byte(2, 8, 0), output.byte(12, 8, 0)), (255, 255),
+            "upper UI covers both the overlay and the scaled guest panel before readback")
+        assert_eq((output.byte(3, 8, 1), output.byte(3, 8, 2)), (255, 0))
+        assert_eq((output.byte(13, 8, 1), output.byte(13, 8, 2)), (0, 255))
+    }
+}
+
+@test
+fn a_ui_end_hook_draws_above_the_scaled_guest_ui_and_overlay_before_readback() {
+    profiler_test_process("frame_hook_ui_end_runner_case", 0)
+}
+
 inline(lua) fn native_api_set_present_target(target: int) -> bool = """
     local api = ffi.cast("const StoneNativeRendererApiV1 *", stone.stone_native_renderer_api(1))
     assert(api ~= nil and api.abi_version == 1 and api.struct_size >= ffi.sizeof("StoneNativeRendererApiV1"))

@@ -1663,6 +1663,15 @@ fn frame_core_render_frame(window: StoneWindow, config: GameConfig) {
 
     // Post-ImGui UI draws above all panels; the backend restores FBO 0.
     frame_core_render_overlay()
+    if !SIM_SKIP_SUBMIT {
+        if let view = RENDER_VIEW {
+            let offset = camera_offset_in(view)
+            stone_native_frame_hooks_run(STONE_FRAME_HOOK_UI_END, 0, 0,
+                offset.x, offset.y, view.world_to_scene_scale)
+        } else {
+            stone_native_frame_hooks_run(STONE_FRAME_HOOK_UI_END, 0, 0, 0.0, 0.0, 1.0)
+        }
+    }
 
     if ENGINE.screenshot_capture_imgui {
         update_screenshot_system()
