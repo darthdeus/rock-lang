@@ -337,31 +337,67 @@ global OUTLINE_MASK_BOUNDS_MIN_Y: float = 0.0
 global OUTLINE_MASK_BOUNDS_MAX_X: float = 0.0
 global OUTLINE_MASK_BOUNDS_MAX_Y: float = 0.0
 
-fn reset_outline_mask_bounds() {
-    OUTLINE_MASK_BOUNDS_VALID = false
-    OUTLINE_MASK_BOUNDS_MIN_X = 0.0
-    OUTLINE_MASK_BOUNDS_MIN_Y = 0.0
-    OUTLINE_MASK_BOUNDS_MAX_X = 0.0
-    OUTLINE_MASK_BOUNDS_MAX_Y = 0.0
+// What native readers (frame_outline_written, frame_outline_mask_bounds) see.
+// It is cleared at frame begin and at the start of a world flush, and published
+// when the flush finishes. The Rock globals above keep the last rendered frame
+// until the next flush, because update-stage code reads them after frame begin.
+struct NativeOutlineState {
+    ids_written: bool,
+    mask_written: bool,
+    bounds_valid: bool,
+    min_x: float,
+    min_y: float,
+    max_x: float,
+    max_y: float,
+}
+
+global NATIVE_OUTLINE: NativeOutlineState = NativeOutlineState {
+    ids_written: false, mask_written: false, bounds_valid: false,
+    min_x: 0.0, min_y: 0.0, max_x: 0.0, max_y: 0.0,
+}
+
+fn publish_native_outline_state(state: NativeOutlineState) {
+    NATIVE_OUTLINE = state
+    stone_native_set_outline_state(state.ids_written, state.mask_written, state.bounds_valid,
+        state.min_x, state.min_y, state.max_x, state.max_y)
+}
+
+fn cleared_native_outline_state() -> NativeOutlineState {
+    return NativeOutlineState {
+        ids_written: false, mask_written: false, bounds_valid: false,
+        min_x: 0.0, min_y: 0.0, max_x: 0.0, max_y: 0.0,
+    }
+}
+
+fn clear_native_outline_state() {
+    publish_native_outline_state(cleared_native_outline_state())
+}
+
+// A new GPU host starts with cleared native state (teardown clears the Rust
+// copy), so the mirror must not carry the previous host's values into a scope.
+fn forget_native_outline_state() {
+    NATIVE_OUTLINE = cleared_native_outline_state()
 }
 
 fn sync_native_outline_state() {
-    stone_native_set_outline_state(
-        outline_ids_written,
-        outline_mask_written,
-        OUTLINE_MASK_BOUNDS_VALID,
-        OUTLINE_MASK_BOUNDS_MIN_X,
-        OUTLINE_MASK_BOUNDS_MIN_Y,
-        OUTLINE_MASK_BOUNDS_MAX_X,
-        OUTLINE_MASK_BOUNDS_MAX_Y,
-    )
-}
-
-fn reset_outline_frame_state() {
-    outline_ids_written = false
-    outline_mask_written = false
-    reset_outline_mask_bounds()
-    sync_native_outline_state()
+    // Bounds are stamped only when the mask is written; stale bounds stay in
+    // the Rock globals as before but are not published.
+    if !(outline_mask_written && OUTLINE_MASK_BOUNDS_VALID) {
+        publish_native_outline_state(NativeOutlineState {
+            ids_written: outline_ids_written, mask_written: outline_mask_written, bounds_valid: false,
+            min_x: 0.0, min_y: 0.0, max_x: 0.0, max_y: 0.0,
+        })
+        return
+    }
+    publish_native_outline_state(NativeOutlineState {
+        ids_written: outline_ids_written,
+        mask_written: true,
+        bounds_valid: true,
+        min_x: OUTLINE_MASK_BOUNDS_MIN_X,
+        min_y: OUTLINE_MASK_BOUNDS_MIN_Y,
+        max_x: OUTLINE_MASK_BOUNDS_MAX_X,
+        max_y: OUTLINE_MASK_BOUNDS_MAX_Y,
+    })
 }
 
 fn stamp_outline_mask_bounds(pool: RenderBatchPool) {

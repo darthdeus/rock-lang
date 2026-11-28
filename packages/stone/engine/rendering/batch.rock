@@ -1814,7 +1814,9 @@ pub fn render_batches(after_scene: bool = false) {
 
     if !after_scene {
         // Reset before the view bail-out: a frame that renders nothing wrote no ids.
-        reset_outline_frame_state()
+        outline_ids_written = false
+        outline_mask_written = false
+        clear_native_outline_state()
         WORLD_IMAGE_FRAME = false
     }
 

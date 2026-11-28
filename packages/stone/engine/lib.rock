@@ -144,6 +144,7 @@ pub @nomangle fn setup_stone() {
     ffi_cdef_once("_stone_ffi_defined", embed_string("engine/runtime_ffi.h"))
     ffi_cdef_once("_stone_rendering_ffi_defined", embed_string("engine/rendering_ffi.h"))
     stone_native_load()
+    forget_native_outline_state()
 }
 
 pub inline(lua) fn stone_lua_counter_install() = """

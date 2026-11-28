@@ -542,6 +542,16 @@ fn native_outline_reset_on_frame_begin_runner_case(_which: int) {
     assert_eq(x1, 0.0)
     assert_eq(y1, 0.0)
     let _ = stone_game_frame_update()
+    // Update-stage Rock code (game logic, sims) still reads the last rendered frame.
+    assert(outline_ids_written && outline_mask_written && OUTLINE_MASK_BOUNDS_VALID,
+        "the Rock outline state survives into the next frame's update")
+    // A scene scope that never flushes leaves native readers cleared.
+    let scope_view = resolve_frame_view(v(16, 16), iv(16, 16), Camera2D {}, RENDER_CONFIG).unwrap()
+    with_scene_render_scope(scope_view, () => {})
+    let (_, ids_scope, mask_scope) = native_api_outline_written()
+    let (valid_scope, _, _, _, _) = native_api_outline_mask_bounds()
+    assert(!ids_scope && !mask_scope && !valid_scope,
+        "a scene scope restores the cleared native outline state")
     let _ = stone_game_frame_draw()
 }
 
@@ -586,5 +596,8 @@ fn native_outline_readers_expose_mask_bounds_and_written_flags() {
         let (ok3, ids3, mask3) = native_api_outline_written()
         let (valid3, _, _, _, _) = native_api_outline_mask_bounds()
         assert(ok3 && !ids3 && !mask3 && !valid3)
+        // Update-stage Rock readers still see the last rendered frame.
+        assert(outline_ids_written && outline_mask_written && OUTLINE_MASK_BOUNDS_VALID,
+            "frame begin keeps the Rock outline state of the last rendered frame")
     })
 }
