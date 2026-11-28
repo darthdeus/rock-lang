@@ -858,6 +858,7 @@ pub @nomangle fn stone_game_frame_begin(time: float, frame: int) -> FramePlan? {
     run.host_time = time
     FRAME_PRESENT_PENDING = false
     stone_begin_frame()
+    reset_outline_frame_state()
     allocation_activation_frame_begin_if_enabled()
     game_frame_run_part(0, run)
     run.phase = GAME_PHASE_BEGUN
@@ -1242,6 +1243,7 @@ fn render_commands_begin_frame() {
     WORLD_PREPARE_PASSES.clear()
     SCENE_PASSES.clear()
     FINAL_PASSES.clear()
+    reset_outline_frame_state()
 
     // Without idle eviction an abandoned key pins its vertex buffer and uniform refs.
     if RENDER_FRAME % BATCH_EVICT_INTERVAL == 0 {
@@ -1371,6 +1373,8 @@ fn frame_core_render_world() {
 
     if SIM_SKIP_SUBMIT {
         NATIVE_SILHOUETTE_DRAWS.clear()
+        reset_outline_frame_state()
+        let _ = stone_native_frame_take_present_target()
         run_scene_passes()
         clear_batches()
         draw_list_clear(pixel_screen)
@@ -1400,20 +1404,37 @@ fn frame_core_render_world() {
 
     profile_gpu_begin("post_processing")
     present_letterbox_begin()
-    post_processing()
-    if !fx_disabled("outline") {
-        gpu_scope_begin("outline")
-        apply_outline_overlay()
-        gpu_scope_end()
+    let native_present = canvas_from_native_handle(stone_native_frame_take_present_target())
+    let is_native_present = false
+    if let present_target = native_present {
+        if FINAL_PASSES.len() > 0 {
+            log_once("RENDER", "final passes queued on a frame skipping world composition are not run")
+            FINAL_PASSES.clear()
+        }
+        if RENDER_VIEW != null {
+            COMPOSITE_CANVAS = present_target
+            is_native_present = true
+        }
+    } else {
+        post_processing()
+        if !fx_disabled("outline") {
+            gpu_scope_begin("outline")
+            apply_outline_overlay()
+            gpu_scope_end()
+        }
     }
     if !fx_disabled("ui") {
         gpu_scope_begin("pixel_screen")
         flush_pixel_screen()
         gpu_scope_end()
     }
-    presented_scene_sample_capture()
+    if RENDER_VIEW != null {
+        presented_scene_sample_capture()
+    } else {
+        PRESENTED_SCENE_SAMPLE = null
+    }
     gpu_scope_begin("present_composite")
-    present_composite()
+    present_composite(native_present: is_native_present)
     gpu_scope_end()
     present_letterbox_end()
     profile_gpu_end("post_processing")

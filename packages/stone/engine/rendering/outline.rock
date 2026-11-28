@@ -337,6 +337,33 @@ global OUTLINE_MASK_BOUNDS_MIN_Y: float = 0.0
 global OUTLINE_MASK_BOUNDS_MAX_X: float = 0.0
 global OUTLINE_MASK_BOUNDS_MAX_Y: float = 0.0
 
+fn reset_outline_mask_bounds() {
+    OUTLINE_MASK_BOUNDS_VALID = false
+    OUTLINE_MASK_BOUNDS_MIN_X = 0.0
+    OUTLINE_MASK_BOUNDS_MIN_Y = 0.0
+    OUTLINE_MASK_BOUNDS_MAX_X = 0.0
+    OUTLINE_MASK_BOUNDS_MAX_Y = 0.0
+}
+
+fn sync_native_outline_state() {
+    stone_native_set_outline_state(
+        outline_ids_written,
+        outline_mask_written,
+        OUTLINE_MASK_BOUNDS_VALID,
+        OUTLINE_MASK_BOUNDS_MIN_X,
+        OUTLINE_MASK_BOUNDS_MIN_Y,
+        OUTLINE_MASK_BOUNDS_MAX_X,
+        OUTLINE_MASK_BOUNDS_MAX_Y,
+    )
+}
+
+fn reset_outline_frame_state() {
+    outline_ids_written = false
+    outline_mask_written = false
+    reset_outline_mask_bounds()
+    sync_native_outline_state()
+}
+
 fn stamp_outline_mask_bounds(pool: RenderBatchPool) {
     let min_x = 1000000000.0
     let min_y = 1000000000.0

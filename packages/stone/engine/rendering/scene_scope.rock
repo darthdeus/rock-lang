@@ -310,6 +310,7 @@ fn scene_render_restore1(saved1: SceneRenderSaved1) {
     OUTLINE_MASK_BOUNDS_MIN_Y = saved1.outline_mask_bounds_min_y
     OUTLINE_MASK_BOUNDS_MAX_X = saved1.outline_mask_bounds_max_x
     OUTLINE_MASK_BOUNDS_MAX_Y = saved1.outline_mask_bounds_max_y
+    sync_native_outline_state()
     FRAME_UNIFORM_BLOCKS = saved1.frame_uniform_blocks
     FRAME_UNIFORM_BLOCK_FRAME = saved1.frame_uniform_block_frame
     FRAME_UNIFORM_BLOCK_CURSOR = saved1.frame_uniform_block_cursor
