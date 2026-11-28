@@ -13,9 +13,11 @@ use crate::with_gl;
 pub const STONE_FRAME_HOOK_WORLD_BEGIN: u32 = 1;
 pub const STONE_FRAME_HOOK_WORLD_BATCHES: u32 = 2;
 pub const STONE_FRAME_HOOK_SCENE_END: u32 = 3;
-/// Runs after present, just before script UI batches draw, into the target
-/// they draw into rather than the scene target.
+/// Runs after world composition, just before script UI batches draw, into
+/// the target they draw into rather than the scene target.
 pub const STONE_FRAME_HOOK_UI_BEGIN: u32 = 4;
+/// Runs on the window output after the overlay flush, before readback and swap.
+pub const STONE_FRAME_HOOK_UI_END: u32 = 5;
 
 pub const STONE_WORLD_IMAGE_KEEP_POST: u32 = 1;
 /// Reserved: the world image is the composite and post processing is skipped.
@@ -34,9 +36,9 @@ pub struct StoneFrameInfo {
     pub frame: u64,
     pub context_generation: u64,
     /// The scene target the world renders into this frame, and its partner.
-    /// At `UI_BEGIN` the target the hook draws into instead: the UI raster
-    /// canvas, or 0 for the window, with no partner. The sizes below describe
-    /// the same target.
+    /// At `UI_BEGIN` this is the UI raster canvas or 0 for the window. At
+    /// `UI_END` it is 0 for the window, with no partner. The sizes below
+    /// describe the target the hook draws into.
     pub scene_target: u64,
     pub scene_partner: u64,
     pub scene_generation: u64,
@@ -126,7 +128,7 @@ pub extern "C" fn stone_native_frame_hook_register(
     if with_gl(|_| ()).is_none() {
         return 0;
     }
-    if !(STONE_FRAME_HOOK_WORLD_BEGIN..=STONE_FRAME_HOOK_UI_BEGIN).contains(&point) {
+    if !(STONE_FRAME_HOOK_WORLD_BEGIN..=STONE_FRAME_HOOK_UI_END).contains(&point) {
         ::log::error!(target: "STONE", "stone_native_frame_hook_register: unknown point {point}");
         return 0;
     }
@@ -215,7 +217,8 @@ pub(crate) fn release_all() {
 /// scene target is bound while hooks run, except at `UI_BEGIN`, which keeps
 /// the target the caller bound for script UI (the UI raster canvas on a
 /// scaled-UI frame, otherwise the window), so hook output is scaled with the
-/// script UI. The binding before the call is restored after. Returns the
+/// script UI. `UI_END` binds the window output at drawable size. The
+/// binding before the call is restored after. Returns the
 /// OR of the hooks' `STONE_STAGE_*` flags plus `STONE_FRAME_HOOKS_WROTE` when
 /// a hook wrote the hook target and, at `WORLD_BEGIN`,
 /// `STONE_FRAME_HOOKS_WORLD_IMAGE` when a hook supplied the world image
@@ -261,31 +264,40 @@ pub extern "C" fn stone_native_frame_hooks_run(
     let Some(context_generation) = with_gl(|_| crate::handles::context_generation()) else {
         return 0;
     };
-    let Some((_, active_w, active_h, _, _, _)) = crate::canvas::canvas_info(scene_target) else {
-        ::log::error!(target: "STONE", "stone_native_frame_hooks_run: scene target {scene_target} is not live");
-        return 0;
+    let (active_w, active_h) = if point == STONE_FRAME_HOOK_UI_END {
+        (0, 0)
+    } else {
+        let Some((_, w, h, _, _, _)) = crate::canvas::canvas_info(scene_target) else {
+            ::log::error!(target: "STONE", "stone_native_frame_hooks_run: scene target {scene_target} is not live");
+            return 0;
+        };
+        (w, h)
     };
     due.sort_unstable();
 
     // Each hook's own stage restores GL state; the dispatch only binds the
     // hook's target and gives the caller's target back.
     let previous_target = crate::canvas::current_canvas_handle();
-    let hook_target = if point == STONE_FRAME_HOOK_UI_BEGIN {
-        previous_target
-    } else {
-        scene_target
+    let hook_target = match point {
+        STONE_FRAME_HOOK_UI_END => 0,
+        STONE_FRAME_HOOK_UI_BEGIN => previous_target,
+        _ => scene_target,
     };
+    let hook_partner = if point != STONE_FRAME_HOOK_UI_END && hook_target == scene_target {
+        scene_partner
+    } else {
+        0
+    };
+    if point == STONE_FRAME_HOOK_UI_END {
+        crate::canvas::stone_set_canvas(0);
+    }
     let frame = crate::stream_buffer::frame();
     let info = frame_info(
         point,
         frame,
         context_generation,
         hook_target,
-        if hook_target == scene_target {
-            scene_partner
-        } else {
-            0
-        },
+        hook_partner,
         (offset_x, offset_y, scale),
     );
     if point == STONE_FRAME_HOOK_WORLD_BEGIN {
@@ -295,7 +307,7 @@ pub extern "C" fn stone_native_frame_hooks_run(
     let host_image_copied =
         host_image.is_some_and(|image| copy_host_image(image, scene_target, active_w, active_h));
 
-    if previous_target != hook_target {
+    if point != STONE_FRAME_HOOK_UI_END && previous_target != hook_target {
         crate::canvas::stone_set_canvas(hook_target);
     }
     let mut flags = 0;
